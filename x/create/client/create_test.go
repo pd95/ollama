@@ -339,6 +339,66 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 	}
 }
 
+func TestGetParserNameQwen35(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["Qwen3_5ForCausalLM"],
+		"model_type": "qwen3"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := getParserName(dir); got != "qwen3.5" {
+		t.Fatalf("getParserName() = %q, want %q", got, "qwen3.5")
+	}
+}
+
+func TestGetRendererNameQwen35(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["Qwen3_5ForConditionalGeneration"],
+		"model_type": "qwen3"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := getRendererName(dir); got != "qwen3.5" {
+		t.Fatalf("getRendererName() = %q, want %q", got, "qwen3.5")
+	}
+}
+
+func TestGetParserNameQwen3Generic(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["Qwen3ForCausalLM"],
+		"model_type": "qwen3"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := getParserName(dir); got != "qwen3" {
+		t.Fatalf("getParserName() = %q, want %q", got, "qwen3")
+	}
+}
+
+func TestGetRendererNameQwen3Generic(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["Qwen3ForCausalLM"],
+		"model_type": "qwen3"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := getRendererName(dir); got != "qwen3-coder" {
+		t.Fatalf("getRendererName() = %q, want %q", got, "qwen3-coder")
+	}
+}
+
 func TestQuantizeSupported(t *testing.T) {
 	// This just verifies the function exists and returns a boolean
 	// The actual value depends on build tags (mlx vs non-mlx)
@@ -428,4 +488,80 @@ func TestNewManifestWriter_PopulatesFileTypeFromQuantize(t *testing.T) {
 	if cfg.FileType != "mxfp8" {
 		t.Fatalf("FileType = %q, want %q", cfg.FileType, "mxfp8")
 	}
+}
+
+func TestMergedModelfileConfigQwen35Defaults(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["Qwen3_5ForCausalLM"],
+		"model_type": "qwen3"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := mergedModelfileConfig(dir, nil)
+	if got == nil {
+		t.Fatal("mergedModelfileConfig() = nil, want defaults")
+	}
+
+	want := map[string]any{
+		"min_p":            float32(0),
+		"presence_penalty": float32(1.5),
+		"repeat_penalty":   float32(1),
+		"temperature":      float32(1),
+		"top_k":            int32(20),
+		"top_p":            float32(0.95),
+	}
+	if !mapsEqual(got.Parameters, want) {
+		t.Fatalf("merged params = %#v, want %#v", got.Parameters, want)
+	}
+}
+
+func TestMergedModelfileConfigQwen35OverridesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["Qwen3_5ForConditionalGeneration"],
+		"model_type": "qwen3"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mf := &ModelfileConfig{
+		Template: "{{ .Prompt }}",
+		Parameters: map[string]any{
+			"temperature": float32(0.2),
+			"top_k":       int32(7),
+		},
+	}
+
+	got := mergedModelfileConfig(dir, mf)
+	if got == nil {
+		t.Fatal("mergedModelfileConfig() = nil")
+	}
+	if got.Template != mf.Template {
+		t.Fatalf("Template = %q, want %q", got.Template, mf.Template)
+	}
+	if got.Parameters["temperature"] != float32(0.2) {
+		t.Fatalf("temperature = %#v, want %v", got.Parameters["temperature"], float32(0.2))
+	}
+	if got.Parameters["top_k"] != int32(7) {
+		t.Fatalf("top_k = %#v, want %v", got.Parameters["top_k"], int32(7))
+	}
+	if got.Parameters["top_p"] != float32(0.95) {
+		t.Fatalf("top_p = %#v, want %v", got.Parameters["top_p"], float32(0.95))
+	}
+}
+
+func mapsEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }

@@ -25,6 +25,20 @@ import (
 	"github.com/ollama/ollama/x/imagegen/safetensors"
 )
 
+type sourceConfigMeta struct {
+	Architectures []string `json:"architectures"`
+	ModelType     string   `json:"model_type"`
+}
+
+var qwen35DefaultParameters = map[string]any{
+	"top_k":            int32(20),
+	"top_p":            float32(0.95),
+	"min_p":            float32(0),
+	"presence_penalty": float32(1.5),
+	"repeat_penalty":   float32(1),
+	"temperature":      float32(1),
+}
+
 // MinOllamaVersion is the minimum Ollama version required for safetensors models.
 const MinOllamaVersion = "0.19.0"
 
@@ -198,6 +212,75 @@ func inferSafetensorsCapabilities(modelDir string) []string {
 	return capabilities
 }
 
+func inferredDefaultParameters(modelDir string) map[string]any {
+	cfg, ok := readSourceConfigMeta(modelDir)
+	if !ok {
+		return nil
+	}
+
+	if isQwen35Config(cfg) {
+		out := make(map[string]any, len(qwen35DefaultParameters))
+		for k, v := range qwen35DefaultParameters {
+			out[k] = v
+		}
+		return out
+	}
+
+	return nil
+}
+
+func mergedModelfileConfig(modelDir string, mf *ModelfileConfig) *ModelfileConfig {
+	defaults := inferredDefaultParameters(modelDir)
+	if len(defaults) == 0 {
+		return mf
+	}
+
+	var merged ModelfileConfig
+	if mf != nil {
+		merged = *mf
+	}
+
+	mergedParams := make(map[string]any, len(defaults))
+	for k, v := range defaults {
+		mergedParams[k] = v
+	}
+	if mf != nil {
+		for k, v := range mf.Parameters {
+			mergedParams[k] = v
+		}
+	}
+	merged.Parameters = mergedParams
+
+	return &merged
+}
+
+func readSourceConfigMeta(modelDir string) (sourceConfigMeta, bool) {
+	configPath := filepath.Join(modelDir, "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return sourceConfigMeta{}, false
+	}
+
+	var cfg sourceConfigMeta
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return sourceConfigMeta{}, false
+	}
+
+	return cfg, true
+}
+
+func isQwen35Config(cfg sourceConfigMeta) bool {
+	for _, arch := range cfg.Architectures {
+		archLower := strings.ToLower(arch)
+		if strings.Contains(archLower, "qwen3_5") || strings.Contains(archLower, "qwen3next") {
+			return true
+		}
+	}
+
+	typeLower := strings.ToLower(cfg.ModelType)
+	return strings.Contains(typeLower, "qwen3_5") || strings.Contains(typeLower, "qwen3next")
+}
+
 // newLayerCreator returns a LayerCreator callback for creating config/JSON layers.
 func newLayerCreator() create.LayerCreator {
 	return func(r io.Reader, mediaType, name string) (create.LayerInfo, error) {
@@ -346,13 +429,15 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 		}
 
 		// Create config blob with version requirement
+		effectiveModelfile := mergedModelfileConfig(opts.ModelDir, opts.Modelfile)
+
 		configData := model.ConfigV2{
 			ModelFormat:  "safetensors",
 			FileType:     strings.ToLower(strings.TrimSpace(opts.Quantize)),
 			Capabilities: caps,
 			Requires:     MinOllamaVersion,
-			Parser:       resolveParserName(opts.Modelfile, parserName),
-			Renderer:     resolveRendererName(opts.Modelfile, rendererName),
+			Parser:       resolveParserName(effectiveModelfile, parserName),
+			Renderer:     resolveRendererName(effectiveModelfile, rendererName),
 		}
 		configJSON, err := json.Marshal(configData)
 		if err != nil {
@@ -377,8 +462,8 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 		}
 
 		// Add Modelfile layers if present
-		if opts.Modelfile != nil {
-			modelfileLayers, err := createModelfileLayers(opts.Modelfile)
+		if effectiveModelfile != nil {
+			modelfileLayers, err := createModelfileLayers(effectiveModelfile)
 			if err != nil {
 				return err
 			}
@@ -452,17 +537,8 @@ func createModelfileLayers(mf *ModelfileConfig) ([]manifest.Layer, error) {
 // supportsThinking checks if the model supports thinking mode based on its architecture.
 // This reads the config.json from the model directory and checks the architectures field.
 func supportsThinking(modelDir string) bool {
-	configPath := filepath.Join(modelDir, "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return false
-	}
-
-	var cfg struct {
-		Architectures []string `json:"architectures"`
-		ModelType     string   `json:"model_type"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	cfg, ok := readSourceConfigMeta(modelDir)
+	if !ok {
 		return false
 	}
 
@@ -499,17 +575,8 @@ func supportsThinking(modelDir string) bool {
 // supportsVision checks if the model supports image input based on its architecture.
 // Qwen3.5 multimodal checkpoints are published as ConditionalGeneration architectures.
 func supportsVision(modelDir string) bool {
-	configPath := filepath.Join(modelDir, "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return false
-	}
-
-	var cfg struct {
-		Architectures []string `json:"architectures"`
-		ModelType     string   `json:"model_type"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	cfg, ok := readSourceConfigMeta(modelDir)
+	if !ok {
 		return false
 	}
 
@@ -527,18 +594,13 @@ func supportsVision(modelDir string) bool {
 // getParserName returns the parser name for a model based on its architecture.
 // This reads the config.json from the model directory and determines the appropriate parser.
 func getParserName(modelDir string) string {
-	configPath := filepath.Join(modelDir, "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
+	cfg, ok := readSourceConfigMeta(modelDir)
+	if !ok {
 		return ""
 	}
 
-	var cfg struct {
-		Architectures []string `json:"architectures"`
-		ModelType     string   `json:"model_type"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return ""
+	if isQwen35Config(cfg) {
+		return "qwen3.5"
 	}
 
 	// Check architectures for known parsers
@@ -575,18 +637,13 @@ func getParserName(modelDir string) string {
 // getRendererName returns the renderer name for a model based on its architecture.
 // This reads the config.json from the model directory and determines the appropriate renderer.
 func getRendererName(modelDir string) string {
-	configPath := filepath.Join(modelDir, "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
+	cfg, ok := readSourceConfigMeta(modelDir)
+	if !ok {
 		return ""
 	}
 
-	var cfg struct {
-		Architectures []string `json:"architectures"`
-		ModelType     string   `json:"model_type"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return ""
+	if isQwen35Config(cfg) {
+		return "qwen3.5"
 	}
 
 	// Check architectures for known renderers
