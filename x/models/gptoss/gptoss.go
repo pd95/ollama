@@ -36,6 +36,9 @@ type Config struct {
 	NumExperts            int32   `json:"num_experts"`
 	LocalExperts          int32   `json:"num_local_experts"`
 	ExpertsPerToken       int32   `json:"experts_per_token"`
+	RopeScaling           struct {
+		Factor float32 `json:"factor"`
+	} `json:"rope_scaling"`
 
 	// Quantization metadata.
 	QuantGroupSize int                               `json:"-"`
@@ -126,6 +129,9 @@ func parseConfig(configData []byte) (Config, error) {
 	}
 	if cfg.RopeTheta == 0 {
 		cfg.RopeTheta = 10000
+	}
+	if cfg.RopeScalingFactor == 0 {
+		cfg.RopeScalingFactor = cfg.RopeScaling.Factor
 	}
 	if cfg.RopeScalingFactor == 0 {
 		cfg.RopeScalingFactor = 1
