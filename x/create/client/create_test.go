@@ -323,6 +323,14 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 			}`,
 			want: []string{"completion"},
 		},
+		{
+			name: "gptoss text model",
+			configJSON: `{
+				"architectures": ["GptOssForCausalLM"],
+				"model_type": "gptoss"
+			}`,
+			want: []string{"completion", "tools", "thinking"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -336,6 +344,36 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 				t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGetParserNameGptOss(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gptoss"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := getParserName(dir); got != "harmony" {
+		t.Fatalf("getParserName() = %q, want %q", got, "harmony")
+	}
+}
+
+func TestInferredModelFamilyGptOss(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gptoss"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := inferredModelFamily(dir); got != "gptoss" {
+		t.Fatalf("inferredModelFamily() = %q, want %q", got, "gptoss")
 	}
 }
 
@@ -427,5 +465,110 @@ func TestNewManifestWriter_PopulatesFileTypeFromQuantize(t *testing.T) {
 
 	if cfg.FileType != "mxfp8" {
 		t.Fatalf("FileType = %q, want %q", cfg.FileType, "mxfp8")
+	}
+}
+
+func TestMergedModelfileConfigGptOssDefaults(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gptoss"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := mergedModelfileConfig(dir, nil)
+	if got == nil {
+		t.Fatal("mergedModelfileConfig() = nil, want defaults")
+	}
+	if got.Template != gptossDefaultTemplate {
+		t.Fatalf("Template mismatch")
+	}
+	if got.Parameters["temperature"] != float32(1) {
+		t.Fatalf("temperature = %#v, want %v", got.Parameters["temperature"], float32(1))
+	}
+}
+
+func TestMergedModelfileConfigGptOssOverridesTemplate(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gptoss"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mf := &ModelfileConfig{
+		Template: "{{ .Prompt }}",
+		Parameters: map[string]any{
+			"temperature": float32(0.2),
+		},
+	}
+
+	got := mergedModelfileConfig(dir, mf)
+	if got == nil {
+		t.Fatal("mergedModelfileConfig() = nil")
+	}
+	if got.Template != mf.Template {
+		t.Fatalf("Template = %q, want %q", got.Template, mf.Template)
+	}
+	if got.Parameters["temperature"] != float32(0.2) {
+		t.Fatalf("temperature = %#v, want %v", got.Parameters["temperature"], float32(0.2))
+	}
+}
+
+func TestNewManifestWriter_GptOssSetsModelFamily(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", t.TempDir())
+
+	modelDir := t.TempDir()
+	configJSON := `{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gptoss"
+	}`
+	if err := os.WriteFile(filepath.Join(modelDir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CreateOptions{
+		ModelName: "test-gptoss",
+		ModelDir:  modelDir,
+	}
+
+	writer := newManifestWriter(opts, []string{"completion", "tools", "thinking"}, "harmony", "")
+	if err := writer(opts.ModelName, create.LayerInfo{}, nil); err != nil {
+		t.Fatalf("newManifestWriter() error = %v", err)
+	}
+
+	name := model.ParseName(opts.ModelName)
+	mf, err := manifest.ParseNamedManifest(name)
+	if err != nil {
+		t.Fatalf("ParseNamedManifest() error = %v", err)
+	}
+
+	configPath, err := manifest.BlobsPath(mf.Config.Digest)
+	if err != nil {
+		t.Fatalf("BlobsPath() error = %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	var cfg model.ConfigV2
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	if cfg.ModelFamily != "gptoss" {
+		t.Fatalf("ModelFamily = %q, want %q", cfg.ModelFamily, "gptoss")
+	}
+	if !slices.Equal(cfg.ModelFamilies, []string{"gptoss"}) {
+		t.Fatalf("ModelFamilies = %v, want %v", cfg.ModelFamilies, []string{"gptoss"})
+	}
+	if cfg.Parser != "harmony" {
+		t.Fatalf("Parser = %q, want %q", cfg.Parser, "harmony")
 	}
 }
