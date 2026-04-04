@@ -455,19 +455,29 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 
 func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *mlx.Array {
 	x = requireRuntimeShape("attention input", x, B, L, cfg.HiddenSize)
+	mlxDebugMeta("attention_enter", x)
 	mlxDebugTensor("qkv_input", x)
 	q := a.QProj.Forward(x)
+	mlxDebugMeta("q_proj", q)
 	k := a.KProj.Forward(x)
+	mlxDebugMeta("k_proj", k)
 	v := a.VProj.Forward(x)
+	mlxDebugMeta("v_proj", v)
 
 	q = mlx.Reshape(q, B, L, cfg.NumAttentionHeads, cfg.HeadDim)
+	mlxDebugMeta("q_reshape", q)
 	q = mlx.Transpose(q, 0, 2, 1, 3)
+	mlxDebugMeta("q_transpose", q)
 
 	k = mlx.Reshape(k, B, L, cfg.NumKeyValueHeads, cfg.HeadDim)
+	mlxDebugMeta("k_reshape", k)
 	k = mlx.Transpose(k, 0, 2, 1, 3)
+	mlxDebugMeta("k_transpose", k)
 
 	v = mlx.Reshape(v, B, L, cfg.NumKeyValueHeads, cfg.HeadDim)
+	mlxDebugMeta("v_reshape", v)
 	v = mlx.Transpose(v, 0, 2, 1, 3)
+	mlxDebugMeta("v_transpose", v)
 	mlxDebugTensor("q_pre_rope", q)
 	mlxDebugTensor("k_pre_rope", k)
 	mlxDebugTensor("v_pre_rope", v)

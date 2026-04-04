@@ -217,3 +217,15 @@ func mlxDebugTokenIDs(tokens *mlx.Array) {
 	}
 	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=input_tokens layer=-1 semantic=%s ids=%v last_id=%d\n", mlxDebugSemantic(), ids, lastID)
 }
+
+func mlxDebugMeta(stage string, t *mlx.Array) {
+	if !mlxDebugActive() || mlxDebugLayer.Load() != 0 {
+		return
+	}
+	if t == nil {
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=%s layer=0 semantic=%s valid=false\n", stage, mlxDebugSemantic())
+		return
+	}
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=%s layer=0 semantic=%s valid=%t dtype=%s shape=%v\n",
+		stage, mlxDebugSemantic(), t.Valid(), t.DType(), t.Dims())
+}
