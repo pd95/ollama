@@ -478,9 +478,9 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config
 	mlxDebugMeta("v_reshape", v)
 	v = mlx.Transpose(v, 0, 2, 1, 3)
 	mlxDebugMeta("v_transpose", v)
-	mlxDebugTensor("q_pre_rope", q)
-	mlxDebugTensor("k_pre_rope", k)
-	mlxDebugTensor("v_pre_rope", v)
+	mlxDebugMeta("q_pre_rope", q)
+	mlxDebugMeta("k_pre_rope", k)
+	mlxDebugMeta("v_pre_rope", v)
 
 	offset := 0
 	if c != nil {
