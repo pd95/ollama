@@ -1,4 +1,4 @@
-// Package gptoss provides an experimental GPT-OSS MLX model stub.
+// Package gptoss provides an experimental GPT-OSS MLX model implementation.
 package gptoss
 
 import (
@@ -10,6 +10,7 @@ import (
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
+	"github.com/ollama/ollama/x/models/nn"
 	"github.com/ollama/ollama/x/tokenizer"
 )
 
@@ -17,7 +18,7 @@ func init() {
 	base.Register("GptOssForCausalLM", NewModel)
 }
 
-// Config holds the GPT-OSS fields needed for model construction.
+// Config holds the GPT-OSS fields needed for minimal MLX inference.
 type Config struct {
 	HiddenSize            int32   `json:"hidden_size"`
 	IntermediateSize      int32   `json:"intermediate_size"`
@@ -30,13 +31,67 @@ type Config struct {
 	MaxPositionEmbeddings int32   `json:"max_position_embeddings"`
 	InitialContextLength  int32   `json:"initial_context_length"`
 	RopeScalingFactor     float32 `json:"rope_scaling_factor"`
+	RopeTheta             float32 `json:"rope_theta"`
+	SlidingWindow         int32   `json:"sliding_window"`
+	NumExperts            int32   `json:"num_experts"`
+	LocalExperts          int32   `json:"num_local_experts"`
+	ExpertsPerToken       int32   `json:"experts_per_token"`
+
+	// Quantization metadata.
+	QuantGroupSize int                               `json:"-"`
+	QuantBits      int                               `json:"-"`
+	QuantMode      string                            `json:"-"`
+	TensorQuant    map[string]*model.TensorQuantInfo `json:"-"`
+
+	// Computed fields.
+	Scale          float32 `json:"-"`
+	EffectiveRopeN int32   `json:"-"`
+	ExpertCount    int32   `json:"-"`
 }
 
-// Model is the minimal GPT-OSS MLX model skeleton for architecture dispatch.
 type Model struct {
-	*Config
+	EmbedTokens nn.EmbeddingLayer
+	Layers      []*Layer
+	Norm        *nn.RMSNorm
+	LMHead      nn.LinearLayer
 
 	tok *tokenizer.Tokenizer
+	*Config
+}
+
+type Layer struct {
+	AttentionNorm *nn.RMSNorm
+	Attention     *Attention
+	MLPNorm       *nn.RMSNorm
+	MoE           *MoE
+}
+
+type Attention struct {
+	QProj nn.LinearLayer
+	KProj nn.LinearLayer
+	VProj nn.LinearLayer
+	OProj nn.LinearLayer
+	Sinks *mlx.Array
+}
+
+type MoE struct {
+	Gate      nn.LinearLayer
+	SwitchMLP *SwitchMLP
+}
+
+type SwitchMLP struct {
+	GateWeight *mlx.Array
+	UpWeight   *mlx.Array
+	DownWeight *mlx.Array
+}
+
+type stackedExpertWeights struct {
+	Weight    *mlx.Array
+	Scales    *mlx.Array
+	Biases    *mlx.Array
+	Bits      int
+	GroupSize int
+	Mode      string
 }
 
 func parseConfig(configData []byte) (Config, error) {
@@ -63,14 +118,31 @@ func parseConfig(configData []byte) (Config, error) {
 		}
 		cfg.HeadDim = cfg.HiddenSize / cfg.NumAttentionHeads
 	}
+	if cfg.NumAttentionHeads%cfg.NumKeyValueHeads != 0 {
+		return Config{}, fmt.Errorf("num_attention_heads (%d) must be divisible by num_key_value_heads (%d)", cfg.NumAttentionHeads, cfg.NumKeyValueHeads)
+	}
 	if cfg.RMSNormEps == 0 {
 		cfg.RMSNormEps = 1e-5
 	}
+	if cfg.RopeTheta == 0 {
+		cfg.RopeTheta = 10000
+	}
+	if cfg.ExpertsPerToken <= 0 {
+		cfg.ExpertsPerToken = 1
+	}
+	cfg.ExpertCount = cfg.NumExperts
+	if cfg.ExpertCount <= 0 {
+		cfg.ExpertCount = cfg.LocalExperts
+	}
+	if cfg.ExpertCount <= 0 {
+		return Config{}, fmt.Errorf("invalid expert count: num_experts=%d local_experts=%d", cfg.NumExperts, cfg.LocalExperts)
+	}
 
+	cfg.Scale = float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
+	cfg.EffectiveRopeN = cfg.HeadDim
 	return cfg, nil
 }
 
-// NewModel constructs the minimal GPT-OSS model skeleton.
 func NewModel(root *model.Root) (base.Model, error) {
 	configData, err := root.Manifest.ReadConfig("config.json")
 	if err != nil {
@@ -82,14 +154,22 @@ func NewModel(root *model.Root) (base.Model, error) {
 		return nil, err
 	}
 
+	if qt := root.QuantType(); qt != "" {
+		cfg.QuantGroupSize, cfg.QuantBits, cfg.QuantMode = model.QuantizationParams(qt)
+		if gs := root.GroupSize(); gs > 0 {
+			cfg.QuantGroupSize = gs
+		}
+	} else {
+		cfg.QuantGroupSize, cfg.QuantBits, cfg.QuantMode = model.QuantizationParams("")
+	}
+	cfg.TensorQuant = root.AllTensorQuant()
+
 	tokData, err := root.Manifest.ReadConfig("tokenizer.json")
 	if err != nil {
 		return nil, fmt.Errorf("load tokenizer config: %w", err)
 	}
 
-	tokConfig := &tokenizer.TokenizerConfig{
-		ConfigJSON: configData,
-	}
+	tokConfig := &tokenizer.TokenizerConfig{ConfigJSON: configData}
 	if genConfigData, err := root.Manifest.ReadConfig("generation_config.json"); err == nil {
 		tokConfig.GenerationConfigJSON = genConfigData
 	}
@@ -103,28 +183,260 @@ func NewModel(root *model.Root) (base.Model, error) {
 	}
 
 	return &Model{
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
 		Config: &cfg,
 		tok:    tok,
 	}, nil
 }
 
-// LoadWeights is intentionally minimal for the construction-only milestone.
-func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
+func tensorAny(tensors map[string]*mlx.Array, keys ...string) (*mlx.Array, string) {
+	for _, key := range keys {
+		if t := tensors[key]; t != nil {
+			return t, key
+		}
+	}
+	return nil, ""
+}
+
+func stackAndClone(parts []*mlx.Array) *mlx.Array {
+	if len(parts) == 0 {
+		return nil
+	}
+	stacked := mlx.Stack(parts, 0)
+	cloned := stacked.Clone()
+	mlx.Eval(cloned)
+	return cloned
+}
+
+func transposeExpertWeightForGatherMM(w *mlx.Array) *mlx.Array {
+	if w == nil || !w.Valid() || w.NumDims() != 3 {
+		return w
+	}
+	t := mlx.Transpose(w, 0, 2, 1)
+	cloned := t.Clone()
+	mlx.Eval(cloned)
+	return cloned
+}
+
+func loadStackedProjection(tensors map[string]*mlx.Array, cfg *Config, bases ...string) *stackedExpertWeights {
+	for _, base := range bases {
+		w, key := tensorAny(tensors, base+".weight", base)
+		if w == nil {
+			continue
+		}
+
+		scales := tensors[key+"_scale"]
+		if scales == nil {
+			return &stackedExpertWeights{Weight: w}
+		}
+
+		qbiases := tensors[key+"_qbias"]
+		groupSize, bits, mode := model.ResolveLinearQuantParams(
+			cfg.QuantGroupSize,
+			cfg.QuantBits,
+			cfg.QuantMode,
+			cfg.TensorQuant,
+			key,
+			w,
+			scales,
+		)
+
+		return &stackedExpertWeights{
+			Weight:    mlx.Dequantize(w, scales, qbiases, groupSize, bits, mode),
+			Bits:      bits,
+			GroupSize: groupSize,
+			Mode:      mode,
+		}
+	}
+
 	return nil
 }
 
-// Forward is not implemented in milestone 1.
-func (m *Model) Forward(inputs *mlx.Array, caches []cache.Cache) *mlx.Array {
-	panic("gptoss MLX Forward is not implemented yet")
+func LoadWeightsSummaryMissing(layer int32, gate, up, down *stackedExpertWeights) error {
+	return fmt.Errorf("layer %d: missing moe expert weights (gate=%v up=%v down=%v)", layer, gate != nil, up != nil, down != nil)
 }
 
-// Unembed is not implemented in milestone 1.
+func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
+	cfg := m.Config
+	linears := model.NewLinearFactory(tensors, cfg.QuantGroupSize, cfg.QuantBits, cfg.QuantMode, cfg.TensorQuant)
+
+	m.EmbedTokens = model.MakeEmbeddingLayer(tensors, "token_embd", cfg.QuantGroupSize, cfg.QuantBits, cfg.QuantMode, cfg.TensorQuant)
+	if m.EmbedTokens == nil {
+		return fmt.Errorf("missing embedding weight: token_embd.weight")
+	}
+
+	normWeight := tensors["output_norm.weight"]
+	if normWeight == nil {
+		return fmt.Errorf("missing final norm weight: output_norm.weight")
+	}
+	m.Norm = nn.NewRMSNorm(normWeight, cfg.RMSNormEps)
+
+	m.LMHead = linears.Make("output")
+	if m.LMHead == nil {
+		m.LMHead = m.EmbedTokens.AsLinear()
+	}
+
+	for i := int32(0); i < cfg.NumHiddenLayers; i++ {
+		layerPrefix := fmt.Sprintf("blk.%d", i)
+		layer := &Layer{
+			Attention: &Attention{},
+			MoE:       &MoE{SwitchMLP: &SwitchMLP{}},
+		}
+
+		if w := tensors[layerPrefix+".attn_norm.weight"]; w != nil {
+			layer.AttentionNorm = nn.NewRMSNorm(w, cfg.RMSNormEps)
+		}
+		if w := tensors[layerPrefix+".ffn_norm.weight"]; w != nil {
+			layer.MLPNorm = nn.NewRMSNorm(w, cfg.RMSNormEps)
+		}
+		if layer.AttentionNorm == nil || layer.MLPNorm == nil {
+			return fmt.Errorf("layer %d: missing layer norms", i)
+		}
+
+		layer.Attention.QProj = linears.Make(layerPrefix + ".attn_q")
+		layer.Attention.KProj = linears.Make(layerPrefix + ".attn_k")
+		layer.Attention.VProj = linears.Make(layerPrefix + ".attn_v")
+		layer.Attention.OProj = linears.Make(layerPrefix + ".attn_out")
+		layer.Attention.Sinks = tensors[layerPrefix+".attn_sinks"]
+		if layer.Attention.QProj == nil || layer.Attention.KProj == nil || layer.Attention.VProj == nil || layer.Attention.OProj == nil {
+			return fmt.Errorf("layer %d: missing attention projections", i)
+		}
+
+		layer.MoE.Gate = linears.Make(layerPrefix + ".ffn_gate_inp")
+		if layer.MoE.Gate == nil {
+			return fmt.Errorf("layer %d: missing moe gate", i)
+		}
+
+		gateW := loadStackedProjection(tensors, cfg, layerPrefix+".ffn_gate_exps")
+		upW := loadStackedProjection(tensors, cfg, layerPrefix+".ffn_up_exps")
+		downW := loadStackedProjection(tensors, cfg, layerPrefix+".ffn_down_exps")
+		if gateW == nil || upW == nil || downW == nil {
+			return LoadWeightsSummaryMissing(i, gateW, upW, downW)
+		}
+
+		layer.MoE.SwitchMLP.GateWeight = transposeExpertWeightForGatherMM(gateW.Weight)
+		layer.MoE.SwitchMLP.UpWeight = transposeExpertWeightForGatherMM(upW.Weight)
+		layer.MoE.SwitchMLP.DownWeight = transposeExpertWeightForGatherMM(downW.Weight)
+		if layer.MoE.SwitchMLP.GateWeight == nil || layer.MoE.SwitchMLP.UpWeight == nil || layer.MoE.SwitchMLP.DownWeight == nil {
+			return fmt.Errorf("layer %d: invalid stacked moe weights", i)
+		}
+
+		m.Layers[i] = layer
+	}
+
+	return nil
+}
+
+func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *mlx.Array {
+	q := a.QProj.Forward(x)
+	k := a.KProj.Forward(x)
+	v := a.VProj.Forward(x)
+
+	q = mlx.Reshape(q, B, L, cfg.NumAttentionHeads, cfg.HeadDim)
+	q = mlx.Transpose(q, 0, 2, 1, 3)
+
+	k = mlx.Reshape(k, B, L, cfg.NumKeyValueHeads, cfg.HeadDim)
+	k = mlx.Transpose(k, 0, 2, 1, 3)
+
+	v = mlx.Reshape(v, B, L, cfg.NumKeyValueHeads, cfg.HeadDim)
+	v = mlx.Transpose(v, 0, 2, 1, 3)
+
+	offset := 0
+	if c != nil {
+		offset = c.Offset()
+	}
+	q = mlx.RoPEWithBase(q, int(cfg.EffectiveRopeN), false, cfg.RopeTheta, 1.0, offset)
+	k = mlx.RoPEWithBase(k, int(cfg.EffectiveRopeN), false, cfg.RopeTheta, 1.0, offset)
+
+	if c != nil {
+		k, v = c.Update(k, v)
+	}
+
+	out := mlx.ScaledDotProductAttentionCausalWithSinks(q, k, v, a.Sinks, cfg.Scale, L > 1)
+	out = mlx.Reshape(mlx.Transpose(out, 0, 2, 1, 3), B, L, cfg.NumAttentionHeads*cfg.HeadDim)
+	return a.OProj.Forward(out)
+}
+
+func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config) *mlx.Array {
+	dims := x.Dims()
+	B, L := int32(dims[0]), int32(dims[1])
+	topK := cfg.ExpertsPerToken
+
+	xExpanded := mlx.ExpandDims(mlx.ExpandDims(x, -2), -2)
+	xFlat := mlx.Reshape(xExpanded, B*L, 1, 1, cfg.HiddenSize)
+	idxFlat := mlx.Reshape(indices, B*L, topK)
+
+	doSort := B*L >= 64
+	var invOrder *mlx.Array
+	n := B * L * topK
+
+	if doSort {
+		idxAll := mlx.Flatten(idxFlat)
+		order := mlx.Argsort(idxAll, 0)
+		invOrder = mlx.Argsort(order, 0)
+		xFlat = mlx.ExpandDims(mlx.Take(mlx.Squeeze(xFlat, 1), mlx.FloorDivideScalar(order, topK), 0), 1)
+		idxFlat = mlx.Reshape(mlx.Take(idxAll, order, 0), n, 1)
+	}
+
+	gate := mlx.GatherMM(xFlat, s.GateWeight, nil, idxFlat, doSort)
+	up := mlx.GatherMM(xFlat, s.UpWeight, nil, idxFlat, doSort)
+	hidden := mlx.Mul(mlx.SiLU(gate), up)
+	down := mlx.GatherMM(hidden, s.DownWeight, nil, idxFlat, doSort)
+
+	if doSort {
+		down = mlx.Reshape(mlx.Take(mlx.Squeeze(mlx.Squeeze(down, 2), 1), invOrder, 0), B*L, topK, cfg.HiddenSize)
+	} else {
+		down = mlx.Squeeze(down, 2)
+	}
+
+	return mlx.Reshape(down, B, L, topK, cfg.HiddenSize)
+}
+
+func (m *MoE) Forward(x *mlx.Array, cfg *Config) *mlx.Array {
+	dims := x.Dims()
+	B, L := int32(dims[0]), int32(dims[1])
+
+	probs := mlx.SoftmaxAxis(m.Gate.Forward(x), -1, true)
+	neg := mlx.Neg(probs)
+	inds := mlx.Argpartition(neg, int(cfg.ExpertsPerToken)-1, -1)
+	shape := inds.Dims()
+	inds = mlx.SliceStartStop(inds, []int32{0, 0, 0}, []int32{int32(shape[0]), int32(shape[1]), cfg.ExpertsPerToken})
+
+	scores := mlx.TakeAlongAxis(probs, inds, -1)
+	expertOut := m.SwitchMLP.Forward(x, inds, cfg)
+	y := mlx.Sum(mlx.Mul(expertOut, mlx.ExpandDims(scores, -1)), 2, false)
+	return mlx.Reshape(y, B, L, cfg.HiddenSize)
+}
+
+func (l *Layer) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *mlx.Array {
+	attn := l.Attention.Forward(l.AttentionNorm.Forward(x, cfg.RMSNormEps), c, B, L, cfg)
+	h := mlx.Add(x, attn)
+	ffn := l.MoE.Forward(l.MLPNorm.Forward(h, cfg.RMSNormEps), cfg)
+	return mlx.Add(h, ffn)
+}
+
+func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
+	dims := tokens.Dims()
+	B, L := int32(dims[0]), int32(dims[1])
+
+	h := m.EmbedTokens.Forward(tokens)
+	for i, layer := range m.Layers {
+		var c cache.Cache
+		if caches != nil && i < len(caches) {
+			c = caches[i]
+		}
+		h = layer.Forward(h, c, B, L, m.Config)
+	}
+
+	return m.Norm.Forward(h, m.RMSNormEps)
+}
+
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
-	panic("gptoss MLX Unembed is not implemented yet")
+	return m.LMHead.Forward(x)
 }
 
 func (m *Model) NumLayers() int {
-	return int(m.NumHiddenLayers)
+	return len(m.Layers)
 }
 
 func (m *Model) Tokenizer() *tokenizer.Tokenizer {
