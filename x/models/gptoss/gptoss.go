@@ -574,6 +574,18 @@ func (m *Model) Tokenizer() *tokenizer.Tokenizer {
 	return m.tok
 }
 
+func (m *Model) NewCaches() []cache.Cache {
+	caches := make([]cache.Cache, len(m.Layers))
+	for i := range caches {
+		if m.SlidingWindow > 0 && i%2 == 0 {
+			caches[i] = cache.NewRotatingKVCache(int(m.SlidingWindow))
+		} else {
+			caches[i] = cache.NewKVCache()
+		}
+	}
+	return caches
+}
+
 func (m *Model) MaxContextLength() int {
 	if m.MaxPositionEmbeddings > 0 {
 		return int(m.MaxPositionEmbeddings)
