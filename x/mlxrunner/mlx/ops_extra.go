@@ -125,6 +125,25 @@ func Where(condition, a, b *Array) *Array {
 	return out
 }
 
+func ClipScalar(a *Array, minVal, maxVal float32, hasMin, hasMax bool) *Array {
+	var minArr, maxArr C.mlx_array
+	if hasMin {
+		minArr = scalarWithDtype(minVal, a)
+	}
+	if hasMax {
+		maxArr = scalarWithDtype(maxVal, a)
+	}
+	out := New("CLIP")
+	C.mlx_clip(&out.ctx, a.ctx, minArr, maxArr, DefaultStream().ctx)
+	if hasMin {
+		C.mlx_array_free(minArr)
+	}
+	if hasMax {
+		C.mlx_array_free(maxArr)
+	}
+	return out
+}
+
 func Conv1d(x, weight *Array, bias *Array, stride, padding, dilation, groups int32) *Array {
 	out := New("CONV1D")
 	C.mlx_conv1d(

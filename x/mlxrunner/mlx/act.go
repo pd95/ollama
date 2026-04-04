@@ -19,3 +19,10 @@ func GELUApprox(t *Array) *Array {
 func SILU(t *Array) *Array {
 	return t.Multiply(t.Sigmoid()).AsType(t.DType())
 }
+
+func SwiGLUAlphaLimit(gate, up *Array, alpha, limit float32) *Array {
+	gateClipped := ClipScalar(gate, 0, limit, false, true)
+	upClipped := ClipScalar(up, -limit, limit, true, true)
+	outGate := gateClipped.Multiply(MulScalar(gateClipped, alpha).Sigmoid())
+	return outGate.Multiply(AddScalar(upClipped, 1.0))
+}
