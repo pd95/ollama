@@ -640,6 +640,13 @@ func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config, trace
 	down := mlx.GatherMM(hidden, mlx.Transpose(s.DownWeight, 0, 2, 1), nil, idxFlat, doSort)
 	if traceMoE {
 		logMoEStats("moe_down_raw", down)
+		downAltNoTranspose := mlx.GatherMM(hidden, s.DownWeight, nil, idxFlat, doSort)
+		logMoEStats("moe_down_raw_alt_no_transpose", downAltNoTranspose)
+		if !doSort {
+			idxFlatRev := mlx.Reshape(mlx.Take(mlx.Flatten(idxFlat), mlx.FromValues([]int32{3, 2, 1, 0}, 4), 0), B*L, topK)
+			downAltReversed := mlx.GatherMM(hidden, mlx.Transpose(s.DownWeight, 0, 2, 1), nil, idxFlatRev, doSort)
+			logMoEStats("moe_down_raw_alt_rev_idx", downAltReversed)
+		}
 	}
 
 	if doSort {
