@@ -224,3 +224,10 @@ func mlxDebugMeta(stage string, t *mlx.Array) {
 	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=%s layer=0 semantic=%s valid=%t dtype=%s shape=%v\n",
 		stage, mlxDebugSemantic(), t.Valid(), t.DType(), t.Dims())
 }
+
+func mlxDebugEvent(stage string, layer int) {
+	if !mlxDebugActive() {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=%s layer=%d semantic=%s\n", stage, layer, mlxDebugSemantic())
+}

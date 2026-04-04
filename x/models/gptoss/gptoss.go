@@ -586,7 +586,11 @@ func (l *Layer) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *m
 	h = requireRuntimeShape("layer post-attention state", h, B, L, cfg.HiddenSize)
 	ffn := l.MoE.Forward(l.MLPNorm.Forward(h, cfg.RMSNormEps), cfg)
 	ffn = requireRuntimeShape("layer ffn residual", ffn, B, L, cfg.HiddenSize)
-	return mlx.Add(h, ffn)
+	out := mlx.Add(h, ffn)
+	if mlxDebugLayer.Load() == 0 {
+		mlxDebugMeta("layer0_out", out)
+	}
+	return out
 }
 
 func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
@@ -599,14 +603,21 @@ func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
 	h = requireRuntimeShape("token embedding", h, B, L, m.HiddenSize)
 	mlxDebugTensor("embedding", h)
 	for i, layer := range m.Layers {
+		if i <= 1 {
+			mlxDebugEvent("layer_enter", i)
+		}
 		mlxDebugSetLayer(i)
 		var c cache.Cache
 		if caches != nil && i < len(caches) {
 			c = caches[i]
 		}
 		h = layer.Forward(h, c, B, L, m.Config)
+		if i <= 1 {
+			mlxDebugEvent("layer_exit", i)
+		}
 	}
 
+	mlxDebugEvent("final_norm_before", -1)
 	return requireRuntimeShape("final norm", m.Norm.Forward(h, m.RMSNormEps), B, L, m.HiddenSize)
 }
 
