@@ -250,6 +250,16 @@ func sliceAxis1AndMaybeSqueeze(a *mlx.Array, idx int32) *mlx.Array {
 	return mlx.Squeeze(s, 1)
 }
 
+func transposeExpertWeightForGatherMM(w *mlx.Array) *mlx.Array {
+	if w == nil || !w.Valid() || w.NumDims() != 3 {
+		return w
+	}
+	t := mlx.Transpose(w, 0, 2, 1)
+	cloned := t.Clone()
+	mlx.Eval(cloned)
+	return cloned
+}
+
 func dequantizeStackedExperts(weight, scales, qbiases *mlx.Array, groupSize, bits int, mode string) *mlx.Array {
 	if weight == nil || !weight.Valid() || scales == nil || !scales.Valid() {
 		return nil
@@ -383,7 +393,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 
 		layer.MoE.SwitchMLP.GateWeight = gateW.Weight
 		layer.MoE.SwitchMLP.UpWeight = upW.Weight
-		layer.MoE.SwitchMLP.DownWeight = downW.Weight
+		layer.MoE.SwitchMLP.DownWeight = transposeExpertWeightForGatherMM(downW.Weight)
 		if layer.MoE.SwitchMLP.GateWeight == nil || layer.MoE.SwitchMLP.UpWeight == nil || layer.MoE.SwitchMLP.DownWeight == nil {
 			return fmt.Errorf("layer %d: invalid moe expert weights", i)
 		}
@@ -730,7 +740,7 @@ func downReference(hidden, downWeight, idxFlat *mlx.Array, topK, hiddenSize int3
 		if h == nil || w == nil {
 			return nil
 		}
-		parts = append(parts, h.Matmul(mlx.Transpose(w, 1, 0)))
+		parts = append(parts, h.Matmul(w))
 	}
 	if len(parts) == 0 {
 		return nil
