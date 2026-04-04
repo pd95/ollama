@@ -145,12 +145,17 @@ func (r *Runner) TextGenerationPipeline(request Request) error {
 	}
 
 	step := func(token *mlx.Array) (*mlx.Array, *mlx.Array) {
+		slog.Info("gptoss mlx step begin")
 		fwd := r.Model.Forward(token.ExpandDims(0), caches)
+		slog.Info("gptoss mlx step forward done")
 		logits := r.Model.Unembed(fwd)
+		slog.Info("gptoss mlx step unembed done")
 		logits = logits.Slice(mlx.Slice(), mlx.Slice(logits.Dim(1)-1), mlx.Slice()).Squeeze(1)
 
 		logprobs := logits.Subtract(logits.Logsumexp(true))
+		slog.Info("gptoss mlx step logprobs done")
 		sample := request.Sampler.Sample(logprobs)
+		slog.Info("gptoss mlx step sample done")
 
 		mlx.Pin(sample, logprobs)
 		mlx.Sweep()
