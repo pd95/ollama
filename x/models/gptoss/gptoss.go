@@ -224,16 +224,6 @@ func sliceAxis0AndMaybeSqueeze(a *mlx.Array, idx int32) *mlx.Array {
 	return s
 }
 
-func transposeExpertWeightForGatherMM(w *mlx.Array) *mlx.Array {
-	if w == nil || !w.Valid() || w.NumDims() != 3 {
-		return w
-	}
-	t := mlx.Transpose(w, 0, 2, 1)
-	cloned := t.Clone()
-	mlx.Eval(cloned)
-	return cloned
-}
-
 func dequantizeStackedExperts(weight, scales, qbiases *mlx.Array, groupSize, bits int, mode string) *mlx.Array {
 	if weight == nil || !weight.Valid() || scales == nil || !scales.Valid() {
 		return nil
@@ -348,9 +338,9 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			return fmt.Errorf("layer %d: missing moe expert weights", i)
 		}
 
-		layer.MoE.SwitchMLP.GateWeight = transposeExpertWeightForGatherMM(gateW.Weight)
-		layer.MoE.SwitchMLP.UpWeight = transposeExpertWeightForGatherMM(upW.Weight)
-		layer.MoE.SwitchMLP.DownWeight = transposeExpertWeightForGatherMM(downW.Weight)
+		layer.MoE.SwitchMLP.GateWeight = gateW.Weight
+		layer.MoE.SwitchMLP.UpWeight = upW.Weight
+		layer.MoE.SwitchMLP.DownWeight = downW.Weight
 		if layer.MoE.SwitchMLP.GateWeight == nil || layer.MoE.SwitchMLP.UpWeight == nil || layer.MoE.SwitchMLP.DownWeight == nil {
 			return fmt.Errorf("layer %d: invalid moe expert weights", i)
 		}
@@ -474,10 +464,10 @@ func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config) *mlx.
 		idxFlat = mlx.Reshape(mlx.Take(idxAll, order, 0), n, 1)
 	}
 
-	gate := mlx.GatherMM(xFlat, s.GateWeight, nil, idxFlat, doSort)
-	up := mlx.GatherMM(xFlat, s.UpWeight, nil, idxFlat, doSort)
+	gate := mlx.GatherMM(xFlat, mlx.Transpose(s.GateWeight, 0, 2, 1), nil, idxFlat, doSort)
+	up := mlx.GatherMM(xFlat, mlx.Transpose(s.UpWeight, 0, 2, 1), nil, idxFlat, doSort)
 	hidden := mlx.Mul(mlx.SiLU(gate), up)
-	down := mlx.GatherMM(hidden, s.DownWeight, nil, idxFlat, doSort)
+	down := mlx.GatherMM(hidden, mlx.Transpose(s.DownWeight, 0, 2, 1), nil, idxFlat, doSort)
 
 	if doSort {
 		down = mlx.Reshape(mlx.Take(mlx.Squeeze(mlx.Squeeze(down, 2), 1), invOrder, 0), B*L, topK, cfg.HiddenSize)
