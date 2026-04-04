@@ -89,6 +89,8 @@ type stackedExpertWeights struct {
 }
 
 var gptossFirstDecodeNormTrace atomic.Bool
+var gptossFirstDecodeLayerTrace atomic.Bool
+var gptossBadDecodeLayer atomic.Int32
 
 func parseConfig(configData []byte) (Config, error) {
 	var cfg Config
@@ -379,12 +381,17 @@ func (m *Model) Forward(inputs *mlx.Array, caches []cache.Cache) *mlx.Array {
 	B, L := int32(dims[0]), int32(dims[1])
 
 	h := m.EmbedTokens.Forward(inputs)
+	traceLayers := shouldTraceFirstDecodeLayers(L, caches)
+	if traceLayers {
+		gptossBadDecodeLayer.Store(0)
+		defer gptossFirstDecodeLayerTrace.Store(true)
+	}
 	for i, layer := range m.Layers {
 		var c cache.Cache
 		if caches != nil && i < len(caches) {
 			c = caches[i]
 		}
-		h = layer.Forward(h, c, B, L, m.Config)
+		h = layer.Forward(h, c, B, L, m.Config, int32(i), traceLayers)
 	}
 	traceNorm := shouldTraceFirstDecodeNorm(L, caches)
 	if traceNorm {
@@ -404,6 +411,16 @@ func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
 	return m.LMHead.Forward(x)
 }
 
+func shouldTraceFirstDecodeLayers(L int32, caches []cache.Cache) bool {
+	if os.Getenv("OLLAMA_GPTOSS_STEP_DEBUG") == "" || L != 1 {
+		return false
+	}
+	if len(caches) == 0 || caches[0] == nil || caches[0].Offset() == 0 {
+		return false
+	}
+	return !gptossFirstDecodeLayerTrace.Load()
+}
+
 func shouldTraceFirstDecodeNorm(L int32, caches []cache.Cache) bool {
 	if os.Getenv("OLLAMA_GPTOSS_STEP_DEBUG") == "" || L != 1 {
 		return false
@@ -414,15 +431,23 @@ func shouldTraceFirstDecodeNorm(L int32, caches []cache.Cache) bool {
 	return gptossFirstDecodeNormTrace.CompareAndSwap(false, true)
 }
 
-func logTensorStats(stage string, t *mlx.Array) {
+type tensorSummary struct {
+	valid bool
+	min   float32
+	max   float32
+	mean  float64
+	std   float32
+}
+
+func tensorStats(t *mlx.Array) tensorSummary {
 	if t == nil || !t.Valid() {
-		return
+		return tensorSummary{}
 	}
 	tf := t.AsType(mlx.DTypeFloat32)
 	mlx.Eval(tf)
 	vals := tf.Floats()
 	if len(vals) == 0 {
-		return
+		return tensorSummary{}
 	}
 	minV, maxV := vals[0], vals[0]
 	sum := float64(0)
@@ -442,11 +467,46 @@ func logTensorStats(stage string, t *mlx.Array) {
 		sq += d * d
 	}
 	std := float32(math.Sqrt(sq / float64(len(vals))))
+	return tensorSummary{valid: true, min: minV, max: maxV, mean: mean, std: std}
+}
+
+func logTensorStats(stage string, t *mlx.Array) {
+	stats := tensorStats(t)
+	if !stats.valid {
+		return
+	}
+	tf := t.AsType(mlx.DTypeFloat32)
+	mlx.Eval(tf)
+	vals := tf.Floats()
 	n := 8
 	if len(vals) < n {
 		n = len(vals)
 	}
-	slog.Info(stage, "shape", t.Dims(), "dtype", t.DType(), "min", minV, "max", maxV, "mean", mean, "std", std, "sample", vals[:n])
+	slog.Info(stage, "shape", t.Dims(), "dtype", t.DType(), "min", stats.min, "max", stats.max, "mean", stats.mean, "std", stats.std, "sample", vals[:n])
+}
+
+func shouldTraceLayer(layer int32, traceLayers bool) bool {
+	if !traceLayers {
+		return false
+	}
+	bad := gptossBadDecodeLayer.Load()
+	return bad == 0 || bad == layer+1
+}
+
+func maybeMarkBadLayer(layer int32, stage string, stats tensorSummary) {
+	if !stats.valid || gptossBadDecodeLayer.Load() != 0 {
+		return
+	}
+	maxAbs := stats.max
+	if -stats.min > maxAbs {
+		maxAbs = -stats.min
+	}
+	if maxAbs < 512 && stats.std < 128 {
+		return
+	}
+	if gptossBadDecodeLayer.CompareAndSwap(0, layer+1) {
+		slog.Info("decode_first_bad_layer", "layer", layer, "after", stage, "min", stats.min, "max", stats.max, "mean", stats.mean, "std", stats.std)
+	}
 }
 
 func (m *Model) NumLayers() int {
@@ -482,11 +542,32 @@ func (m *Model) NewCaches() []cache.Cache {
 	return caches
 }
 
-func (l *Layer) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *mlx.Array {
+func (l *Layer) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config, layerIndex int32, traceLayers bool) *mlx.Array {
+	if shouldTraceLayer(layerIndex, traceLayers) {
+		stats := tensorStats(x)
+		if stats.valid {
+			slog.Info("decode_layer_input", "layer", layerIndex, "shape", x.Dims(), "dtype", x.DType(), "min", stats.min, "max", stats.max, "mean", stats.mean, "std", stats.std)
+		}
+	}
 	attn := l.Attention.Forward(l.AttentionNorm.Forward(x, cfg.RMSNormEps), c, B, L, cfg)
 	h := mlx.Add(x, attn)
+	if shouldTraceLayer(layerIndex, traceLayers) {
+		stats := tensorStats(h)
+		if stats.valid {
+			slog.Info("decode_post_attn", "layer", layerIndex, "shape", h.Dims(), "dtype", h.DType(), "min", stats.min, "max", stats.max, "mean", stats.mean, "std", stats.std)
+			maybeMarkBadLayer(layerIndex, "attention", stats)
+		}
+	}
 	ffn := l.MoE.Forward(l.MLPNorm.Forward(h, cfg.RMSNormEps), cfg)
-	return mlx.Add(h, ffn)
+	out := mlx.Add(h, ffn)
+	if shouldTraceLayer(layerIndex, traceLayers) && gptossBadDecodeLayer.Load() == 0 {
+		stats := tensorStats(out)
+		if stats.valid {
+			slog.Info("decode_post_mlp", "layer", layerIndex, "shape", out.Dims(), "dtype", out.DType(), "min", stats.min, "max", stats.max, "mean", stats.mean, "std", stats.std)
+			maybeMarkBadLayer(layerIndex, "mlp", stats)
+		}
+	}
+	return out
 }
 
 func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *mlx.Array {
