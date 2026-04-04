@@ -234,6 +234,22 @@ func sliceAxis0AndMaybeSqueeze(a *mlx.Array, idx int32) *mlx.Array {
 	return s
 }
 
+func sliceAxis1AndMaybeSqueeze(a *mlx.Array, idx int32) *mlx.Array {
+	if a == nil || !a.Valid() || a.NumDims() < 2 {
+		return nil
+	}
+	dims := a.Dims()
+	start := make([]int32, len(dims))
+	stop := make([]int32, len(dims))
+	for i, d := range dims {
+		stop[i] = int32(d)
+	}
+	start[1] = idx
+	stop[1] = idx + 1
+	s := mlx.SliceStartStop(a, start, stop)
+	return mlx.Squeeze(s, 1)
+}
+
 func dequantizeStackedExperts(weight, scales, qbiases *mlx.Array, groupSize, bits int, mode string) *mlx.Array {
 	if weight == nil || !weight.Valid() || scales == nil || !scales.Valid() {
 		return nil
@@ -709,7 +725,7 @@ func downReference(hidden, downWeight, idxFlat *mlx.Array, topK, hiddenSize int3
 	ids := idxFlat.Ints()
 	parts := make([]*mlx.Array, 0, len(ids))
 	for i, id := range ids {
-		h := sliceAxis0AndMaybeSqueeze(hidden, int32(i))
+		h := sliceAxis1AndMaybeSqueeze(hidden, int32(i))
 		w := sliceAxis0AndMaybeSqueeze(downWeight, int32(id))
 		if h == nil || w == nil {
 			return nil
