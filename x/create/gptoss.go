@@ -10,6 +10,11 @@ import (
 
 type gptossImportTransform struct{}
 
+var gptossMXFP4Metadata = map[string]string{
+	"quant_type": "mxfp4",
+	"group_size": "32",
+}
+
 var gptossTensorReplacer = strings.NewReplacer(
 	"model.embed_tokens", "token_embd",
 	"model.layers", "blk",
@@ -163,7 +168,7 @@ func gptossPrequantizedBlob(weightName string, blocksTD, scalesTD, biasTD *safet
 	if biasTD != nil {
 		tensors = append(tensors, biasTD.WithName(strings.TrimSuffix(weightName, ".weight")+".bias"))
 	}
-	return prequantizedTensorBlob{Name: weightName, Tensors: tensors}, nil
+	return prequantizedTensorBlob{Name: weightName, Tensors: tensors, Metadata: gptossMXFP4Metadata}, nil
 }
 
 func gptossSplitGateUpBlobs(base string, blocksTD, scalesTD, biasTD *safetensors.TensorData) ([]prequantizedTensorBlob, bool, error) {

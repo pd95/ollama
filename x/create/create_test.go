@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -317,6 +318,30 @@ func readSafetensorsHeaderInfo(t *testing.T, data []byte) map[string]struct {
 
 	delete(header, "__metadata__")
 	return header
+}
+
+func readSafetensorsMetadata(t *testing.T, data []byte) map[string]string {
+	t.Helper()
+
+	var headerSize uint64
+	if err := binary.Read(bytes.NewReader(data[:8]), binary.LittleEndian, &headerSize); err != nil {
+		t.Fatalf("failed to read header size: %v", err)
+	}
+
+	var header map[string]json.RawMessage
+	if err := json.Unmarshal(data[8:8+headerSize], &header); err != nil {
+		t.Fatalf("failed to parse header: %v", err)
+	}
+
+	metaRaw, ok := header["__metadata__"]
+	if !ok {
+		return nil
+	}
+	var metadata map[string]string
+	if err := json.Unmarshal(metaRaw, &metadata); err != nil {
+		t.Fatalf("failed to parse metadata: %v", err)
+	}
+	return metadata
 }
 
 func sortedMapKeys[V any](m map[string]V) []string {
@@ -1088,6 +1113,9 @@ func TestCreateSafetensorsModel_GptOssTransformsRawMXFP4(t *testing.T) {
 		t.Fatalf("gate blob tensors = %v", got)
 	}
 	gateInfo := readSafetensorsHeaderInfo(t, gateBlob.data)
+	if got, want := readSafetensorsMetadata(t, gateBlob.data), map[string]string{"quant_type": "mxfp4", "group_size": "32"}; !maps.Equal(got, want) {
+		t.Fatalf("gate metadata = %v, want %v", got, want)
+	}
 	if got := gateInfo["blk.0.ffn_gate_exps.weight"].Shape; !slices.Equal(got, []int32{1, 2, 1, 4}) {
 		t.Fatalf("gate weight shape = %v, want %v", got, []int32{1, 2, 1, 4})
 	}
@@ -1113,6 +1141,9 @@ func TestCreateSafetensorsModel_GptOssTransformsRawMXFP4(t *testing.T) {
 		t.Fatalf("up blob tensors = %v", got)
 	}
 	upInfo := readSafetensorsHeaderInfo(t, upBlob.data)
+	if got, want := readSafetensorsMetadata(t, upBlob.data), map[string]string{"quant_type": "mxfp4", "group_size": "32"}; !maps.Equal(got, want) {
+		t.Fatalf("up metadata = %v, want %v", got, want)
+	}
 	if got := upInfo["blk.0.ffn_up_exps.weight"].Shape; !slices.Equal(got, []int32{1, 2, 1, 4}) {
 		t.Fatalf("up weight shape = %v, want %v", got, []int32{1, 2, 1, 4})
 	}
