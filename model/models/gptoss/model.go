@@ -29,7 +29,7 @@ type Transformer struct {
 
 // Forward implements model.Model.
 func (m *Transformer) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
-	_ = stableDebugBegin(len(batch.Positions), len(batch.Sequences), batch.Positions[0], &m.Options)
+	_ = stableDebugBegin(len(batch.Positions), len(batch.Sequences), batch.Positions, &m.Options)
 	stableDebugTokenIDs(ctx, batch.Inputs)
 	hiddenStates := m.TokenEmbedding.Forward(ctx, batch.Inputs)
 	stableDebugTensor(ctx, "embedding", hiddenStates)

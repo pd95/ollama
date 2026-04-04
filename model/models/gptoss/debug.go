@@ -14,9 +14,17 @@ import (
 
 var (
 	stableDebugEnabled = os.Getenv("OLLAMA_GPTOSS_ACT_DEBUG") != ""
-	stableDebugArmed   atomic.Bool
-	stableDebugDone    atomic.Bool
+	stableDebugConfig  atomic.Bool
+	stableDebugPrefill atomic.Bool
+	stableDebugDecode  atomic.Bool
 	stableDebugLayer   atomic.Int32
+	stableDebugPhase   atomic.Int32
+)
+
+const (
+	stableDebugPhaseNone int32 = iota
+	stableDebugPhasePrefill
+	stableDebugPhaseDecode
 )
 
 type stableTopKV struct {
@@ -24,20 +32,37 @@ type stableTopKV struct {
 	Value float32
 }
 
-func stableDebugBegin(batchSeq, batchSize int, firstPos int32, opts *Options) bool {
-	if !stableDebugEnabled || stableDebugDone.Load() || batchSeq != 1 || batchSize != 1 || firstPos <= 0 {
-		return false
+func stableDebugBegin(batchSeq, batchSize int, positions []int32, opts *Options) int32 {
+	if !stableDebugEnabled || batchSize != 1 || len(positions) == 0 {
+		stableDebugPhase.Store(stableDebugPhaseNone)
+		return stableDebugPhaseNone
 	}
-	if !stableDebugArmed.CompareAndSwap(false, true) {
-		return false
+	if stableDebugConfig.CompareAndSwap(false, true) {
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=config layer=-1 heads=%d kv_heads=%d head_dim=%d rope_base=%g rope_scale=%g sliding_window=%d experts=%d experts_used=%d\n",
+			opts.numHeads, opts.numKVHeads, opts.headDim(), opts.ropeBase, opts.ropeScale, 0, opts.numExperts, opts.numExpertsUsed)
 	}
-	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=config layer=-1 heads=%d kv_heads=%d head_dim=%d rope_base=%g rope_scale=%g sliding_window=%d experts=%d experts_used=%d\n",
-		opts.numHeads, opts.numKVHeads, opts.headDim(), opts.ropeBase, opts.ropeScale, 0, opts.numExperts, opts.numExpertsUsed)
-	return true
+
+	firstPos := positions[0]
+	lastPos := positions[len(positions)-1]
+	switch {
+	case batchSeq > 1 && stableDebugPrefill.CompareAndSwap(false, true):
+		stableDebugPhase.Store(stableDebugPhasePrefill)
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=%d pos_first=%d pos_last=%d\n",
+			batchSeq, batchSize, firstPos, lastPos)
+		return stableDebugPhasePrefill
+	case batchSeq == 1 && firstPos > 0 && stableDebugDecode.CompareAndSwap(false, true):
+		stableDebugPhase.Store(stableDebugPhaseDecode)
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=decode_first batch_seq=%d batch_size=%d pos_first=%d pos_last=%d\n",
+			batchSeq, batchSize, firstPos, lastPos)
+		return stableDebugPhaseDecode
+	default:
+		stableDebugPhase.Store(stableDebugPhaseNone)
+		return stableDebugPhaseNone
+	}
 }
 
 func stableDebugActive() bool {
-	return stableDebugArmed.Load()
+	return stableDebugPhase.Load() != stableDebugPhaseNone
 }
 
 func stableDebugSetLayer(layer int) {
@@ -45,22 +70,48 @@ func stableDebugSetLayer(layer int) {
 }
 
 func stableDebugFinish() {
-	if stableDebugArmed.CompareAndSwap(true, false) {
-		stableDebugDone.Store(true)
+	stableDebugPhase.Store(stableDebugPhaseNone)
+}
+
+func stableDebugSemantic() string {
+	switch stableDebugPhase.Load() {
+	case stableDebugPhasePrefill:
+		return "prefill_last"
+	case stableDebugPhaseDecode:
+		return "decode_first"
+	default:
+		return ""
 	}
+}
+
+func stableDebugSelectToken(ctx ml.Context, t ml.Tensor) ml.Tensor {
+	if stableDebugPhase.Load() != stableDebugPhasePrefill {
+		return t
+	}
+	shape := t.Shape()
+	if len(shape) < 2 {
+		return t
+	}
+	lastDim := len(shape) - 1
+	last := t.Dim(lastDim) - 1
+	if last < 0 {
+		return t
+	}
+	return t.Slice(ctx, lastDim, last, last+1, 1)
 }
 
 func stableDebugTensor(ctx ml.Context, stage string, t ml.Tensor) {
 	if !stableDebugActive() || stableDebugLayer.Load() != 0 {
 		return
 	}
+	t = stableDebugSelectToken(ctx, t)
 	ctx.Forward(t).Compute(t)
 	vals := t.Floats()
 	if len(vals) == 0 {
 		vals = t.BackendGet()
 	}
 	if len(vals) == 0 {
-		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=0 shape=%v empty=true\n", stage, t.Shape())
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=0 semantic=%s shape=%v empty=true\n", stage, stableDebugSemantic(), t.Shape())
 		return
 	}
 
@@ -88,8 +139,8 @@ func stableDebugTensor(ctx ml.Context, stage string, t ml.Tensor) {
 		hash.Write(b[:])
 	}
 	sampleN := min(8, len(vals))
-	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=0 shape=%v min=%g max=%g mean=%.8g std=%.8g sha256=%x sample=%v\n",
-		stage, t.Shape(), minV, maxV, mean, std, hash.Sum(nil), vals[:sampleN])
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=0 semantic=%s shape=%v min=%g max=%g mean=%.8g std=%.8g sha256=%x sample=%v\n",
+		stage, stableDebugSemantic(), t.Shape(), minV, maxV, mean, std, hash.Sum(nil), vals[:sampleN])
 }
 
 func stableDebugExperts(ctx ml.Context, stage string, ids, probs ml.Tensor) {
@@ -103,7 +154,7 @@ func stableDebugExperts(ctx ml.Context, stage string, ids, probs ml.Tensor) {
 		decoded[i] = int32(binary.LittleEndian.Uint32(raw[i*4:]))
 	}
 	p := probs.Floats()
-	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=0 expert_ids=%v expert_probs=%v\n", stage, decoded, p)
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=0 semantic=%s expert_ids=%v expert_probs=%v\n", stage, stableDebugSemantic(), decoded, p)
 }
 
 func stableDebugLogits(ctx ml.Context, stage string, t ml.Tensor, k int) {
@@ -123,7 +174,10 @@ func stableDebugLogits(ctx ml.Context, stage string, t ml.Tensor, k int) {
 	if k < len(top) {
 		top = top[:k]
 	}
-	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=-1 topk=%v\n", stage, top)
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=-1 semantic=%s topk=%v\n", stage, stableDebugSemantic(), top)
+	if stableDebugPhase.Load() == stableDebugPhaseDecode && len(top) > 0 {
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=first_generated_token layer=-1 semantic=%s id=%d value=%g\n", stableDebugSemantic(), top[0].Index, top[0].Value)
+	}
 }
 
 func stableDebugTokenIDs(ctx ml.Context, t ml.Tensor) {
@@ -140,5 +194,6 @@ func stableDebugTokenIDs(ctx ml.Context, t ml.Tensor) {
 	for i := range ids {
 		ids[i] = int32(binary.LittleEndian.Uint32(raw[i*4:]))
 	}
-	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=input_tokens layer=-1 ids=%v\n", ids)
+	lastID := ids[len(ids)-1]
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=input_tokens layer=-1 semantic=%s ids=%v last_id=%d\n", stableDebugSemantic(), ids, lastID)
 }
