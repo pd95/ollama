@@ -7,12 +7,58 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"slices"
 	"time"
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/logutil"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 )
+
+type topLogprobEntry struct {
+	id      int
+	logprob float32
+	text    string
+}
+
+func traceFirstDecodeStep(r *Runner, sample, logprobs *mlx.Array) {
+	if os.Getenv("OLLAMA_GPTOSS_STEP_DEBUG") == "" || sample == nil || logprobs == nil {
+		return
+	}
+
+	mlx.Eval(sample, logprobs)
+	sampledID := int32(sample.Int())
+	vals := logprobs.Floats()
+	top := make([]topLogprobEntry, 0, len(vals))
+	for id, lp := range vals {
+		top = append(top, topLogprobEntry{
+			id:      id,
+			logprob: lp,
+			text:    r.Tokenizer.Decode([]int32{int32(id)}),
+		})
+	}
+	slices.SortFunc(top, func(a, b topLogprobEntry) int {
+		switch {
+		case a.logprob > b.logprob:
+			return -1
+		case a.logprob < b.logprob:
+			return 1
+		default:
+			return 0
+		}
+	})
+	if len(top) > 8 {
+		top = top[:8]
+	}
+
+	slog.Info(
+		"mlx first decode step",
+		"sampled_id", sampledID,
+		"sampled_text", r.Tokenizer.Decode([]int32{sampledID}),
+		"topk", top,
+	)
+}
 
 func prefillChunkSize() int {
 	return 2 << 10
@@ -179,6 +225,7 @@ func (r *Runner) TextGenerationPipeline(request Request) error {
 
 		if i == 0 {
 			mlx.Eval(sample)
+			traceFirstDecodeStep(r, sample, logprobs)
 			final.PromptEvalDuration = time.Since(now)
 			now = time.Now()
 		}
