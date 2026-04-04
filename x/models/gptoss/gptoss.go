@@ -297,7 +297,9 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		layer.Attention.KProj = linears.Make(layerPrefix + ".attn_k")
 		layer.Attention.VProj = linears.Make(layerPrefix + ".attn_v")
 		layer.Attention.OProj = linears.Make(layerPrefix + ".attn_out")
-		layer.Attention.Sinks = tensors[layerPrefix+".attn_sinks"]
+		if sinks := tensors[layerPrefix+".attn_sinks"]; sinks != nil {
+			layer.Attention.Sinks = sinks.AsType(mlx.DTypeFloat32)
+		}
 		if layer.Attention.QProj == nil || layer.Attention.KProj == nil || layer.Attention.VProj == nil || layer.Attention.OProj == nil {
 			return fmt.Errorf("layer %d: missing attention projections", i)
 		}
@@ -394,6 +396,9 @@ func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config) *mlx.
 
 func (m *MoE) Forward(x *mlx.Array, cfg *Config) *mlx.Array {
 	dims := x.Dims()
+	if len(dims) != 3 {
+		panic(fmt.Sprintf("gptoss moe expects [batch, seq, hidden], got shape %v", dims))
+	}
 	B, L := int32(dims[0]), int32(dims[1])
 
 	probs := mlx.SoftmaxAxis(m.Gate.Forward(x), -1, true)
