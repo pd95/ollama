@@ -4,8 +4,10 @@ package gptoss
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
+	"sync/atomic"
 
 	"github.com/ollama/ollama/x/mlxrunner/cache"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
@@ -85,6 +87,8 @@ type SwitchMLP struct {
 type stackedExpertWeights struct {
 	Weight *mlx.Array
 }
+
+var gptossFirstDecodeNormTrace atomic.Bool
 
 func parseConfig(configData []byte) (Config, error) {
 	var cfg Config
@@ -382,8 +386,15 @@ func (m *Model) Forward(inputs *mlx.Array, caches []cache.Cache) *mlx.Array {
 		}
 		h = layer.Forward(h, c, B, L, m.Config)
 	}
-
-	return m.Norm.Forward(h, m.RMSNormEps)
+	traceNorm := shouldTraceFirstDecodeNorm(L, caches)
+	if traceNorm {
+		logTensorStats("final_norm_before", h)
+	}
+	out := m.Norm.Forward(h, m.RMSNormEps)
+	if traceNorm {
+		logTensorStats("final_norm_out", out)
+	}
+	return out
 }
 
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
@@ -391,6 +402,51 @@ func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
 		panic("gptoss MLX unembed called before weights loaded")
 	}
 	return m.LMHead.Forward(x)
+}
+
+func shouldTraceFirstDecodeNorm(L int32, caches []cache.Cache) bool {
+	if os.Getenv("OLLAMA_GPTOSS_STEP_DEBUG") == "" || L != 1 {
+		return false
+	}
+	if len(caches) == 0 || caches[0] == nil || caches[0].Offset() == 0 {
+		return false
+	}
+	return gptossFirstDecodeNormTrace.CompareAndSwap(false, true)
+}
+
+func logTensorStats(stage string, t *mlx.Array) {
+	if t == nil || !t.Valid() {
+		return
+	}
+	tf := t.AsType(mlx.DTypeFloat32)
+	mlx.Eval(tf)
+	vals := tf.Floats()
+	if len(vals) == 0 {
+		return
+	}
+	minV, maxV := vals[0], vals[0]
+	sum := float64(0)
+	for _, v := range vals {
+		if v < minV {
+			minV = v
+		}
+		if v > maxV {
+			maxV = v
+		}
+		sum += float64(v)
+	}
+	mean := sum / float64(len(vals))
+	var sq float64
+	for _, v := range vals {
+		d := float64(v) - mean
+		sq += d * d
+	}
+	std := float32(math.Sqrt(sq / float64(len(vals))))
+	n := 8
+	if len(vals) < n {
+		n = len(vals)
+	}
+	slog.Info(stage, "shape", t.Dims(), "dtype", t.DType(), "min", minV, "max", maxV, "mean", mean, "std", std, "sample", vals[:n])
 }
 
 func (m *Model) NumLayers() int {
