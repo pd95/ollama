@@ -208,6 +208,51 @@ func stackAndClone(parts []*mlx.Array) *mlx.Array {
 	return cloned
 }
 
+func sliceAxis0AndMaybeSqueeze(a *mlx.Array, idx int32) *mlx.Array {
+	if a == nil || !a.Valid() || a.NumDims() == 0 {
+		return nil
+	}
+	dims := a.Dims()
+	start := make([]int32, len(dims))
+	stop := make([]int32, len(dims))
+	for i, d := range dims {
+		stop[i] = int32(d)
+	}
+	start[0] = idx
+	stop[0] = idx + 1
+	s := mlx.SliceStartStop(a, start, stop)
+	if len(dims) > 1 {
+		s = mlx.Squeeze(s, 0)
+	}
+	return s
+}
+
+func dequantizeStackedExperts(weight, scales, qbiases *mlx.Array, groupSize, bits int, mode string) *mlx.Array {
+	if weight == nil || !weight.Valid() || scales == nil || !scales.Valid() {
+		return nil
+	}
+	if weight.NumDims() != 3 || scales.NumDims() != 3 {
+		return mlx.Dequantize(weight, scales, qbiases, groupSize, bits, mode)
+	}
+
+	experts := weight.Dim(0)
+	parts := make([]*mlx.Array, 0, experts)
+	for e := 0; e < experts; e++ {
+		w := sliceAxis0AndMaybeSqueeze(weight, int32(e))
+		s := sliceAxis0AndMaybeSqueeze(scales, int32(e))
+		var qb *mlx.Array
+		if qbiases != nil && qbiases.Valid() {
+			qb = sliceAxis0AndMaybeSqueeze(qbiases, int32(e))
+		}
+		part := mlx.Dequantize(w, s, qb, groupSize, bits, mode)
+		if part == nil || !part.Valid() {
+			return part
+		}
+		parts = append(parts, part)
+	}
+	return stackAndClone(parts)
+}
+
 func requireTensor(name string, t *mlx.Array) error {
 	if t == nil || !t.Valid() {
 		return fmt.Errorf("missing or invalid tensor: %s", name)
@@ -281,7 +326,7 @@ func loadStackedProjection(tensors map[string]*mlx.Array, cfg *Config, bases ...
 		)
 
 		return &stackedExpertWeights{
-			Weight:    mlx.Dequantize(w, scales, qbiases, groupSize, bits, mode),
+			Weight:    dequantizeStackedExperts(w, scales, qbiases, groupSize, bits, mode),
 			Bits:      bits,
 			GroupSize: groupSize,
 			Mode:      mode,
