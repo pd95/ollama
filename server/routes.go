@@ -519,12 +519,25 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 
 	// If debug mode is enabled, return the rendered template instead of calling the model
 	if req.DebugRenderOnly {
+		promptTokens, err := r.Tokenize(c.Request.Context(), prompt)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		debugTokens := promptTokens
+		if len(debugTokens) > 32 {
+			debugTokens = debugTokens[:32]
+		}
+
 		c.JSON(http.StatusOK, api.GenerateResponse{
 			Model:     req.Model,
 			CreatedAt: time.Now().UTC(),
 			DebugInfo: &api.DebugInfo{
 				RenderedTemplate: prompt,
 				ImageCount:       len(images),
+				PromptTokenCount: len(promptTokens),
+				PromptTokens:     debugTokens,
 			},
 		})
 		return

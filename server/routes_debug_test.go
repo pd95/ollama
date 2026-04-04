@@ -197,6 +197,14 @@ func TestGenerateDebugRenderOnly(t *testing.T) {
 					if tt.expectNumImages > 0 && response.DebugInfo.ImageCount != tt.expectNumImages {
 						t.Errorf("expected image count %d, got %d", tt.expectNumImages, response.DebugInfo.ImageCount)
 					}
+
+					wantTokenCount := len(strings.Fields(tt.expectTemplate))
+					if response.DebugInfo.PromptTokenCount != wantTokenCount {
+						t.Errorf("expected token count %d, got %d", wantTokenCount, response.DebugInfo.PromptTokenCount)
+					}
+					if len(response.DebugInfo.PromptTokens) != wantTokenCount {
+						t.Errorf("expected %d prompt tokens, got %d", wantTokenCount, len(response.DebugInfo.PromptTokens))
+					}
 				} else {
 					// When debug is disabled, it should attempt normal processing
 					if w.Code != http.StatusOK {

@@ -566,6 +566,8 @@ type ChatResponse struct {
 type DebugInfo struct {
 	RenderedTemplate string `json:"rendered_template"`
 	ImageCount       int    `json:"image_count,omitempty"`
+	PromptTokenCount int    `json:"prompt_token_count,omitempty"`
+	PromptTokens     []int  `json:"prompt_tokens,omitempty"`
 }
 
 type Metrics struct {
