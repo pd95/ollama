@@ -618,11 +618,15 @@ func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
 	}
 
 	mlxDebugEvent("final_norm_before", -1)
-	return requireRuntimeShape("final norm", m.Norm.Forward(h, m.RMSNormEps), B, L, m.HiddenSize)
+	out := requireRuntimeShape("final norm", m.Norm.Forward(h, m.RMSNormEps), B, L, m.HiddenSize)
+	mlxDebugMeta("final_norm_out", out)
+	return out
 }
 
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
+	mlxDebugMeta("unembed_in", x)
 	logits := m.LMHead.Forward(x)
+	mlxDebugMeta("unembed_out", logits)
 	mlxDebugLogits("final_logits", logits, 8)
 	mlxDebugFinish()
 	return logits
