@@ -270,6 +270,38 @@ func readSafetensorsHeaderNames(t *testing.T, data []byte) []string {
 	return names
 }
 
+func readSafetensorsHeaderInfo(t *testing.T, data []byte) map[string]struct {
+	Dtype string  `json:"dtype"`
+	Shape []int32 `json:"shape"`
+} {
+	t.Helper()
+
+	var headerSize uint64
+	if err := binary.Read(bytes.NewReader(data[:8]), binary.LittleEndian, &headerSize); err != nil {
+		t.Fatalf("failed to read header size: %v", err)
+	}
+
+	var header map[string]struct {
+		Dtype string  `json:"dtype"`
+		Shape []int32 `json:"shape"`
+	}
+	if err := json.Unmarshal(data[8:8+headerSize], &header); err != nil {
+		t.Fatalf("failed to parse header: %v", err)
+	}
+
+	delete(header, "__metadata__")
+	return header
+}
+
+func sortedMapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
 func TestCreateSafetensorsModel(t *testing.T) {
 	dir := t.TempDir()
 
@@ -923,6 +955,122 @@ func TestCreateSafetensorsModel_Qwen35Transforms(t *testing.T) {
 	}
 	if _, ok := calls["language_model.model.visual.blocks.0.attn.proj.weight"]; ok {
 		t.Fatal("vision tensor should have been rewritten to vision_tower.*")
+	}
+}
+
+func TestCreateSafetensorsModel_GptOssTransformsRawMXFP4(t *testing.T) {
+	dir := t.TempDir()
+
+	configJSON := `{
+		"model_type": "gptoss",
+		"architectures": ["GptOssForCausalLM"],
+		"quantization": {"group_size": 32, "bits": 4, "mode": "mxfp4"}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatalf("failed to write config.json: %v", err)
+	}
+
+	createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
+		st.NewTensorDataFromBytes("model.embed_tokens.blocks", "U8", []int32{2, 4, 1, 1}, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
+		st.NewTensorDataFromBytes("model.embed_tokens.scales", "BF16", []int32{2, 4, 1}, make([]byte, 2*4*1*2)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_0.blocks", "U8", []int32{1, 4, 1, 2}, []byte{10, 11, 12, 13, 14, 15, 16, 17}),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_0.scales", "BF16", []int32{1, 4, 2}, make([]byte, 1*4*2*2)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_0.biases", "BF16", []int32{1, 4}, make([]byte, 1*4*2)),
+	})
+
+	type layerCall struct {
+		mediaType string
+		data      []byte
+	}
+
+	calls := make(map[string]layerCall)
+	var tensorLayerNames []string
+
+	createLayer := func(r io.Reader, mediaType, name string) (LayerInfo, error) {
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return LayerInfo{}, err
+		}
+		calls[name] = layerCall{mediaType: mediaType, data: data}
+		return LayerInfo{Name: name, Digest: "sha256:" + name, MediaType: mediaType, Size: int64(len(data))}, nil
+	}
+
+	createTensorLayer := func(r io.Reader, name, dtype string, shape []int32, quantize string) ([]LayerInfo, error) {
+		tensorLayerNames = append(tensorLayerNames, name)
+		if _, err := io.ReadAll(r); err != nil {
+			return nil, err
+		}
+		return []LayerInfo{{Name: name, Digest: "sha256:tensor_" + name, MediaType: "application/vnd.ollama.image.tensor"}}, nil
+	}
+
+	writeManifest := func(modelName string, config LayerInfo, layers []LayerInfo) error { return nil }
+
+	if err := CreateSafetensorsModel("test-model", dir, "", createLayer, createTensorLayer, writeManifest, func(string) {}); err != nil {
+		t.Fatalf("CreateSafetensorsModel failed: %v", err)
+	}
+
+	for _, unexpected := range []string{
+		"model.embed_tokens.blocks",
+		"model.embed_tokens.scales",
+		"model.layers.0.mlp.experts.gate_up_proj_0.blocks",
+		"model.layers.0.mlp.experts.gate_up_proj_0.scales",
+		"model.layers.0.mlp.experts.gate_up_proj_0.biases",
+	} {
+		if slices.Contains(tensorLayerNames, unexpected) {
+			t.Fatalf("unexpected standalone tensor layer for %s: %v", unexpected, tensorLayerNames)
+		}
+	}
+
+	tokenBlob, ok := calls["token_embd.weight"]
+	if !ok {
+		t.Fatalf("missing token_embd.weight blob, got keys %v", sortedMapKeys(calls))
+	}
+	if got := readSafetensorsHeaderNames(t, tokenBlob.data); !slices.Equal(got, []string{"token_embd.weight", "token_embd.weight.scale"}) {
+		t.Fatalf("token_embd.weight blob tensors = %v", got)
+	}
+
+	gateBlob, ok := calls["blk.0.ffn_gate_exps.0.weight"]
+	if !ok {
+		t.Fatalf("missing gate blob, got keys %v", sortedMapKeys(calls))
+	}
+	if got := readSafetensorsHeaderNames(t, gateBlob.data); !slices.Equal(got, []string{
+		"blk.0.ffn_gate_exps.0.weight",
+		"blk.0.ffn_gate_exps.0.weight.bias",
+		"blk.0.ffn_gate_exps.0.weight.scale",
+	}) {
+		t.Fatalf("gate blob tensors = %v", got)
+	}
+	gateInfo := readSafetensorsHeaderInfo(t, gateBlob.data)
+	if got := gateInfo["blk.0.ffn_gate_exps.0.weight"].Shape; !slices.Equal(got, []int32{1, 2, 1, 2}) {
+		t.Fatalf("gate weight shape = %v, want %v", got, []int32{1, 2, 1, 2})
+	}
+	if got := gateInfo["blk.0.ffn_gate_exps.0.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 2}) {
+		t.Fatalf("gate scale shape = %v, want %v", got, []int32{1, 2, 2})
+	}
+	if got := gateInfo["blk.0.ffn_gate_exps.0.weight.bias"].Shape; !slices.Equal(got, []int32{1, 2}) {
+		t.Fatalf("gate bias shape = %v, want %v", got, []int32{1, 2})
+	}
+
+	upBlob, ok := calls["blk.0.ffn_up_exps.0.weight"]
+	if !ok {
+		t.Fatalf("missing up blob, got keys %v", sortedMapKeys(calls))
+	}
+	if got := readSafetensorsHeaderNames(t, upBlob.data); !slices.Equal(got, []string{
+		"blk.0.ffn_up_exps.0.weight",
+		"blk.0.ffn_up_exps.0.weight.bias",
+		"blk.0.ffn_up_exps.0.weight.scale",
+	}) {
+		t.Fatalf("up blob tensors = %v", got)
+	}
+	upInfo := readSafetensorsHeaderInfo(t, upBlob.data)
+	if got := upInfo["blk.0.ffn_up_exps.0.weight"].Shape; !slices.Equal(got, []int32{1, 2, 1, 2}) {
+		t.Fatalf("up weight shape = %v, want %v", got, []int32{1, 2, 1, 2})
+	}
+	if got := upInfo["blk.0.ffn_up_exps.0.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 2}) {
+		t.Fatalf("up scale shape = %v, want %v", got, []int32{1, 2, 2})
+	}
+	if got := upInfo["blk.0.ffn_up_exps.0.weight.bias"].Shape; !slices.Equal(got, []int32{1, 2}) {
+		t.Fatalf("up bias shape = %v, want %v", got, []int32{1, 2})
 	}
 }
 

@@ -611,6 +611,15 @@ type tensorImportTransform interface {
 	quantizationType(name string, shape []int32, quantize string) string
 }
 
+type prequantizedTensorBlob struct {
+	Name    string
+	Tensors []*safetensors.TensorData
+}
+
+type prequantizedTensorImportTransform interface {
+	transformPrequantizedTensor(extractor *safetensors.TensorExtractor, td *safetensors.TensorData, tensorSet map[string]struct{}) ([]prequantizedTensorBlob, bool, error)
+}
+
 type noopImportTransform struct{}
 
 func (noopImportTransform) skipTensor(string) bool { return false }
@@ -629,6 +638,7 @@ func (noopImportTransform) quantizationType(name string, shape []int32, quantize
 type tensorImportTransformFactory func(modelDir string, cfg sourceModelConfig) (tensorImportTransform, error)
 
 var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
+	"GptOssForCausalLM":                    newGptOssImportTransform,
 	"Qwen3_5ForCausalLM":                   newQwen35ImportTransform,
 	"Qwen3_5ForConditionalGeneration":      newQwen35ImportTransform,
 	"Qwen3NextForCausalLM":                 newQwen35ImportTransform,
@@ -744,6 +754,31 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 			}
 
 			if effectiveQuantize == "" {
+				if prequantizedTransform, ok := importTransform.(prequantizedTensorImportTransform); ok {
+					blobs, handled, err := prequantizedTransform.transformPrequantizedTensor(extractor, td, tensorSet)
+					if err != nil {
+						extractor.Close()
+						closeExtractors()
+						return fmt.Errorf("failed to transform prequantized tensor %s: %w", tensorName, err)
+					}
+					if handled {
+						for _, blob := range blobs {
+							layer, err := createLayer(
+								safetensors.BuildPackedSafetensorsReaderWithMetadata(blob.Tensors, sourceQuantMetadata),
+								"application/vnd.ollama.image.tensor",
+								blob.Name,
+							)
+							if err != nil {
+								extractor.Close()
+								closeExtractors()
+								return fmt.Errorf("failed to create transformed prequantized layer for %s: %w", blob.Name, err)
+							}
+							layers = append(layers, layer)
+						}
+						continue
+					}
+				}
+
 				layer, ok, err := createPrequantizedLayer(extractor, td, tensorName, tensorSet, sourceQuantMetadata, createLayer)
 				if err != nil {
 					extractor.Close()
