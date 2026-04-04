@@ -33,6 +33,13 @@ type stableTopKV struct {
 	Value float32
 }
 
+func stableDebugSelectedIndex(batchSeq int) int {
+	if stableDebugPhase.Load() == stableDebugPhasePrefill && batchSeq > 0 {
+		return batchSeq - 1
+	}
+	return 0
+}
+
 func stableDebugBegin(batchSeq, batchSize int, positions []int32, opts *Options) int32 {
 	if !stableDebugEnabled || len(positions) == 0 {
 		stableDebugPhase.Store(stableDebugPhaseNone)
@@ -45,12 +52,13 @@ func stableDebugBegin(batchSeq, batchSize int, positions []int32, opts *Options)
 
 	firstPos := positions[0]
 	lastPos := positions[len(positions)-1]
+	selectedIndex := stableDebugSelectedIndex(batchSeq)
 	switch stableDebugForce.Swap(stableDebugPhaseNone) {
 	case stableDebugPhasePrefill:
 		if stableDebugPrefill.CompareAndSwap(false, true) {
 			stableDebugPhase.Store(stableDebugPhasePrefill)
-			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=%d pos_first=%d pos_last=%d\n",
-				batchSeq, batchSize, firstPos, lastPos)
+			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=%d pos_first=%d pos_last=%d selected_index=%d\n",
+				batchSeq, batchSize, firstPos, lastPos, selectedIndex)
 			return stableDebugPhasePrefill
 		}
 		stableDebugPhase.Store(stableDebugPhaseNone)
@@ -58,8 +66,8 @@ func stableDebugBegin(batchSeq, batchSize int, positions []int32, opts *Options)
 	case stableDebugPhaseDecode:
 		if stableDebugDecode.CompareAndSwap(false, true) {
 			stableDebugPhase.Store(stableDebugPhaseDecode)
-			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=decode_first batch_seq=%d batch_size=%d pos_first=%d pos_last=%d\n",
-				batchSeq, batchSize, firstPos, lastPos)
+			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=decode_first batch_seq=%d batch_size=%d pos_first=%d pos_last=%d selected_index=%d\n",
+				batchSeq, batchSize, firstPos, lastPos, selectedIndex)
 			return stableDebugPhaseDecode
 		}
 		stableDebugPhase.Store(stableDebugPhaseNone)
@@ -74,13 +82,13 @@ func stableDebugBegin(batchSeq, batchSize int, positions []int32, opts *Options)
 	switch {
 	case batchSeq > 1 && stableDebugPrefill.CompareAndSwap(false, true):
 		stableDebugPhase.Store(stableDebugPhasePrefill)
-		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=%d pos_first=%d pos_last=%d\n",
-			batchSeq, batchSize, firstPos, lastPos)
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=%d pos_first=%d pos_last=%d selected_index=%d\n",
+			batchSeq, batchSize, firstPos, lastPos, selectedIndex)
 		return stableDebugPhasePrefill
 	case batchSeq == 1 && firstPos > 0 && stableDebugDecode.CompareAndSwap(false, true):
 		stableDebugPhase.Store(stableDebugPhaseDecode)
-		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=decode_first batch_seq=%d batch_size=%d pos_first=%d pos_last=%d\n",
-			batchSeq, batchSize, firstPos, lastPos)
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=decode_first batch_seq=%d batch_size=%d pos_first=%d pos_last=%d selected_index=%d\n",
+			batchSeq, batchSize, firstPos, lastPos, selectedIndex)
 		return stableDebugPhaseDecode
 	default:
 		stableDebugPhase.Store(stableDebugPhaseNone)

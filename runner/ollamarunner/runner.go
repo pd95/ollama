@@ -68,8 +68,16 @@ func debugLogStableInputTokens(semantic string, batchInputs []*input.Input) {
 		return
 	}
 
-	lastID := ids[len(ids)-1]
-	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=input_tokens layer=-1 semantic=%s ids=%v last_id=%d\n", semantic, ids, lastID)
+	selectedIndex := 0
+	selectedIDs := ids
+	if semantic == "prefill_last" {
+		selectedIndex = len(ids) - 1
+		selectedIDs = ids[selectedIndex:]
+	}
+
+	lastID := selectedIDs[len(selectedIDs)-1]
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=input_tokens layer=-1 semantic=%s full_count=%d selected_index=%d ids=%v last_id=%d\n",
+		semantic, len(ids), selectedIndex, selectedIDs, lastID)
 }
 
 type Sequence struct {
