@@ -371,8 +371,14 @@ func SoftmaxAxis(a *Array, axis int, precise bool) *Array {
 }
 
 func ScaledDotProductAttentionCausal(q, k, v *Array, scale float32, causalMask bool) *Array {
+	return ScaledDotProductAttentionCausalWithSinks(q, k, v, nil, scale, causalMask)
+}
+
+func ScaledDotProductAttentionCausalWithSinks(q, k, v, sinks *Array, scale float32, causalMask bool) *Array {
 	mask := New("")
-	sinks := New("")
+	if sinks == nil {
+		sinks = New("")
+	}
 	mode := ""
 	if causalMask {
 		mode = "causal"

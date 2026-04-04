@@ -437,8 +437,7 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config
 	}
 
 	scale := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
-	_ = a.Sinks
-	out := mlx.ScaledDotProductAttentionCausal(q, k, v, scale, L > 1)
+	out := mlx.ScaledDotProductAttentionCausalWithSinks(q, k, v, a.Sinks, scale, L > 1)
 	out = mlx.Reshape(mlx.Transpose(out, 0, 2, 1, 3), B, L, cfg.NumAttentionHeads*cfg.HeadDim)
 	return a.OProj.Forward(out)
 }
