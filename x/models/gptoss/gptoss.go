@@ -391,7 +391,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			if err := requireVector(layerPrefix+".attn_sinks", sinks, cfg.NumAttentionHeads); err != nil {
 				return err
 			}
-			layer.Attention.Sinks = sinks.AsType(mlx.DTypeFloat32)
+			layer.Attention.Sinks = sinks
 		}
 		if layer.Attention.QProj == nil || layer.Attention.KProj == nil || layer.Attention.VProj == nil || layer.Attention.OProj == nil {
 			return fmt.Errorf("layer %d: missing attention projections", i)
