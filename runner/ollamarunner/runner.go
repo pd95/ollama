@@ -52,6 +52,26 @@ type debugSemanticSetter interface {
 	DebugSetSemantic(string)
 }
 
+func debugLogStableInputTokens(semantic string, batchInputs []*input.Input) {
+	if os.Getenv("OLLAMA_GPTOSS_ACT_DEBUG") == "" || semantic == "" {
+		return
+	}
+
+	ids := make([]int32, 0, len(batchInputs))
+	for _, inp := range batchInputs {
+		if inp == nil || inp.Multimodal != nil {
+			continue
+		}
+		ids = append(ids, inp.Token)
+	}
+	if len(ids) == 0 {
+		return
+	}
+
+	lastID := ids[len(ids)-1]
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=input_tokens layer=-1 semantic=%s ids=%v last_id=%d\n", semantic, ids, lastID)
+}
+
 type Sequence struct {
 	// ctxs are used for allocating tensors that last the lifetime of the sequence, such as
 	// multimodal embeddings
@@ -637,6 +657,7 @@ func (s *Server) forwardBatch(pendingBatch batchState) (nextBatch batchState, er
 	if m, ok := s.model.(debugSemanticSetter); ok {
 		m.DebugSetSemantic(debugSemantic)
 	}
+	debugLogStableInputTokens(debugSemantic, batchInputs)
 	nextBatch.modelOutput, err = model.Forward(nextBatch.ctx, s.model, batch)
 	if err != nil {
 		err = fmt.Errorf("failed to build graph: %w", err)
