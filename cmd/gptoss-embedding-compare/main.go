@@ -121,9 +121,19 @@ func main() {
 		panic(err)
 	}
 
+	sourceRebuilt := rebuildDenseBF16(sourceRaw, sourceTD.Shape)
+	importedRebuilt := rebuildDenseBF16(importedRaw, importedTD.Shape)
+	sourceRebuiltRow := sourceRebuilt.TakeAxis(index, 0)
+	importedRebuiltRow := importedRebuilt.TakeAxis(index, 0)
+	mlx.Eval(sourceRebuiltRow, importedRebuiltRow)
+	sourceRebuiltFloats := sourceRebuiltRow.Floats()
+	importedRebuiltFloats := importedRebuiltRow.Floats()
+
 	cos, maxAbs, meanAbs, sourceMin, sourceMax, importedMin, importedMax, sourceSum, importedSum := compareFloatSlices(sourceFloats, importedFloats)
 	sourceRawCos, sourceRawMaxAbs, sourceRawMeanAbs, _, _, _, _, _, _ := compareFloatSlices(sourceRawRow, sourceFloats)
 	importedRawCos, importedRawMaxAbs, importedRawMeanAbs, _, _, _, _, _, _ := compareFloatSlices(importedRawRow, importedFloats)
+	sourceRawRebuiltCos, sourceRawRebuiltMaxAbs, sourceRawRebuiltMeanAbs, _, _, _, _, _, _ := compareFloatSlices(sourceRawRow, sourceRebuiltFloats)
+	importedRawRebuiltCos, importedRawRebuiltMaxAbs, importedRawRebuiltMeanAbs, _, _, _, _, _, _ := compareFloatSlices(importedRawRow, importedRebuiltFloats)
 
 	fmt.Printf("SOURCE_FILE %s\n", sourceFile)
 	fmt.Printf("SOURCE_TENSOR %s\n", *sourceTensor)
@@ -145,14 +155,22 @@ func main() {
 	fmt.Printf("IMPORTED_ROW_SHAPE %v\n", importedRow.Dims())
 	fmt.Printf("SOURCE_RAW_ROW_SHA256 %s\n", floatSHA256(sourceRawRow))
 	fmt.Printf("SOURCE_ROW_SHA256 %s\n", floatSHA256(sourceFloats))
+	fmt.Printf("SOURCE_REBUILT_ROW_SHA256 %s\n", floatSHA256(sourceRebuiltFloats))
 	fmt.Printf("IMPORTED_RAW_ROW_SHA256 %s\n", floatSHA256(importedRawRow))
 	fmt.Printf("IMPORTED_ROW_SHA256 %s\n", floatSHA256(importedFloats))
+	fmt.Printf("IMPORTED_REBUILT_ROW_SHA256 %s\n", floatSHA256(importedRebuiltFloats))
 	fmt.Printf("SOURCE_RAW_VS_MLX_COSINE %.9f\n", sourceRawCos)
 	fmt.Printf("SOURCE_RAW_VS_MLX_MAX_ABS_DIFF %.9g\n", sourceRawMaxAbs)
 	fmt.Printf("SOURCE_RAW_VS_MLX_MEAN_ABS_DIFF %.9g\n", sourceRawMeanAbs)
+	fmt.Printf("SOURCE_RAW_VS_REBUILT_COSINE %.9f\n", sourceRawRebuiltCos)
+	fmt.Printf("SOURCE_RAW_VS_REBUILT_MAX_ABS_DIFF %.9g\n", sourceRawRebuiltMaxAbs)
+	fmt.Printf("SOURCE_RAW_VS_REBUILT_MEAN_ABS_DIFF %.9g\n", sourceRawRebuiltMeanAbs)
 	fmt.Printf("IMPORTED_RAW_VS_MLX_COSINE %.9f\n", importedRawCos)
 	fmt.Printf("IMPORTED_RAW_VS_MLX_MAX_ABS_DIFF %.9g\n", importedRawMaxAbs)
 	fmt.Printf("IMPORTED_RAW_VS_MLX_MEAN_ABS_DIFF %.9g\n", importedRawMeanAbs)
+	fmt.Printf("IMPORTED_RAW_VS_REBUILT_COSINE %.9f\n", importedRawRebuiltCos)
+	fmt.Printf("IMPORTED_RAW_VS_REBUILT_MAX_ABS_DIFF %.9g\n", importedRawRebuiltMaxAbs)
+	fmt.Printf("IMPORTED_RAW_VS_REBUILT_MEAN_ABS_DIFF %.9g\n", importedRawRebuiltMeanAbs)
 	fmt.Printf("COSINE_SIMILARITY %.9f\n", cos)
 	fmt.Printf("MAX_ABS_DIFF %.9g\n", maxAbs)
 	fmt.Printf("MEAN_ABS_DIFF %.9g\n", meanAbs)
@@ -162,6 +180,14 @@ func main() {
 	fmt.Printf("IMPORTED_MIN %.9g\n", importedMin)
 	fmt.Printf("IMPORTED_MAX %.9g\n", importedMax)
 	fmt.Printf("IMPORTED_SUM %.9g\n", importedSum)
+}
+
+func rebuildDenseBF16(raw []byte, shape []int32) *mlx.Array {
+	intShape := make([]int, len(shape))
+	for i, d := range shape {
+		intShape[i] = int(d)
+	}
+	return mlx.FromRawBytes(raw, mlx.DTypeBFloat16, intShape...)
 }
 
 func findTensorFile(dir, name string) (string, error) {
