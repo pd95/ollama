@@ -127,6 +127,9 @@ func parseConfig(configData []byte) (Config, error) {
 	if cfg.RopeTheta == 0 {
 		cfg.RopeTheta = 10000
 	}
+	if cfg.RopeScalingFactor == 0 {
+		cfg.RopeScalingFactor = 1
+	}
 	if cfg.ExpertsPerToken <= 0 {
 		cfg.ExpertsPerToken = 1
 	}
@@ -459,8 +462,9 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config
 	if c != nil {
 		offset = c.Offset()
 	}
-	q = mlx.RoPEWithBase(q, int(cfg.EffectiveRopeN), false, cfg.RopeTheta, 1.0, offset)
-	k = mlx.RoPEWithBase(k, int(cfg.EffectiveRopeN), false, cfg.RopeTheta, 1.0, offset)
+	ropeScale := float32(1.0 / cfg.RopeScalingFactor)
+	q = mlx.RoPEWithBase(q, int(cfg.EffectiveRopeN), false, cfg.RopeTheta, ropeScale, offset)
+	k = mlx.RoPEWithBase(k, int(cfg.EffectiveRopeN), false, cfg.RopeTheta, ropeScale, offset)
 
 	if c != nil {
 		k, v = c.Update(k, v)
