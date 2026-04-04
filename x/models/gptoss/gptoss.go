@@ -457,6 +457,9 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config
 
 	v = mlx.Reshape(v, B, L, cfg.NumKeyValueHeads, cfg.HeadDim)
 	v = mlx.Transpose(v, 0, 2, 1, 3)
+	mlxDebugTensor("q_pre_rope", q)
+	mlxDebugTensor("k_pre_rope", k)
+	mlxDebugTensor("v_pre_rope", v)
 
 	offset := 0
 	if c != nil {
@@ -465,6 +468,8 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config
 	ropeScale := float32(1.0 / cfg.RopeScalingFactor)
 	q = mlx.RoPEWithBase(q, int(cfg.EffectiveRopeN), false, cfg.RopeTheta, ropeScale, offset)
 	k = mlx.RoPEWithBase(k, int(cfg.EffectiveRopeN), false, cfg.RopeTheta, ropeScale, offset)
+	mlxDebugTensor("q_post_rope", q)
+	mlxDebugTensor("k_post_rope", k)
 
 	if c != nil {
 		k, v = c.Update(k, v)
@@ -472,6 +477,7 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config
 
 	out := mlx.ScaledDotProductAttentionCausalWithSinks(q, k, v, a.Sinks, cfg.Scale, L > 1)
 	requireRuntimeShape("attention sdpa output", out, B, cfg.NumAttentionHeads, L, cfg.HeadDim)
+	mlxDebugTensor("sdpa_out", out)
 	out = mlx.Reshape(mlx.Transpose(out, 0, 2, 1, 3), B, L, cfg.NumAttentionHeads*cfg.HeadDim)
 	out = a.OProj.Forward(out)
 	return requireRuntimeShape("attention output projection", out, B, L, cfg.HiddenSize)
@@ -518,6 +524,7 @@ func (m *MoE) Forward(x *mlx.Array, cfg *Config) *mlx.Array {
 	B, L := int32(dims[0]), int32(dims[1])
 
 	logits := m.Gate.Forward(x)
+	mlxDebugTensor("router_logits", logits)
 	neg := mlx.Neg(logits)
 	inds := mlx.Argpartition(neg, int(cfg.ExpertsPerToken)-1, -1)
 	shape := inds.Dims()
@@ -528,15 +535,20 @@ func (m *MoE) Forward(x *mlx.Array, cfg *Config) *mlx.Array {
 	inds = mlx.TakeAlongAxis(inds, order, -1)
 	scores = mlx.TakeAlongAxis(scores, order, -1)
 	scores = mlx.SoftmaxAxis(scores, -1, true)
+	mlxDebugExperts("router_topk", inds, scores)
 
 	expertOut := m.SwitchMLP.Forward(x, inds, cfg)
 	y := mlx.Sum(mlx.Mul(expertOut, mlx.ExpandDims(scores, -1)), 2, false)
-	return mlx.Reshape(y, B, L, cfg.HiddenSize)
+	out := mlx.Reshape(y, B, L, cfg.HiddenSize)
+	mlxDebugTensor("post_mlp_residual", out)
+	return out
 }
 
 func (l *Layer) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *mlx.Array {
 	x = requireRuntimeShape("layer input", x, B, L, cfg.HiddenSize)
-	attn := l.Attention.Forward(l.AttentionNorm.Forward(x, cfg.RMSNormEps), c, B, L, cfg)
+	norm := l.AttentionNorm.Forward(x, cfg.RMSNormEps)
+	mlxDebugTensor("attn_norm", norm)
+	attn := l.Attention.Forward(norm, c, B, L, cfg)
 	attn = requireRuntimeShape("layer attention residual", attn, B, L, cfg.HiddenSize)
 	h := mlx.Add(x, attn)
 	h = requireRuntimeShape("layer post-attention state", h, B, L, cfg.HiddenSize)
@@ -549,9 +561,12 @@ func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
 	dims := tokens.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
 
+	_ = mlxDebugBegin(tokens, caches, m.Config)
 	h := m.EmbedTokens.Forward(tokens)
 	h = requireRuntimeShape("token embedding", h, B, L, m.HiddenSize)
+	mlxDebugTensor("embedding", h)
 	for i, layer := range m.Layers {
+		mlxDebugSetLayer(i)
 		var c cache.Cache
 		if caches != nil && i < len(caches) {
 			c = caches[i]
@@ -563,7 +578,10 @@ func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
 }
 
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
-	return m.LMHead.Forward(x)
+	logits := m.LMHead.Forward(x)
+	mlxDebugLogits("final_logits", logits, 8)
+	mlxDebugFinish()
+	return logits
 }
 
 func (m *Model) NumLayers() int {

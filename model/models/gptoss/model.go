@@ -30,9 +30,12 @@ type Transformer struct {
 // Forward implements model.Model.
 func (m *Transformer) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
 	hiddenStates := m.TokenEmbedding.Forward(ctx, batch.Inputs)
+	_ = stableDebugBegin(hiddenStates.Dim(1), hiddenStates.Dim(2), batch.Positions[0], &m.Options)
+	stableDebugTensor(ctx, "embedding", hiddenStates)
 	positions := ctx.Input().FromInts(batch.Positions, len(batch.Positions))
 
 	for i, block := range m.TransformerBlocks {
+		stableDebugSetLayer(i)
 		m.Cache.SetLayer(i)
 		if c, ok := m.Cache.(*kvcache.WrapperCache); ok {
 			// Even layers are sliding window attention.
@@ -48,7 +51,10 @@ func (m *Transformer) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, err
 	}
 
 	hiddenStates = m.OutputNorm.Forward(ctx, hiddenStates, m.eps)
-	return m.Output.Forward(ctx, hiddenStates), nil
+	logits := m.Output.Forward(ctx, hiddenStates)
+	stableDebugLogits(ctx, "final_logits", logits, 8)
+	stableDebugFinish()
+	return logits, nil
 }
 
 func (m *Transformer) Shift(ctx ml.Context, layer int, key, shift ml.Tensor) (ml.Tensor, error) {
@@ -117,6 +123,7 @@ func (attn *AttentionBlock) Forward(ctx ml.Context, hiddenStates, positions ml.T
 
 	residual := hiddenStates
 	hiddenStates = attn.Norm.Forward(ctx, hiddenStates, opts.eps)
+	stableDebugTensor(ctx, "attn_norm", hiddenStates)
 
 	var query, key, value ml.Tensor
 	if attn.QKV != nil {
@@ -134,11 +141,17 @@ func (attn *AttentionBlock) Forward(ctx ml.Context, hiddenStates, positions ml.T
 		value = attn.Value.Forward(ctx, hiddenStates)
 		value = value.Reshape(ctx, opts.headDim(), opts.numKVHeads, batchSize)
 	}
+	stableDebugTensor(ctx, "q_pre_rope", query)
+	stableDebugTensor(ctx, "k_pre_rope", key)
+	stableDebugTensor(ctx, "v_pre_rope", value)
 
 	query = opts.applyRotaryPositionEmbeddings(ctx, query, positions)
 	key = opts.applyRotaryPositionEmbeddings(ctx, key, positions)
+	stableDebugTensor(ctx, "q_post_rope", query)
+	stableDebugTensor(ctx, "k_post_rope", key)
 
 	attention := nn.AttentionWithSinks(ctx, query, key, value, attn.Sinks, 1/math.Sqrt(float64(opts.headDim())), cache)
+	stableDebugTensor(ctx, "sdpa_out", attention)
 	attention = attention.Reshape(ctx, attention.Dim(0)*attention.Dim(1), batchSize)
 	return attn.Output.Forward(ctx, attention).Add(ctx, residual)
 }
@@ -163,11 +176,13 @@ func (mlp *MLPBlock) Forward(ctx ml.Context, hiddenStates ml.Tensor, opts *Optio
 
 	hiddenStates = hiddenStates.Reshape(ctx, hiddenDim, sequenceLength*batchSize)
 	routingWeights := mlp.Router.Forward(ctx, hiddenStates)
+	stableDebugTensor(ctx, "router_logits", routingWeights)
 
 	selectedExperts := routingWeights.TopK(ctx, opts.numExpertsUsed)
 	routingWeights = routingWeights.Reshape(ctx, 1, opts.numExperts, sequenceLength*batchSize).Rows(ctx, selectedExperts)
 	routingWeights = routingWeights.Reshape(ctx, opts.numExpertsUsed, sequenceLength*batchSize).Softmax(ctx)
 	routingWeights = routingWeights.Reshape(ctx, 1, opts.numExpertsUsed, sequenceLength*batchSize)
+	stableDebugExperts(ctx, "router_topk", selectedExperts, routingWeights)
 
 	hiddenStates = hiddenStates.Reshape(ctx, hiddenStates.Dim(0), 1, hiddenStates.Dim(1))
 
@@ -191,7 +206,9 @@ func (mlp *MLPBlock) Forward(ctx ml.Context, hiddenStates ml.Tensor, opts *Optio
 		nextStates = nextStates.Add(ctx, experts.View(ctx, i*experts.Stride(1), experts.Dim(0), experts.Stride(2), experts.Dim(2)))
 	}
 
-	return nextStates.Add(ctx, residual)
+	out := nextStates.Add(ctx, residual)
+	stableDebugTensor(ctx, "post_mlp_residual", out)
+	return out
 }
 
 func New(c fs.Config) (model.Model, error) {
