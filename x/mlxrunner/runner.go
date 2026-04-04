@@ -3,6 +3,8 @@ package mlxrunner
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/x/imagegen/safetensors"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
@@ -132,8 +135,72 @@ func loadTensorsFromManifest(root *model.Root) (map[string]*mlx.Array, error) {
 		}
 	}
 
+	for name, arr := range allTensors {
+		if !shouldSafeCopyDenseBF16(name, arr, scaleBaseNames) {
+			continue
+		}
+		blobPath, ok := tensorBlobPath(root, name)
+		if !ok {
+			continue
+		}
+		safe, err := loadDenseTensorFromRaw(blobPath, name)
+		if err != nil {
+			return nil, fmt.Errorf("safe-load dense bf16 tensor %s: %w", name, err)
+		}
+		allTensors[name] = safe
+	}
+
 	slog.Info("Loaded tensors from manifest", "count", len(allTensors))
 	return allTensors, nil
+}
+
+func shouldSafeCopyDenseBF16(name string, arr *mlx.Array, scaleBaseNames map[string]bool) bool {
+	if arr == nil || !arr.Valid() || arr.DType() != mlx.DTypeBFloat16 {
+		return false
+	}
+	if scaleBaseNames[name] {
+		return false
+	}
+	switch {
+	case name == "token_embd.weight":
+		return true
+	case strings.HasSuffix(name, "embed_tokens.weight"):
+		return true
+	default:
+		return false
+	}
+}
+
+func tensorBlobPath(root *model.Root, tensorName string) (string, bool) {
+	for _, layer := range root.Manifest.GetTensorLayers("") {
+		if layer.Name == tensorName {
+			return root.Manifest.BlobPath(layer.Digest), true
+		}
+	}
+	return "", false
+}
+
+func loadDenseTensorFromRaw(blobPath, name string) (*mlx.Array, error) {
+	extractor, err := safetensors.OpenForExtraction(blobPath)
+	if err != nil {
+		return nil, err
+	}
+	defer extractor.Close()
+
+	td, err := extractor.GetTensor(name)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := io.ReadAll(td.Reader())
+	if err != nil {
+		return nil, err
+	}
+
+	shape := make([]int, len(td.Shape))
+	for i, d := range td.Shape {
+		shape[i] = int(d)
+	}
+	return mlx.FromRawBytes(raw, mlx.DTypeBFloat16, shape...), nil
 }
 
 func (r *Runner) Run(host, port string, mux http.Handler) error {
