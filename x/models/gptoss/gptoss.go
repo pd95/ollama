@@ -711,10 +711,21 @@ func (m *MoE) Forward(x *mlx.Array, cfg *Config, layerIndex int32, traceLayers b
 		slog.Info("moe_router_probs", "layer", layerIndex, "probs", scores.Floats())
 	}
 	expertOut := m.SwitchMLP.Forward(x, inds, cfg, traceMoE)
-	y := mlx.Sum(mlx.Mul(expertOut, mlx.ExpandDims(scores, -1)), 2, false)
+	probsExpanded := mlx.ExpandDims(scores, -1)
+	if traceMoE {
+		logMoEStats("moe_router_probs_broadcast", probsExpanded)
+	}
+	weighted := mlx.Mul(expertOut, probsExpanded)
+	if traceMoE {
+		logMoEStats("moe_weighted", weighted)
+	}
+	y := mlx.Sum(weighted, 2, false)
+	if traceMoE {
+		logMoEStats("moe_reduced", y)
+	}
 	out := mlx.Reshape(y, B, L, cfg.HiddenSize)
 	if traceMoE {
-		logMoEStats("moe_post_residual_mlp", out)
+		logMoEStats("moe_pre_residual_mlp", out)
 	}
 	return out
 }
