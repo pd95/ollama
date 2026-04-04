@@ -451,6 +451,8 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 
 func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *mlx.Array {
 	x = requireRuntimeShape("attention input", x, B, L, cfg.HiddenSize)
+	mlxDebugTensor("attn_norm_in", x)
+	mlxDebugTensor("qkv_input", x)
 	q := a.QProj.Forward(x)
 	k := a.KProj.Forward(x)
 	v := a.VProj.Forward(x)
@@ -553,7 +555,7 @@ func (m *MoE) Forward(x *mlx.Array, cfg *Config) *mlx.Array {
 func (l *Layer) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *mlx.Array {
 	x = requireRuntimeShape("layer input", x, B, L, cfg.HiddenSize)
 	norm := l.AttentionNorm.Forward(x, cfg.RMSNormEps)
-	mlxDebugTensor("attn_norm", norm)
+	mlxDebugTensor("attn_norm_out", norm)
 	attn := l.Attention.Forward(norm, c, B, L, cfg)
 	attn = requireRuntimeShape("layer attention residual", attn, B, L, cfg.HiddenSize)
 	h := mlx.Add(x, attn)
@@ -568,6 +570,7 @@ func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
 	B, L := int32(dims[0]), int32(dims[1])
 
 	_ = mlxDebugBegin(tokens, caches, m.Config)
+	mlxDebugTokenIDs(tokens)
 	h := m.EmbedTokens.Forward(tokens)
 	h = requireRuntimeShape("token embedding", h, B, L, m.HiddenSize)
 	mlxDebugTensor("embedding", h)

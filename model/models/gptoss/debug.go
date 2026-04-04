@@ -1,6 +1,7 @@
 package gptoss
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -80,9 +81,15 @@ func stableDebugTensor(ctx ml.Context, stage string, t ml.Tensor) {
 		sq += d * d
 	}
 	std := math.Sqrt(sq / float64(len(vals)))
+	hash := sha256.New()
+	for _, v := range vals {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], math.Float32bits(v))
+		hash.Write(b[:])
+	}
 	sampleN := min(8, len(vals))
-	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=0 shape=%v min=%g max=%g mean=%.8g std=%.8g sample=%v\n",
-		stage, t.Shape(), minV, maxV, mean, std, vals[:sampleN])
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=0 shape=%v min=%g max=%g mean=%.8g std=%.8g sha256=%x sample=%v\n",
+		stage, t.Shape(), minV, maxV, mean, std, hash.Sum(nil), vals[:sampleN])
 }
 
 func stableDebugExperts(ctx ml.Context, stage string, ids, probs ml.Tensor) {
@@ -117,4 +124,21 @@ func stableDebugLogits(ctx ml.Context, stage string, t ml.Tensor, k int) {
 		top = top[:k]
 	}
 	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=%s layer=-1 topk=%v\n", stage, top)
+}
+
+func stableDebugTokenIDs(ctx ml.Context, t ml.Tensor) {
+	if !stableDebugActive() {
+		return
+	}
+	ctx.Forward(t).Compute(t)
+	raw := t.Bytes()
+	if len(raw) == 0 {
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=input_tokens layer=-1 ids=[]\n")
+		return
+	}
+	ids := make([]int32, len(raw)/4)
+	for i := range ids {
+		ids[i] = int32(binary.LittleEndian.Uint32(raw[i*4:]))
+	}
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=input_tokens layer=-1 ids=%v\n", ids)
 }

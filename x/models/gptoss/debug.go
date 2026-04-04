@@ -1,6 +1,8 @@
 package gptoss
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
@@ -79,9 +81,15 @@ func mlxDebugTensor(stage string, t *mlx.Array) {
 		sq += d * d
 	}
 	std := math.Sqrt(sq / float64(len(vals)))
+	hash := sha256.New()
+	for _, v := range vals {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], math.Float32bits(v))
+		hash.Write(b[:])
+	}
 	sampleN := min(8, len(vals))
-	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=%s layer=0 shape=%v min=%g max=%g mean=%.8g std=%.8g sample=%v\n",
-		stage, t.Dims(), minV, maxV, mean, std, vals[:sampleN])
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=%s layer=0 shape=%v min=%g max=%g mean=%.8g std=%.8g sha256=%x sample=%v\n",
+		stage, t.Dims(), minV, maxV, mean, std, hash.Sum(nil), vals[:sampleN])
 }
 
 func mlxDebugExperts(stage string, ids, probs *mlx.Array) {
@@ -107,4 +115,12 @@ func mlxDebugLogits(stage string, t *mlx.Array, k int) {
 		top = top[:k]
 	}
 	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=%s layer=-1 topk=%v\n", stage, top)
+}
+
+func mlxDebugTokenIDs(tokens *mlx.Array) {
+	if !mlxDebugActive() {
+		return
+	}
+	mlx.Eval(tokens)
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=input_tokens layer=-1 ids=%v\n", tokens.Ints())
 }

@@ -29,8 +29,9 @@ type Transformer struct {
 
 // Forward implements model.Model.
 func (m *Transformer) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
+	_ = stableDebugBegin(len(batch.Positions), len(batch.Sequences), batch.Positions[0], &m.Options)
+	stableDebugTokenIDs(ctx, batch.Inputs)
 	hiddenStates := m.TokenEmbedding.Forward(ctx, batch.Inputs)
-	_ = stableDebugBegin(hiddenStates.Dim(1), hiddenStates.Dim(2), batch.Positions[0], &m.Options)
 	stableDebugTensor(ctx, "embedding", hiddenStates)
 	positions := ctx.Input().FromInts(batch.Positions, len(batch.Positions))
 
@@ -122,8 +123,10 @@ func (attn *AttentionBlock) Forward(ctx ml.Context, hiddenStates, positions ml.T
 	batchSize := hiddenStates.Dim(1)
 
 	residual := hiddenStates
+	stableDebugTensor(ctx, "attn_norm_in", hiddenStates)
 	hiddenStates = attn.Norm.Forward(ctx, hiddenStates, opts.eps)
-	stableDebugTensor(ctx, "attn_norm", hiddenStates)
+	stableDebugTensor(ctx, "attn_norm_out", hiddenStates)
+	stableDebugTensor(ctx, "qkv_input", hiddenStates)
 
 	var query, key, value ml.Tensor
 	if attn.QKV != nil {
