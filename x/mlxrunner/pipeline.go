@@ -18,6 +18,10 @@ func prefillChunkSize() int {
 	return 2 << 10
 }
 
+type debugSemanticSetter interface {
+	DebugSetSemantic(string)
+}
+
 func (r *Runner) TextGenerationPipeline(request Request) error {
 	if r.Model == nil {
 		return errors.New("model not loaded")
@@ -108,6 +112,12 @@ func (r *Runner) TextGenerationPipeline(request Request) error {
 		mlx.Eval(state...)
 	}
 
+	setDebugSemantic := func(semantic string) {
+		if m, ok := r.Model.(debugSemanticSetter); ok {
+			m.DebugSetSemantic(semantic)
+		}
+	}
+
 	now := time.Now()
 	total, processed := len(tokens), 0
 	for total-processed > 1 {
@@ -127,6 +137,7 @@ func (r *Runner) TextGenerationPipeline(request Request) error {
 			}
 		}
 
+		setDebugSemantic("")
 		r.Model.Forward(mlx.FromValues(tokens[processed:processed+n], n).ExpandDims(0), caches)
 		mlx.Sweep()
 		materializeCaches()
@@ -144,7 +155,8 @@ func (r *Runner) TextGenerationPipeline(request Request) error {
 		mlx.ClearCache()
 	}
 
-	step := func(token *mlx.Array) (*mlx.Array, *mlx.Array) {
+	step := func(token *mlx.Array, semantic string) (*mlx.Array, *mlx.Array) {
+		setDebugSemantic(semantic)
 		fwd := r.Model.Forward(token.ExpandDims(0), caches)
 		logits := r.Model.Unembed(fwd)
 		logits = logits.Slice(mlx.Slice(), mlx.Slice(logits.Dim(1)-1), mlx.Slice()).Squeeze(1)
@@ -159,7 +171,7 @@ func (r *Runner) TextGenerationPipeline(request Request) error {
 		return sample, logprobs
 	}
 
-	sample, logprobs = step(mlx.FromValues(tokens[processed:], total-processed))
+	sample, logprobs = step(mlx.FromValues(tokens[processed:], total-processed), "prefill_last")
 
 	var b bytes.Buffer
 
@@ -170,7 +182,11 @@ func (r *Runner) TextGenerationPipeline(request Request) error {
 		}
 
 		request.Sampler.AppendToken(sample)
-		nextSample, nextLogprobs = step(sample)
+		semantic := ""
+		if i == 0 {
+			semantic = "decode_first"
+		}
+		nextSample, nextLogprobs = step(sample, semantic)
 
 		if i == 0 {
 			mlx.Eval(sample)

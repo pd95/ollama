@@ -48,6 +48,10 @@ type response struct {
 	logprobs []llm.Logprob
 }
 
+type debugSemanticSetter interface {
+	DebugSetSemantic(string)
+}
+
 type Sequence struct {
 	// ctxs are used for allocating tensors that last the lifetime of the sequence, such as
 	// multimodal embeddings
@@ -505,6 +509,7 @@ func (s *Server) forwardBatch(pendingBatch batchState) (nextBatch batchState, er
 	var batchInputs []*input.Input
 	var batchOutputs []int32
 	var batch input.Batch
+	debugSemantic := ""
 
 	resumeSeq := -1
 	seqIdx := s.nextSeq - 1
@@ -589,6 +594,14 @@ func (s *Server) forwardBatch(pendingBatch batchState) (nextBatch batchState, er
 			if i+1 == len(seq.inputs) || seq.embeddingOnly {
 				batchOutputs = append(batchOutputs, int32(len(batchInputs)-1))
 			}
+			if debugSemantic == "" && !seq.embeddingOnly && seq.numPredicted == 0 {
+				switch {
+				case len(seq.inputs) == 1 && len(seq.cache.Inputs) >= seq.numPromptInputs:
+					debugSemantic = "decode_first"
+				case i+1 == len(seq.inputs) && len(seq.cache.Inputs)+len(seq.pendingInputs)+1 == seq.numPromptInputs:
+					debugSemantic = "prefill_last"
+				}
+			}
 			logutil.Trace("forwardBatch iBatch", "batchID", s.batchID, "seqIdx", seqIdx, "seq.iBatch", seq.iBatch, "i+1", i+1, "len(seq.inputs)", len(seq.inputs))
 			seq.pendingInputs = append(seq.pendingInputs, inp)
 		}
@@ -621,6 +634,9 @@ func (s *Server) forwardBatch(pendingBatch batchState) (nextBatch batchState, er
 	batch.Inputs = nextBatch.ctx.Input().Empty(ml.DTypeI32, len(batchInputs))
 	batch.Outputs = nextBatch.ctx.Input().FromInts(batchOutputs, len(batchOutputs))
 	nextBatch.ctx.SetBatchSize(len(batchInputs))
+	if m, ok := s.model.(debugSemanticSetter); ok {
+		m.DebugSetSemantic(debugSemantic)
+	}
 	nextBatch.modelOutput, err = model.Forward(nextBatch.ctx, s.model, batch)
 	if err != nil {
 		err = fmt.Errorf("failed to build graph: %w", err)

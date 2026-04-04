@@ -27,6 +27,10 @@ type Transformer struct {
 	Options
 }
 
+func (m *Transformer) DebugSetSemantic(semantic string) {
+	stableDebugRequestSemantic(semantic)
+}
+
 // Forward implements model.Model.
 func (m *Transformer) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
 	_ = stableDebugBegin(len(batch.Positions), len(batch.Sequences), batch.Positions, &m.Options)

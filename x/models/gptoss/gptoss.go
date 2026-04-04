@@ -62,6 +62,10 @@ type Model struct {
 	*Config
 }
 
+func (m *Model) DebugSetSemantic(semantic string) {
+	mlxDebugRequestSemantic(semantic)
+}
+
 type Layer struct {
 	AttentionNorm *nn.RMSNorm
 	Attention     *Attention

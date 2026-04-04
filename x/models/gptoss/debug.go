@@ -20,6 +20,7 @@ var (
 	mlxDebugDecode  atomic.Bool
 	mlxDebugLayer   atomic.Int32
 	mlxDebugPhase   atomic.Int32
+	mlxDebugForce   atomic.Int32
 )
 
 const (
@@ -48,6 +49,24 @@ func mlxDebugBegin(tokens *mlx.Array, caches []cache.Cache, cfg *Config) int32 {
 	if len(caches) > 0 && caches[0] != nil {
 		cacheOffset = caches[0].Offset()
 	}
+	switch mlxDebugForce.Swap(mlxDebugPhaseNone) {
+	case mlxDebugPhasePrefill:
+		if mlxDebugPrefill.CompareAndSwap(false, true) {
+			mlxDebugPhase.Store(mlxDebugPhasePrefill)
+			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=1 cache_offset=%d\n", L, cacheOffset)
+			return mlxDebugPhasePrefill
+		}
+		mlxDebugPhase.Store(mlxDebugPhaseNone)
+		return mlxDebugPhaseNone
+	case mlxDebugPhaseDecode:
+		if mlxDebugDecode.CompareAndSwap(false, true) {
+			mlxDebugPhase.Store(mlxDebugPhaseDecode)
+			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=decode_first batch_seq=1 batch_size=1 cache_offset=%d\n", cacheOffset)
+			return mlxDebugPhaseDecode
+		}
+		mlxDebugPhase.Store(mlxDebugPhaseNone)
+		return mlxDebugPhaseNone
+	}
 	switch {
 	case L > 1 && mlxDebugPrefill.CompareAndSwap(false, true):
 		mlxDebugPhase.Store(mlxDebugPhasePrefill)
@@ -60,6 +79,17 @@ func mlxDebugBegin(tokens *mlx.Array, caches []cache.Cache, cfg *Config) int32 {
 	default:
 		mlxDebugPhase.Store(mlxDebugPhaseNone)
 		return mlxDebugPhaseNone
+	}
+}
+
+func mlxDebugRequestSemantic(semantic string) {
+	switch semantic {
+	case "prefill_last":
+		mlxDebugForce.Store(mlxDebugPhasePrefill)
+	case "decode_first":
+		mlxDebugForce.Store(mlxDebugPhaseDecode)
+	default:
+		mlxDebugForce.Store(mlxDebugPhaseNone)
 	}
 }
 

@@ -19,6 +19,7 @@ var (
 	stableDebugDecode  atomic.Bool
 	stableDebugLayer   atomic.Int32
 	stableDebugPhase   atomic.Int32
+	stableDebugForce   atomic.Int32
 )
 
 const (
@@ -44,6 +45,27 @@ func stableDebugBegin(batchSeq, batchSize int, positions []int32, opts *Options)
 
 	firstPos := positions[0]
 	lastPos := positions[len(positions)-1]
+	switch stableDebugForce.Swap(stableDebugPhaseNone) {
+	case stableDebugPhasePrefill:
+		if stableDebugPrefill.CompareAndSwap(false, true) {
+			stableDebugPhase.Store(stableDebugPhasePrefill)
+			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=%d pos_first=%d pos_last=%d\n",
+				batchSeq, batchSize, firstPos, lastPos)
+			return stableDebugPhasePrefill
+		}
+		stableDebugPhase.Store(stableDebugPhaseNone)
+		return stableDebugPhaseNone
+	case stableDebugPhaseDecode:
+		if stableDebugDecode.CompareAndSwap(false, true) {
+			stableDebugPhase.Store(stableDebugPhaseDecode)
+			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=stable stage=step layer=-1 semantic=decode_first batch_seq=%d batch_size=%d pos_first=%d pos_last=%d\n",
+				batchSeq, batchSize, firstPos, lastPos)
+			return stableDebugPhaseDecode
+		}
+		stableDebugPhase.Store(stableDebugPhaseNone)
+		return stableDebugPhaseNone
+	}
+
 	switch {
 	case batchSeq > 1 && stableDebugPrefill.CompareAndSwap(false, true):
 		stableDebugPhase.Store(stableDebugPhasePrefill)
@@ -58,6 +80,17 @@ func stableDebugBegin(batchSeq, batchSize int, positions []int32, opts *Options)
 	default:
 		stableDebugPhase.Store(stableDebugPhaseNone)
 		return stableDebugPhaseNone
+	}
+}
+
+func stableDebugRequestSemantic(semantic string) {
+	switch semantic {
+	case "prefill_last":
+		stableDebugForce.Store(stableDebugPhasePrefill)
+	case "decode_first":
+		stableDebugForce.Store(stableDebugPhaseDecode)
+	default:
+		stableDebugForce.Store(stableDebugPhaseNone)
 	}
 }
 
