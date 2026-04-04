@@ -34,6 +34,13 @@ type mlxTopKV struct {
 	Value float32
 }
 
+func mlxDebugSelectedIndex(tokenCount int) int {
+	if mlxDebugPhase.Load() == mlxDebugPhasePrefill && tokenCount > 0 {
+		return tokenCount - 1
+	}
+	return 0
+}
+
 func mlxDebugBegin(tokens *mlx.Array, caches []cache.Cache, cfg *Config) int32 {
 	if !mlxDebugEnabled || tokens == nil || !tokens.Valid() {
 		mlxDebugPhase.Store(mlxDebugPhaseNone)
@@ -52,11 +59,12 @@ func mlxDebugBegin(tokens *mlx.Array, caches []cache.Cache, cfg *Config) int32 {
 	if len(caches) > 0 && caches[0] != nil {
 		cacheOffset = caches[0].Offset()
 	}
+	selectedIndex := mlxDebugSelectedIndex(L)
 	switch mlxDebugForce.Swap(mlxDebugPhaseNone) {
 	case mlxDebugPhasePrefill:
 		if mlxDebugPrefill.CompareAndSwap(false, true) {
 			mlxDebugPhase.Store(mlxDebugPhasePrefill)
-			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=1 cache_offset=%d\n", L, cacheOffset)
+			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=1 cache_offset=%d selected_index=%d\n", L, cacheOffset, selectedIndex)
 			return mlxDebugPhasePrefill
 		}
 		mlxDebugPhase.Store(mlxDebugPhaseNone)
@@ -64,7 +72,7 @@ func mlxDebugBegin(tokens *mlx.Array, caches []cache.Cache, cfg *Config) int32 {
 	case mlxDebugPhaseDecode:
 		if mlxDebugDecode.CompareAndSwap(false, true) {
 			mlxDebugPhase.Store(mlxDebugPhaseDecode)
-			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=decode_first batch_seq=1 batch_size=1 cache_offset=%d\n", cacheOffset)
+			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=decode_first batch_seq=1 batch_size=1 cache_offset=%d selected_index=0\n", cacheOffset)
 			return mlxDebugPhaseDecode
 		}
 		mlxDebugPhase.Store(mlxDebugPhaseNone)
@@ -77,11 +85,11 @@ func mlxDebugBegin(tokens *mlx.Array, caches []cache.Cache, cfg *Config) int32 {
 	switch {
 	case L > 1 && mlxDebugPrefill.CompareAndSwap(false, true):
 		mlxDebugPhase.Store(mlxDebugPhasePrefill)
-		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=1 cache_offset=%d\n", L, cacheOffset)
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=1 cache_offset=%d selected_index=%d\n", L, cacheOffset, selectedIndex)
 		return mlxDebugPhasePrefill
 	case L == 1 && cacheOffset > 0 && mlxDebugDecode.CompareAndSwap(false, true):
 		mlxDebugPhase.Store(mlxDebugPhaseDecode)
-		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=decode_first batch_seq=1 batch_size=1 cache_offset=%d\n", cacheOffset)
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=decode_first batch_seq=1 batch_size=1 cache_offset=%d selected_index=0\n", cacheOffset)
 		return mlxDebugPhaseDecode
 	default:
 		mlxDebugPhase.Store(mlxDebugPhaseNone)
@@ -211,11 +219,19 @@ func mlxDebugTokenIDs(tokens *mlx.Array) {
 	}
 	mlx.Eval(tokens)
 	ids := tokens.Ints()
-	lastID := 0
-	if len(ids) > 0 {
-		lastID = ids[len(ids)-1]
+	if len(ids) == 0 {
+		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=input_tokens layer=-1 semantic=%s ids=[]\n", mlxDebugSemantic())
+		return
 	}
-	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=input_tokens layer=-1 semantic=%s ids=%v last_id=%d\n", mlxDebugSemantic(), ids, lastID)
+	selectedIndex := 0
+	selectedIDs := ids
+	if mlxDebugPhase.Load() == mlxDebugPhasePrefill {
+		selectedIndex = len(ids) - 1
+		selectedIDs = ids[selectedIndex:]
+	}
+	lastID := selectedIDs[len(selectedIDs)-1]
+	fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=input_tokens layer=-1 semantic=%s full_count=%d selected_index=%d ids=%v last_id=%d\n",
+		mlxDebugSemantic(), len(ids), selectedIndex, selectedIDs, lastID)
 }
 
 func mlxDebugMeta(stage string, t *mlx.Array) {
