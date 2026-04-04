@@ -184,6 +184,26 @@ func findTensorFile(dir, name string) (string, error) {
 	return "", fmt.Errorf("tensor %q not found in %s", name, dir)
 }
 
+func findTensor(dir, name string) (*safetensors.TensorData, string, error) {
+	paths, err := filepath.Glob(filepath.Join(dir, "*.safetensors"))
+	if err != nil {
+		return nil, "", err
+	}
+	slices.Sort(paths)
+	for _, path := range paths {
+		extractor, err := safetensors.OpenForExtraction(path)
+		if err != nil {
+			return nil, "", err
+		}
+		td, err := extractor.GetTensor(name)
+		if err == nil {
+			return td, path, nil
+		}
+		_ = extractor.Close()
+	}
+	return nil, "", fmt.Errorf("tensor %q not found in %s", name, dir)
+}
+
 func findImportedBlob(modelsRoot, modelName, tensorName string) (string, error) {
 	manifestPath, err := manifestPathFor(modelsRoot, modelName)
 	if err != nil {
@@ -205,6 +225,23 @@ func findImportedBlob(modelsRoot, modelName, tensorName string) (string, error) 
 		return filepath.Join(modelsRoot, "blobs", strings.Replace(layer.Digest, ":", "-", 1)), nil
 	}
 	return "", fmt.Errorf("tensor %q not found in manifest %s", tensorName, manifestPath)
+}
+
+func findImportedTensor(modelsRoot, modelName, tensorName string) (*safetensors.TensorData, string, error) {
+	blobPath, err := findImportedBlob(modelsRoot, modelName, tensorName)
+	if err != nil {
+		return nil, "", err
+	}
+	extractor, err := safetensors.OpenForExtraction(blobPath)
+	if err != nil {
+		return nil, "", err
+	}
+	td, err := extractor.GetTensor(tensorName)
+	if err != nil {
+		_ = extractor.Close()
+		return nil, "", err
+	}
+	return td, blobPath, nil
 }
 
 func manifestPathFor(modelsRoot, modelName string) (string, error) {
