@@ -147,7 +147,9 @@ func (e *Embedding) Forward(indices *mlx.Array) *mlx.Array {
 	rows := e.Weight.TakeAxis(indices, 0)
 	if e.Weight.DType() == mlx.DTypeBFloat16 {
 		// MLX BF16 indexed access returns numerically wrong rows unless we cast.
-		return rows.AsType(mlx.DTypeFloat32)
+		// Cast the gathered rows through F32, then back to BF16 so downstream
+		// kernels still run on the original BF16 path.
+		return rows.AsType(mlx.DTypeFloat32).AsType(mlx.DTypeBFloat16)
 	}
 	return rows
 }
