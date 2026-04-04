@@ -35,7 +35,7 @@ type mlxTopKV struct {
 }
 
 func mlxDebugBegin(tokens *mlx.Array, caches []cache.Cache, cfg *Config) int32 {
-	if !mlxDebugEnabled || tokens == nil || !tokens.Valid() || tokens.NumDims() != 2 || tokens.Dim(0) != 1 {
+	if !mlxDebugEnabled || tokens == nil || !tokens.Valid() {
 		mlxDebugPhase.Store(mlxDebugPhaseNone)
 		return mlxDebugPhaseNone
 	}
@@ -44,7 +44,10 @@ func mlxDebugBegin(tokens *mlx.Array, caches []cache.Cache, cfg *Config) int32 {
 			cfg.NumAttentionHeads, cfg.NumKeyValueHeads, cfg.HeadDim, cfg.RopeTheta, cfg.RopeScalingFactor, cfg.SlidingWindow, cfg.ExpertCount, cfg.ExpertsPerToken)
 	}
 
-	L := tokens.Dim(1)
+	L := 1
+	if tokens.NumDims() > 1 {
+		L = tokens.Dim(1)
+	}
 	cacheOffset := 0
 	if len(caches) > 0 && caches[0] != nil {
 		cacheOffset = caches[0].Offset()
@@ -64,6 +67,10 @@ func mlxDebugBegin(tokens *mlx.Array, caches []cache.Cache, cfg *Config) int32 {
 			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=decode_first batch_seq=1 batch_size=1 cache_offset=%d\n", cacheOffset)
 			return mlxDebugPhaseDecode
 		}
+		mlxDebugPhase.Store(mlxDebugPhaseNone)
+		return mlxDebugPhaseNone
+	}
+	if tokens.NumDims() != 2 || tokens.Dim(0) != 1 {
 		mlxDebugPhase.Store(mlxDebugPhaseNone)
 		return mlxDebugPhaseNone
 	}

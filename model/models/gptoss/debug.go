@@ -34,7 +34,7 @@ type stableTopKV struct {
 }
 
 func stableDebugBegin(batchSeq, batchSize int, positions []int32, opts *Options) int32 {
-	if !stableDebugEnabled || batchSize != 1 || len(positions) == 0 {
+	if !stableDebugEnabled || len(positions) == 0 {
 		stableDebugPhase.Store(stableDebugPhaseNone)
 		return stableDebugPhaseNone
 	}
@@ -62,6 +62,11 @@ func stableDebugBegin(batchSeq, batchSize int, positions []int32, opts *Options)
 				batchSeq, batchSize, firstPos, lastPos)
 			return stableDebugPhaseDecode
 		}
+		stableDebugPhase.Store(stableDebugPhaseNone)
+		return stableDebugPhaseNone
+	}
+
+	if batchSize != 1 {
 		stableDebugPhase.Store(stableDebugPhaseNone)
 		return stableDebugPhaseNone
 	}
