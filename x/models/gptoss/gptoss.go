@@ -208,16 +208,6 @@ func stackAndClone(parts []*mlx.Array) *mlx.Array {
 	return cloned
 }
 
-func transposeExpertWeightForGatherMM(w *mlx.Array) *mlx.Array {
-	if w == nil || !w.Valid() || w.NumDims() != 3 {
-		return w
-	}
-	t := mlx.Transpose(w, 0, 2, 1)
-	cloned := t.Clone()
-	mlx.Eval(cloned)
-	return cloned
-}
-
 func requireTensor(name string, t *mlx.Array) error {
 	if t == nil || !t.Valid() {
 		return fmt.Errorf("missing or invalid tensor: %s", name)
@@ -374,9 +364,9 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			return LoadWeightsSummaryMissing(i, gateW, upW, downW)
 		}
 
-		layer.MoE.SwitchMLP.GateWeight = transposeExpertWeightForGatherMM(gateW.Weight)
-		layer.MoE.SwitchMLP.UpWeight = transposeExpertWeightForGatherMM(upW.Weight)
-		layer.MoE.SwitchMLP.DownWeight = transposeExpertWeightForGatherMM(downW.Weight)
+		layer.MoE.SwitchMLP.GateWeight = gateW.Weight
+		layer.MoE.SwitchMLP.UpWeight = upW.Weight
+		layer.MoE.SwitchMLP.DownWeight = downW.Weight
 		if layer.MoE.SwitchMLP.GateWeight == nil || layer.MoE.SwitchMLP.UpWeight == nil || layer.MoE.SwitchMLP.DownWeight == nil {
 			return fmt.Errorf("layer %d: invalid stacked moe weights", i)
 		}
@@ -389,14 +379,14 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		if err := requireStackedExperts(layerPrefix+".ffn_down_exps.weight", layer.MoE.SwitchMLP.DownWeight, cfg.ExpertCount); err != nil {
 			return err
 		}
-		if layer.MoE.SwitchMLP.GateWeight.Dim(1) != int(cfg.HiddenSize) {
-			return fmt.Errorf("tensor %s: expected hidden dimension %d after transpose, got %v", layerPrefix+".ffn_gate_exps.weight", cfg.HiddenSize, layer.MoE.SwitchMLP.GateWeight.Dims())
+		if layer.MoE.SwitchMLP.GateWeight.Dim(2) != int(cfg.HiddenSize) {
+			return fmt.Errorf("tensor %s: expected input hidden dimension %d, got %v", layerPrefix+".ffn_gate_exps.weight", cfg.HiddenSize, layer.MoE.SwitchMLP.GateWeight.Dims())
 		}
-		if layer.MoE.SwitchMLP.UpWeight.Dim(1) != int(cfg.HiddenSize) {
-			return fmt.Errorf("tensor %s: expected hidden dimension %d after transpose, got %v", layerPrefix+".ffn_up_exps.weight", cfg.HiddenSize, layer.MoE.SwitchMLP.UpWeight.Dims())
+		if layer.MoE.SwitchMLP.UpWeight.Dim(2) != int(cfg.HiddenSize) {
+			return fmt.Errorf("tensor %s: expected input hidden dimension %d, got %v", layerPrefix+".ffn_up_exps.weight", cfg.HiddenSize, layer.MoE.SwitchMLP.UpWeight.Dims())
 		}
-		if layer.MoE.SwitchMLP.DownWeight.Dim(2) != int(cfg.HiddenSize) {
-			return fmt.Errorf("tensor %s: expected hidden dimension %d after transpose, got %v", layerPrefix+".ffn_down_exps.weight", cfg.HiddenSize, layer.MoE.SwitchMLP.DownWeight.Dims())
+		if layer.MoE.SwitchMLP.DownWeight.Dim(1) != int(cfg.HiddenSize) {
+			return fmt.Errorf("tensor %s: expected output hidden dimension %d, got %v", layerPrefix+".ffn_down_exps.weight", cfg.HiddenSize, layer.MoE.SwitchMLP.DownWeight.Dims())
 		}
 
 		m.Layers[i] = layer
@@ -459,10 +449,10 @@ func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config) *mlx.
 		idxFlat = mlx.Reshape(mlx.Take(idxAll, order, 0), n, 1)
 	}
 
-	gate := mlx.GatherMM(xFlat, s.GateWeight, nil, idxFlat, doSort)
-	up := mlx.GatherMM(xFlat, s.UpWeight, nil, idxFlat, doSort)
+	gate := mlx.GatherMM(xFlat, mlx.Transpose(s.GateWeight, 0, 2, 1), nil, idxFlat, doSort)
+	up := mlx.GatherMM(xFlat, mlx.Transpose(s.UpWeight, 0, 2, 1), nil, idxFlat, doSort)
 	hidden := mlx.Mul(mlx.SiLU(gate), up)
-	down := mlx.GatherMM(hidden, s.DownWeight, nil, idxFlat, doSort)
+	down := mlx.GatherMM(hidden, mlx.Transpose(s.DownWeight, 0, 2, 1), nil, idxFlat, doSort)
 
 	if doSort {
 		down = mlx.Reshape(mlx.Take(mlx.Squeeze(mlx.Squeeze(down, 2), 1), invOrder, 0), B*L, topK, cfg.HiddenSize)
