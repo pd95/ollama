@@ -22,7 +22,9 @@ var gptossTensorReplacer = strings.NewReplacer(
 	"post_attention_layernorm", "ffn_norm",
 	"mlp.router", "ffn_gate_inp",
 	"mlp.experts.gate_up_proj_", "ffn_gate_up_exps.",
+	"mlp.experts.gate_up_proj", "ffn_gate_up_exps",
 	"mlp.experts.down_proj_", "ffn_down_exps.",
+	"mlp.experts.down_proj", "ffn_down_exps",
 	"model.norm", "output_norm",
 	"lm_head", "output",
 )
@@ -40,7 +42,10 @@ func (gptossImportTransform) transformTensor(td *safetensors.TensorData) ([]*saf
 
 	name, ok := gptossTensorName(td.Name)
 	if !ok {
-		return []*safetensors.TensorData{td}, nil
+		name, ok = gptossTensorBase(td.Name)
+		if !ok {
+			return []*safetensors.TensorData{td}, nil
+		}
 	}
 
 	rewritten := td.WithName(name)
@@ -60,19 +65,16 @@ func (gptossImportTransform) transformPrequantizedTensor(extractor *safetensors.
 		return nil, false, nil
 	}
 
+	rawBase, base, ok, kind := gptossRawCompanion(td.Name)
 	switch {
-	case strings.HasSuffix(td.Name, ".scales"), strings.HasSuffix(td.Name, ".biases"):
-		base := strings.TrimSuffix(strings.TrimSuffix(td.Name, ".scales"), ".biases")
-		if _, ok := tensorSet[base+".blocks"]; ok {
-			return nil, true, nil
-		}
+	case !ok:
 		return nil, false, nil
-	case !strings.HasSuffix(td.Name, ".blocks"):
-		return nil, false, nil
+	case kind != "blocks":
+		_, blocksOK := tensorSet[rawBase+"_blocks"]
+		return nil, blocksOK, nil
 	}
 
-	base := strings.TrimSuffix(td.Name, ".blocks")
-	scaleName := base + ".scales"
+	scaleName := rawBase + "_scales"
 	if _, ok := tensorSet[scaleName]; !ok {
 		return nil, false, nil
 	}
@@ -83,7 +85,7 @@ func (gptossImportTransform) transformPrequantizedTensor(extractor *safetensors.
 	}
 
 	var biasTD *safetensors.TensorData
-	biasName := base + ".biases"
+	biasName := rawBase + "_bias"
 	if _, ok := tensorSet[biasName]; ok {
 		biasTD, err = extractor.GetTensor(biasName)
 		if err != nil {
@@ -91,16 +93,11 @@ func (gptossImportTransform) transformPrequantizedTensor(extractor *safetensors.
 		}
 	}
 
-	canonicalBase, ok := gptossTensorBase(base)
-	if !ok {
-		return nil, false, nil
+	if strings.Contains(base, "ffn_gate_up_exps") {
+		return gptossSplitGateUpBlobs(base, td, scaleTD, biasTD)
 	}
 
-	if strings.Contains(canonicalBase, "ffn_gate_up_exps") {
-		return gptossSplitGateUpBlobs(canonicalBase, td, scaleTD, biasTD)
-	}
-
-	blob, err := gptossPrequantizedBlob(canonicalBase+".weight", td, scaleTD, biasTD)
+	blob, err := gptossPrequantizedBlob(base+".weight", td, scaleTD, biasTD)
 	if err != nil {
 		return nil, false, err
 	}
@@ -108,21 +105,36 @@ func (gptossImportTransform) transformPrequantizedTensor(extractor *safetensors.
 }
 
 func gptossTensorName(name string) (string, bool) {
-	switch {
-	case strings.HasSuffix(name, ".blocks"):
-		if base, ok := gptossTensorBase(strings.TrimSuffix(name, ".blocks")); ok {
+	if _, base, ok, kind := gptossRawCompanion(name); ok {
+		switch kind {
+		case "blocks":
 			return base + ".weight", true
-		}
-	case strings.HasSuffix(name, ".scales"):
-		if base, ok := gptossTensorBase(strings.TrimSuffix(name, ".scales")); ok {
+		case "scales":
 			return base + ".weight.scale", true
-		}
-	case strings.HasSuffix(name, ".biases"):
-		if base, ok := gptossTensorBase(strings.TrimSuffix(name, ".biases")); ok {
-			return base + ".weight.bias", true
+		case "bias":
+			return base + ".bias", true
 		}
 	}
 	return "", false
+}
+
+func gptossRawCompanion(name string) (rawBase, canonicalBase string, ok bool, kind string) {
+	for suffix, companionKind := range map[string]string{
+		"_blocks": "blocks",
+		"_scales": "scales",
+		"_bias":   "bias",
+		".blocks": "blocks",
+		".scales": "scales",
+		".biases": "bias",
+	} {
+		if !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		rawBase = strings.TrimSuffix(name, suffix)
+		base, baseOK := gptossTensorBase(rawBase)
+		return rawBase, base, baseOK, companionKind
+	}
+	return "", "", false, ""
 }
 
 func gptossTensorBase(name string) (string, bool) {
@@ -136,7 +148,7 @@ func gptossTensorBase(name string) (string, bool) {
 func gptossPrequantizedBlob(weightName string, blocksTD, scalesTD, biasTD *safetensors.TensorData) (prequantizedTensorBlob, error) {
 	tensors := []*safetensors.TensorData{blocksTD.WithName(weightName), scalesTD.WithName(weightName + ".scale")}
 	if biasTD != nil {
-		tensors = append(tensors, biasTD.WithName(weightName+".bias"))
+		tensors = append(tensors, biasTD.WithName(strings.TrimSuffix(weightName, ".weight")+".bias"))
 	}
 	return prequantizedTensorBlob{Name: weightName, Tensors: tensors}, nil
 }
@@ -167,7 +179,7 @@ func gptossSplitGateUpBlobs(base string, blocksTD, scalesTD, biasTD *safetensors
 		gateBase+".weight",
 		safetensors.NewTensorDataFromBytes(gateBase+".weight", blocksTD.Dtype, blockShape, gateBlocks),
 		safetensors.NewTensorDataFromBytes(gateBase+".weight.scale", scalesTD.Dtype, scaleShape, gateScales),
-		gptossMaybeBiasTensor(gateBase+".weight.bias", biasTD, biasShape, gateBias),
+		gptossMaybeBiasTensor(gateBase+".bias", biasTD, biasShape, gateBias),
 	)
 	if err != nil {
 		return nil, false, err
@@ -177,7 +189,7 @@ func gptossSplitGateUpBlobs(base string, blocksTD, scalesTD, biasTD *safetensors
 		upBase+".weight",
 		safetensors.NewTensorDataFromBytes(upBase+".weight", blocksTD.Dtype, blockShape, upBlocks),
 		safetensors.NewTensorDataFromBytes(upBase+".weight.scale", scalesTD.Dtype, scaleShape, upScales),
-		gptossMaybeBiasTensor(upBase+".weight.bias", biasTD, biasShape, upBias),
+		gptossMaybeBiasTensor(upBase+".bias", biasTD, biasShape, upBias),
 	)
 	if err != nil {
 		return nil, false, err
@@ -188,7 +200,7 @@ func gptossSplitGateUpBlobs(base string, blocksTD, scalesTD, biasTD *safetensors
 
 func gptossSplitGateUpTensors(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
 	switch {
-	case strings.HasSuffix(td.Name, ".weight"), strings.HasSuffix(td.Name, ".weight.scale"), strings.HasSuffix(td.Name, ".weight.bias"):
+	case strings.HasSuffix(td.Name, ".weight"), strings.HasSuffix(td.Name, ".weight.scale"), strings.HasSuffix(td.Name, ".bias"):
 	default:
 		return []*safetensors.TensorData{td}, nil
 	}

@@ -13,7 +13,11 @@ import (
 // DTypeSize returns the byte size of a single element for the given dtype string.
 func DTypeSize(dtype string) (int, error) {
 	switch strings.ToUpper(dtype) {
+	case "U8", "I8":
+		return 1, nil
 	case "BF16", "F16":
+		return 2, nil
+	case "U16", "I16":
 		return 2, nil
 	case "F32", "U32", "I32":
 		return 4, nil

@@ -45,6 +45,30 @@ func TestGptOssTransformTensorRewritesAndSplitsGateUp(t *testing.T) {
 	}
 }
 
+func TestGptOssTensorNameSupportsFinalSuffixes(t *testing.T) {
+	tests := map[string]string{
+		"model.embed_tokens_blocks":                      "token_embd.weight",
+		"model.embed_tokens_scales":                      "token_embd.weight.scale",
+		"model.layers.0.mlp.experts.down_proj_bias":      "blk.0.ffn_down_exps.bias",
+		"model.layers.0.input_layernorm.weight":          "blk.0.attn_norm.weight",
+		"model.layers.0.self_attn.q_proj.weight":         "blk.0.attn_q.weight",
+		"model.layers.0.mlp.experts.gate_up_proj_blocks": "blk.0.ffn_gate_up_exps.weight",
+	}
+
+	for input, want := range tests {
+		got, ok := gptossTensorName(input)
+		if strings.HasSuffix(input, ".weight") {
+			got, ok = gptossTensorBase(input)
+		}
+		if !ok {
+			t.Fatalf("no rewrite for %q", input)
+		}
+		if got != want {
+			t.Fatalf("rewrite %q = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestCreateSafetensorsModel_GptOssTransformsPrequantizedBlocks(t *testing.T) {
 	dir := t.TempDir()
 
@@ -101,7 +125,7 @@ func TestCreateSafetensorsModel_GptOssTransformsPrequantizedBlocks(t *testing.T)
 	}
 
 	gateNames := readSafetensorsHeaderNames(t, calls["blk.0.ffn_gate_exps.weight"].data)
-	if !slices.Equal(gateNames, []string{"blk.0.ffn_gate_exps.weight", "blk.0.ffn_gate_exps.weight.bias", "blk.0.ffn_gate_exps.weight.scale"}) {
+	if !slices.Equal(gateNames, []string{"blk.0.ffn_gate_exps.bias", "blk.0.ffn_gate_exps.weight", "blk.0.ffn_gate_exps.weight.scale"}) {
 		t.Fatalf("gate blob tensors = %v", gateNames)
 	}
 }
