@@ -144,7 +144,12 @@ func NewEmbedding(weight *mlx.Array) *Embedding {
 }
 
 func (e *Embedding) Forward(indices *mlx.Array) *mlx.Array {
-	return e.Weight.TakeAxis(indices, 0)
+	rows := e.Weight.TakeAxis(indices, 0)
+	if e.Weight.DType() == mlx.DTypeBFloat16 {
+		// MLX BF16 indexed access returns numerically wrong rows unless we cast.
+		return rows.AsType(mlx.DTypeFloat32)
+	}
+	return rows
 }
 
 func (e *Embedding) AsLinear() LinearLayer {
