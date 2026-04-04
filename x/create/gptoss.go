@@ -155,9 +155,10 @@ func gptossTensorBase(name string) (string, bool) {
 }
 
 func gptossPrequantizedBlob(weightName string, blocksTD, scalesTD, biasTD *safetensors.TensorData) (prequantizedTensorBlob, error) {
+	rewrittenScalesTD := gptossRewriteMXFP4Scales(scalesTD, blocksTD)
 	tensors := []*safetensors.TensorData{
 		blocksTD.WithName(weightName),
-		scalesTD.WithName(weightName + ".scale"),
+		rewrittenScalesTD.WithName(weightName + ".scale"),
 	}
 	if biasTD != nil {
 		tensors = append(tensors, biasTD.WithName(strings.TrimSuffix(weightName, ".weight")+".bias"))
@@ -236,6 +237,22 @@ func gptossMaybeBiasTensor(name string, source *safetensors.TensorData, shape []
 		return nil
 	}
 	return safetensors.NewTensorDataFromBytes(name, source.Dtype, shape, raw)
+}
+
+func gptossRewriteMXFP4Scales(scalesTD, blocksTD *safetensors.TensorData) *safetensors.TensorData {
+	if scalesTD == nil || blocksTD == nil {
+		return scalesTD
+	}
+	if len(scalesTD.Shape) >= len(blocksTD.Shape) {
+		return scalesTD
+	}
+
+	shape := make([]int32, 0, len(blocksTD.Shape))
+	shape = append(shape, scalesTD.Shape...)
+	for len(shape) < len(blocksTD.Shape) {
+		shape = append(shape, 1)
+	}
+	return scalesTD.WithName(scalesTD.Name).WithShape(shape)
 }
 
 func gptossRewriteMXFP4Blocks(td *safetensors.TensorData) (*safetensors.TensorData, error) {

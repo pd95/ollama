@@ -53,6 +53,23 @@ func (td *TensorData) WithName(name string) *TensorData {
 	}
 }
 
+// WithShape returns a shallow copy of TensorData with a different logical shape
+// but the same underlying raw data reader.
+func (td *TensorData) WithShape(shape []int32) *TensorData {
+	if td == nil {
+		return nil
+	}
+	shapeCopy := make([]int32, len(shape))
+	copy(shapeCopy, shape)
+	return &TensorData{
+		Name:   td.Name,
+		Dtype:  td.Dtype,
+		Shape:  shapeCopy,
+		Size:   td.Size,
+		reader: td.reader,
+	}
+}
+
 // Reader returns an io.Reader for the tensor's raw bytes.
 func (td *TensorData) Reader() io.Reader {
 	return td.reader

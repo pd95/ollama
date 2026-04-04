@@ -1091,8 +1091,8 @@ func TestCreateSafetensorsModel_GptOssTransformsRawMXFP4(t *testing.T) {
 	if got := gateInfo["blk.0.ffn_gate_exps.weight"].Shape; !slices.Equal(got, []int32{1, 2, 1, 4}) {
 		t.Fatalf("gate weight shape = %v, want %v", got, []int32{1, 2, 1, 4})
 	}
-	if got := gateInfo["blk.0.ffn_gate_exps.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 1}) {
-		t.Fatalf("gate scale shape = %v, want %v", got, []int32{1, 2, 1})
+	if got := gateInfo["blk.0.ffn_gate_exps.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 1, 1}) {
+		t.Fatalf("gate scale shape = %v, want %v", got, []int32{1, 2, 1, 1})
 	}
 	if got := gateInfo["blk.0.ffn_gate_exps.bias"].Shape; !slices.Equal(got, []int32{1, 2}) {
 		t.Fatalf("gate bias shape = %v, want %v", got, []int32{1, 2})
@@ -1116,8 +1116,8 @@ func TestCreateSafetensorsModel_GptOssTransformsRawMXFP4(t *testing.T) {
 	if got := upInfo["blk.0.ffn_up_exps.weight"].Shape; !slices.Equal(got, []int32{1, 2, 1, 4}) {
 		t.Fatalf("up weight shape = %v, want %v", got, []int32{1, 2, 1, 4})
 	}
-	if got := upInfo["blk.0.ffn_up_exps.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 1}) {
-		t.Fatalf("up scale shape = %v, want %v", got, []int32{1, 2, 1})
+	if got := upInfo["blk.0.ffn_up_exps.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 1, 1}) {
+		t.Fatalf("up scale shape = %v, want %v", got, []int32{1, 2, 1, 1})
 	}
 	if got := upInfo["blk.0.ffn_up_exps.bias"].Shape; !slices.Equal(got, []int32{1, 2}) {
 		t.Fatalf("up bias shape = %v, want %v", got, []int32{1, 2})
