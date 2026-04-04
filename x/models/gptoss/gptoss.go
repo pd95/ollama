@@ -30,6 +30,7 @@ type Config struct {
 	InitialContextLength  int32   `json:"initial_context_length"`
 	RopeScalingFactor     float32 `json:"rope_scaling_factor"`
 	RopeTheta             float32 `json:"rope_theta"`
+	SlidingWindow         int32   `json:"sliding_window"`
 	NumExperts            int32   `json:"num_experts"`
 	LocalExperts          int32   `json:"num_local_experts"`
 	ExpertsPerToken       int32   `json:"experts_per_token"`
@@ -398,7 +399,11 @@ func (m *Model) MaxContextLength() int {
 func (m *Model) NewCaches() []cache.Cache {
 	caches := make([]cache.Cache, len(m.Layers))
 	for i := range caches {
-		caches[i] = cache.NewKVCache()
+		if m.SlidingWindow > 0 && i%2 == 0 {
+			caches[i] = cache.NewRotatingKVCache(int(m.SlidingWindow))
+		} else {
+			caches[i] = cache.NewKVCache()
+		}
 	}
 	return caches
 }
