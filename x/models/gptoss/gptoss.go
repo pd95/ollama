@@ -218,6 +218,55 @@ func transposeExpertWeightForGatherMM(w *mlx.Array) *mlx.Array {
 	return cloned
 }
 
+func requireTensor(name string, t *mlx.Array) error {
+	if t == nil || !t.Valid() {
+		return fmt.Errorf("missing or invalid tensor: %s", name)
+	}
+	return nil
+}
+
+func requireVector(name string, t *mlx.Array, size int32) error {
+	if err := requireTensor(name, t); err != nil {
+		return err
+	}
+	if t.NumDims() != 1 {
+		return fmt.Errorf("tensor %s: expected 1D shape [%d], got %v", name, size, t.Dims())
+	}
+	if size > 0 && t.Dim(0) != int(size) {
+		return fmt.Errorf("tensor %s: expected shape [%d], got %v", name, size, t.Dims())
+	}
+	return nil
+}
+
+func requireStackedExperts(name string, t *mlx.Array, experts int32) error {
+	if err := requireTensor(name, t); err != nil {
+		return err
+	}
+	if t.NumDims() != 3 {
+		return fmt.Errorf("tensor %s: expected 3D expert stack, got %v", name, t.Dims())
+	}
+	if experts > 0 && t.Dim(0) != int(experts) {
+		return fmt.Errorf("tensor %s: expected %d experts, got %v", name, experts, t.Dims())
+	}
+	return nil
+}
+
+func requireRuntimeShape(name string, t *mlx.Array, want ...int32) *mlx.Array {
+	if t == nil || !t.Valid() {
+		panic(fmt.Sprintf("gptoss %s produced an invalid MLX array", name))
+	}
+	dims := t.Dims()
+	if len(dims) != len(want) {
+		panic(fmt.Sprintf("gptoss %s expected rank %d shape %v, got %v", name, len(want), want, dims))
+	}
+	for i, dim := range want {
+		if dim >= 0 && dims[i] != int(dim) {
+			panic(fmt.Sprintf("gptoss %s expected shape %v, got %v", name, want, dims))
+		}
+	}
+	return t
+}
+
 func loadStackedProjection(tensors map[string]*mlx.Array, cfg *Config, bases ...string) *stackedExpertWeights {
 	for _, base := range bases {
 		w, key := tensorAny(tensors, base+".weight", base)
@@ -266,8 +315,8 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	}
 
 	normWeight := tensors["output_norm.weight"]
-	if normWeight == nil {
-		return fmt.Errorf("missing final norm weight: output_norm.weight")
+	if err := requireVector("output_norm.weight", normWeight, cfg.HiddenSize); err != nil {
+		return err
 	}
 	m.Norm = nn.NewRMSNorm(normWeight, cfg.RMSNormEps)
 
@@ -284,9 +333,15 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		}
 
 		if w := tensors[layerPrefix+".attn_norm.weight"]; w != nil {
+			if err := requireVector(layerPrefix+".attn_norm.weight", w, cfg.HiddenSize); err != nil {
+				return err
+			}
 			layer.AttentionNorm = nn.NewRMSNorm(w, cfg.RMSNormEps)
 		}
 		if w := tensors[layerPrefix+".ffn_norm.weight"]; w != nil {
+			if err := requireVector(layerPrefix+".ffn_norm.weight", w, cfg.HiddenSize); err != nil {
+				return err
+			}
 			layer.MLPNorm = nn.NewRMSNorm(w, cfg.RMSNormEps)
 		}
 		if layer.AttentionNorm == nil || layer.MLPNorm == nil {
@@ -298,6 +353,9 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		layer.Attention.VProj = linears.Make(layerPrefix + ".attn_v")
 		layer.Attention.OProj = linears.Make(layerPrefix + ".attn_out")
 		if sinks := tensors[layerPrefix+".attn_sinks"]; sinks != nil {
+			if err := requireVector(layerPrefix+".attn_sinks", sinks, cfg.NumAttentionHeads); err != nil {
+				return err
+			}
 			layer.Attention.Sinks = sinks.AsType(mlx.DTypeFloat32)
 		}
 		if layer.Attention.QProj == nil || layer.Attention.KProj == nil || layer.Attention.VProj == nil || layer.Attention.OProj == nil {
@@ -322,6 +380,24 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		if layer.MoE.SwitchMLP.GateWeight == nil || layer.MoE.SwitchMLP.UpWeight == nil || layer.MoE.SwitchMLP.DownWeight == nil {
 			return fmt.Errorf("layer %d: invalid stacked moe weights", i)
 		}
+		if err := requireStackedExperts(layerPrefix+".ffn_gate_exps.weight", layer.MoE.SwitchMLP.GateWeight, cfg.ExpertCount); err != nil {
+			return err
+		}
+		if err := requireStackedExperts(layerPrefix+".ffn_up_exps.weight", layer.MoE.SwitchMLP.UpWeight, cfg.ExpertCount); err != nil {
+			return err
+		}
+		if err := requireStackedExperts(layerPrefix+".ffn_down_exps.weight", layer.MoE.SwitchMLP.DownWeight, cfg.ExpertCount); err != nil {
+			return err
+		}
+		if layer.MoE.SwitchMLP.GateWeight.Dim(1) != int(cfg.HiddenSize) {
+			return fmt.Errorf("tensor %s: expected hidden dimension %d after transpose, got %v", layerPrefix+".ffn_gate_exps.weight", cfg.HiddenSize, layer.MoE.SwitchMLP.GateWeight.Dims())
+		}
+		if layer.MoE.SwitchMLP.UpWeight.Dim(1) != int(cfg.HiddenSize) {
+			return fmt.Errorf("tensor %s: expected hidden dimension %d after transpose, got %v", layerPrefix+".ffn_up_exps.weight", cfg.HiddenSize, layer.MoE.SwitchMLP.UpWeight.Dims())
+		}
+		if layer.MoE.SwitchMLP.DownWeight.Dim(2) != int(cfg.HiddenSize) {
+			return fmt.Errorf("tensor %s: expected hidden dimension %d after transpose, got %v", layerPrefix+".ffn_down_exps.weight", cfg.HiddenSize, layer.MoE.SwitchMLP.DownWeight.Dims())
+		}
 
 		m.Layers[i] = layer
 	}
@@ -330,6 +406,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 }
 
 func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *mlx.Array {
+	x = requireRuntimeShape("attention input", x, B, L, cfg.HiddenSize)
 	q := a.QProj.Forward(x)
 	k := a.KProj.Forward(x)
 	v := a.VProj.Forward(x)
@@ -355,8 +432,10 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config
 	}
 
 	out := mlx.ScaledDotProductAttentionCausalWithSinks(q, k, v, a.Sinks, cfg.Scale, L > 1)
+	requireRuntimeShape("attention sdpa output", out, B, cfg.NumAttentionHeads, L, cfg.HeadDim)
 	out = mlx.Reshape(mlx.Transpose(out, 0, 2, 1, 3), B, L, cfg.NumAttentionHeads*cfg.HeadDim)
-	return a.OProj.Forward(out)
+	out = a.OProj.Forward(out)
+	return requireRuntimeShape("attention output projection", out, B, L, cfg.HiddenSize)
 }
 
 func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config) *mlx.Array {
@@ -395,10 +474,8 @@ func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config) *mlx.
 }
 
 func (m *MoE) Forward(x *mlx.Array, cfg *Config) *mlx.Array {
+	x = requireRuntimeShape("moe input", x, -1, -1, cfg.HiddenSize)
 	dims := x.Dims()
-	if len(dims) != 3 {
-		panic(fmt.Sprintf("gptoss moe expects [batch, seq, hidden], got shape %v", dims))
-	}
 	B, L := int32(dims[0]), int32(dims[1])
 
 	probs := mlx.SoftmaxAxis(m.Gate.Forward(x), -1, true)
@@ -414,9 +491,13 @@ func (m *MoE) Forward(x *mlx.Array, cfg *Config) *mlx.Array {
 }
 
 func (l *Layer) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config) *mlx.Array {
+	x = requireRuntimeShape("layer input", x, B, L, cfg.HiddenSize)
 	attn := l.Attention.Forward(l.AttentionNorm.Forward(x, cfg.RMSNormEps), c, B, L, cfg)
+	attn = requireRuntimeShape("layer attention residual", attn, B, L, cfg.HiddenSize)
 	h := mlx.Add(x, attn)
+	h = requireRuntimeShape("layer post-attention state", h, B, L, cfg.HiddenSize)
 	ffn := l.MoE.Forward(l.MLPNorm.Forward(h, cfg.RMSNormEps), cfg)
+	ffn = requireRuntimeShape("layer ffn residual", ffn, B, L, cfg.HiddenSize)
 	return mlx.Add(h, ffn)
 }
 
@@ -425,6 +506,7 @@ func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
 	B, L := int32(dims[0]), int32(dims[1])
 
 	h := m.EmbedTokens.Forward(tokens)
+	h = requireRuntimeShape("token embedding", h, B, L, m.HiddenSize)
 	for i, layer := range m.Layers {
 		var c cache.Cache
 		if caches != nil && i < len(caches) {
@@ -433,7 +515,7 @@ func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
 		h = layer.Forward(h, c, B, L, m.Config)
 	}
 
-	return m.Norm.Forward(h, m.RMSNormEps)
+	return requireRuntimeShape("final norm", m.Norm.Forward(h, m.RMSNormEps), B, L, m.HiddenSize)
 }
 
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
