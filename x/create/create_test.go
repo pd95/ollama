@@ -15,6 +15,97 @@ import (
 	st "github.com/ollama/ollama/x/imagegen/safetensors"
 )
 
+func TestGptOssTransformTensorRewritesAndSplitsGateUp(t *testing.T) {
+	transform := gptossImportTransform{}
+
+	out, err := transform.transformTensor(st.NewTensorDataFromBytes(
+		"model.layers.0.mlp.experts.gate_up_proj.weight",
+		"BF16",
+		[]int32{2, 4, 3},
+		make([]byte, 2*4*3*2),
+	))
+	if err != nil {
+		t.Fatalf("transformTensor failed: %v", err)
+	}
+
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2", len(out))
+	}
+	if out[0].Name != "blk.0.ffn_gate_exps.weight" {
+		t.Fatalf("left name = %q", out[0].Name)
+	}
+	if out[1].Name != "blk.0.ffn_up_exps.weight" {
+		t.Fatalf("right name = %q", out[1].Name)
+	}
+	if !slices.Equal(out[0].Shape, []int32{2, 2, 3}) {
+		t.Fatalf("left shape = %v", out[0].Shape)
+	}
+	if !slices.Equal(out[1].Shape, []int32{2, 2, 3}) {
+		t.Fatalf("right shape = %v", out[1].Shape)
+	}
+}
+
+func TestCreateSafetensorsModel_GptOssTransformsPrequantizedBlocks(t *testing.T) {
+	dir := t.TempDir()
+
+	configJSON := `{
+		"model_type": "gptoss",
+		"architectures": ["GptOssForCausalLM"],
+		"quantization": {"group_size": 32, "bits": 4, "mode": "mxfp4"}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatalf("failed to write config.json: %v", err)
+	}
+
+	createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
+		st.NewTensorDataFromBytes("model.embed_tokens.blocks", "U32", []int32{2, 4}, make([]byte, 2*4*4)),
+		st.NewTensorDataFromBytes("model.embed_tokens.scales", "F32", []int32{2, 4}, make([]byte, 2*4*4)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj.blocks", "U32", []int32{1, 4}, make([]byte, 1*4*4)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj.scales", "F32", []int32{1, 4}, make([]byte, 1*4*4)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj.biases", "BF16", []int32{1, 4}, make([]byte, 1*4*2)),
+	})
+
+	type layerCall struct {
+		data []byte
+	}
+	calls := make(map[string]layerCall)
+
+	createLayer := func(r io.Reader, mediaType, name string) (LayerInfo, error) {
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return LayerInfo{}, err
+		}
+		calls[name] = layerCall{data: data}
+		return LayerInfo{Name: name, Digest: "sha256:" + name, MediaType: mediaType, Size: int64(len(data))}, nil
+	}
+
+	createTensorLayer := func(r io.Reader, name, dtype string, shape []int32, quantize string) ([]LayerInfo, error) {
+		if _, err := io.ReadAll(r); err != nil {
+			return nil, err
+		}
+		return []LayerInfo{{Name: name, Digest: "sha256:" + name, MediaType: "application/vnd.ollama.image.tensor"}}, nil
+	}
+
+	if err := CreateSafetensorsModel("test-model", dir, "", createLayer, createTensorLayer, func(string, LayerInfo, []LayerInfo) error { return nil }, func(string) {}); err != nil {
+		t.Fatalf("CreateSafetensorsModel failed: %v", err)
+	}
+
+	if _, ok := calls["token_embd.weight"]; !ok {
+		t.Fatalf("missing token_embd.weight blob: %v", sortedMapKeys(calls))
+	}
+	if _, ok := calls["blk.0.ffn_gate_exps.weight"]; !ok {
+		t.Fatalf("missing gate blob: %v", sortedMapKeys(calls))
+	}
+	if _, ok := calls["blk.0.ffn_up_exps.weight"]; !ok {
+		t.Fatalf("missing up blob: %v", sortedMapKeys(calls))
+	}
+
+	gateNames := readSafetensorsHeaderNames(t, calls["blk.0.ffn_gate_exps.weight"].data)
+	if !slices.Equal(gateNames, []string{"blk.0.ffn_gate_exps.weight", "blk.0.ffn_gate_exps.weight.bias", "blk.0.ffn_gate_exps.weight.scale"}) {
+		t.Fatalf("gate blob tensors = %v", gateNames)
+	}
+}
+
 func TestIsTensorModelDir(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -268,6 +359,15 @@ func readSafetensorsHeaderNames(t *testing.T, data []byte) []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+func sortedMapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func TestCreateSafetensorsModel(t *testing.T) {
