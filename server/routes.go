@@ -544,6 +544,9 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		}
 	}
 
+	traceGPTOSSStream := shouldUseHarmony(m)
+	traceGPTOSSCount := 0
+
 	ch := make(chan any)
 	go func() {
 		// TODO (jmorganca): avoid building the response twice both here and below
@@ -588,6 +591,21 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 				thinking, content := thinkingState.AddContent(cr.Content)
 				res.Thinking = thinking
 				res.Response = content
+			}
+
+			if traceGPTOSSStream && traceGPTOSSCount < 32 {
+				slog.Info(
+					"gptoss stream chunk",
+					"idx", traceGPTOSSCount,
+					"done", cr.Done,
+					"raw_len", len(cr.Content),
+					"raw", cr.Content,
+					"parsed_len", len(res.Response),
+					"parsed", res.Response,
+					"thinking_len", len(res.Thinking),
+					"thinking", res.Thinking,
+				)
+				traceGPTOSSCount++
 			}
 
 			if _, err := sb.WriteString(cr.Content); err != nil {
