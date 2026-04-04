@@ -42,10 +42,18 @@ func (gptossImportTransform) transformTensor(td *safetensors.TensorData) ([]*saf
 
 	name, ok := gptossTensorName(td.Name)
 	if !ok {
-		return []*safetensors.TensorData{td}, nil
+		name, ok = gptossTensorBase(td.Name)
+		if !ok {
+			return []*safetensors.TensorData{td}, nil
+		}
 	}
 
-	return []*safetensors.TensorData{td.WithName(name)}, nil
+	rewritten := td.WithName(name)
+	if strings.Contains(name, "ffn_gate_up_exps") {
+		return gptossSplitGateUpTensors(rewritten)
+	}
+
+	return []*safetensors.TensorData{rewritten}, nil
 }
 
 func (gptossImportTransform) quantizationType(name string, shape []int32, quantize string) string {
@@ -85,16 +93,11 @@ func (gptossImportTransform) transformPrequantizedTensor(extractor *safetensors.
 		}
 	}
 
-	canonicalBase, ok := gptossTensorBase(base)
-	if !ok {
-		return nil, false, nil
+	if strings.Contains(base, "ffn_gate_up_exps") {
+		return gptossSplitGateUpBlobs(base, td, scaleTD, biasTD)
 	}
 
-	if strings.Contains(canonicalBase, "ffn_gate_up_exps") {
-		return gptossSplitGateUpBlobs(canonicalBase, td, scaleTD, biasTD)
-	}
-
-	blob, err := gptossPrequantizedBlob(canonicalBase+".weight", td, scaleTD, biasTD)
+	blob, err := gptossPrequantizedBlob(base+".weight", td, scaleTD, biasTD)
 	if err != nil {
 		return nil, false, err
 	}
@@ -193,6 +196,27 @@ func gptossSplitGateUpBlobs(base string, blocksTD, scalesTD, biasTD *safetensors
 	}
 
 	return []prequantizedTensorBlob{gateBlob, upBlob}, true, nil
+}
+
+func gptossSplitGateUpTensors(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
+	switch {
+	case strings.HasSuffix(td.Name, ".weight"), strings.HasSuffix(td.Name, ".weight.scale"), strings.HasSuffix(td.Name, ".weight.bias"):
+	default:
+		return []*safetensors.TensorData{td}, nil
+	}
+
+	gateName := strings.Replace(td.Name, "gate_up", "gate", 1)
+	upName := strings.Replace(td.Name, "gate_up", "up", 1)
+
+	left, right, shape, err := splitTensorAxis1Raw(td)
+	if err != nil {
+		return nil, fmt.Errorf("split tensor %s: %w", td.Name, err)
+	}
+
+	return []*safetensors.TensorData{
+		safetensors.NewTensorDataFromBytes(gateName, td.Dtype, shape, left),
+		safetensors.NewTensorDataFromBytes(upName, td.Dtype, shape, right),
+	}, nil
 }
 
 func gptossMaybeBiasTensor(name string, source *safetensors.TensorData, shape []int32, raw []byte) *safetensors.TensorData {

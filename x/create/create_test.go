@@ -976,6 +976,11 @@ func TestCreateSafetensorsModel_GptOssTransformsRawMXFP4(t *testing.T) {
 		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_blocks", "U8", []int32{1, 4, 1, 2}, []byte{10, 11, 12, 13, 14, 15, 16, 17}),
 		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_scales", "BF16", []int32{1, 4, 2}, make([]byte, 1*4*2*2)),
 		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_bias", "BF16", []int32{1, 4}, make([]byte, 1*4*2)),
+		st.NewTensorDataFromBytes("model.layers.0.input_layernorm.weight", "BF16", []int32{4}, make([]byte, 8)),
+		st.NewTensorDataFromBytes("model.layers.0.self_attn.q_proj.weight", "BF16", []int32{4, 4}, make([]byte, 32)),
+		st.NewTensorDataFromBytes("model.layers.0.self_attn.sinks", "BF16", []int32{4}, make([]byte, 8)),
+		st.NewTensorDataFromBytes("model.norm.weight", "BF16", []int32{4}, make([]byte, 8)),
+		st.NewTensorDataFromBytes("lm_head.weight", "BF16", []int32{4, 4}, make([]byte, 32)),
 	})
 
 	type layerCall struct {
@@ -1027,6 +1032,22 @@ func TestCreateSafetensorsModel_GptOssTransformsRawMXFP4(t *testing.T) {
 	}
 	if got := readSafetensorsHeaderNames(t, tokenBlob.data); !slices.Equal(got, []string{"token_embd.weight", "token_embd.weight.scale"}) {
 		t.Fatalf("token_embd.weight blob tensors = %v", got)
+	}
+
+	if _, ok := calls["blk.0.attn_norm.weight"]; !ok {
+		t.Fatalf("missing renamed attn_norm tensor, got keys %v", sortedMapKeys(calls))
+	}
+	if _, ok := calls["blk.0.attn_q.weight"]; !ok {
+		t.Fatalf("missing renamed attn_q tensor, got keys %v", sortedMapKeys(calls))
+	}
+	if _, ok := calls["blk.0.attn_sinks"]; !ok {
+		t.Fatalf("missing renamed attn_sinks tensor, got keys %v", sortedMapKeys(calls))
+	}
+	if _, ok := calls["output_norm.weight"]; !ok {
+		t.Fatalf("missing renamed output_norm tensor, got keys %v", sortedMapKeys(calls))
+	}
+	if _, ok := calls["output.weight"]; !ok {
+		t.Fatalf("missing renamed output tensor, got keys %v", sortedMapKeys(calls))
 	}
 
 	gateBlob, ok := calls["blk.0.ffn_gate_exps.weight"]
