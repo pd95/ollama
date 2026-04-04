@@ -501,7 +501,12 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config
 		mlxDebugMeta("cache_update_after_v", v)
 	}
 
+	mlxDebugMeta("sdpa_before_q", q)
+	mlxDebugMeta("sdpa_before_k", k)
+	mlxDebugMeta("sdpa_before_v", v)
+	mlxDebugMeta("sdpa_before_sinks", a.Sinks)
 	out := mlx.ScaledDotProductAttentionCausalWithSinks(q, k, v, a.Sinks, cfg.Scale, L > 1)
+	mlxDebugMeta("sdpa_after", out)
 	requireRuntimeShape("attention sdpa output", out, B, cfg.NumAttentionHeads, L, cfg.HeadDim)
 	mlxDebugTensor("sdpa_out", out)
 	out = mlx.Reshape(mlx.Transpose(out, 0, 2, 1, 3), B, L, cfg.NumAttentionHeads*cfg.HeadDim)
