@@ -491,9 +491,14 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config
 	k = mlx.RoPEWithBase(k, int(cfg.EffectiveRopeN), false, cfg.RopeTheta, ropeScale, offset)
 	mlxDebugTensor("q_post_rope", q)
 	mlxDebugTensor("k_post_rope", k)
+	mlxDebugMeta("v_pre_cache", v)
+	mlxDebugMeta("cache_update_before_k", k)
+	mlxDebugMeta("cache_update_before_v", v)
 
 	if c != nil {
 		k, v = c.Update(k, v)
+		mlxDebugMeta("cache_update_after_k", k)
+		mlxDebugMeta("cache_update_after_v", v)
 	}
 
 	out := mlx.ScaledDotProductAttentionCausalWithSinks(q, k, v, a.Sinks, cfg.Scale, L > 1)
