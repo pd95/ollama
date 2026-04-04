@@ -19,6 +19,15 @@ func canonicalQuantType(quantType string) string {
 	return strings.ToLower(strings.TrimSpace(quantType))
 }
 
+func canonicalSafetensorsArchitecture(arch string) string {
+	switch strings.ToLower(strings.TrimSpace(arch)) {
+	case "gpt_oss", "gpt-oss":
+		return "gptoss"
+	default:
+		return strings.ToLower(strings.TrimSpace(arch))
+	}
+}
+
 // modelConfig represents the HuggingFace config.json structure
 type modelConfig struct {
 	Architectures         []string `json:"architectures"`
@@ -87,6 +96,7 @@ func buildModelInfo(config modelConfig, totalTensorBytes, tensorCount int64) map
 		arch = strings.TrimSuffix(arch, "forcausallm")
 		arch = strings.TrimSuffix(arch, "forconditionalgeneration")
 	}
+	arch = canonicalSafetensorsArchitecture(arch)
 
 	// Use text_config values if they exist (for multimodal models)
 	hiddenSize := config.HiddenSize

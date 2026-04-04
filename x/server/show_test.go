@@ -197,6 +197,12 @@ func TestBuildModelInfo_ArchitectureConversion(t *testing.T) {
 			wantArch:      "custom",
 		},
 		{
+			name:          "gpt oss model_type normalized",
+			architectures: []string{"GptOssForCausalLM"},
+			modelType:     "gpt_oss",
+			wantArch:      "gptoss",
+		},
+		{
 			name:          "empty architectures with model_type",
 			architectures: nil,
 			modelType:     "mymodel",

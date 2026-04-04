@@ -376,6 +376,10 @@ func CreateModel(opts CreateOptions, p *progress.Progress) error {
 func inferSafetensorsCapabilities(modelDir string) []string {
 	capabilities := []string{"completion"}
 
+	if isGptOssModelDir(modelDir) {
+		return []string{"completion", "tools", "thinking"}
+	}
+
 	// Qwen3.5 multimodal checkpoints use ConditionalGeneration architectures.
 	if supportsVision(modelDir) {
 		capabilities = append(capabilities, "vision")
@@ -386,6 +390,24 @@ func inferSafetensorsCapabilities(modelDir string) []string {
 	}
 
 	return capabilities
+}
+
+func inferredModelFamily(modelDir string) string {
+	cfg, ok := readSourceConfigMeta(modelDir)
+	if !ok {
+		return ""
+	}
+
+	if isGptOssConfig(cfg) {
+		return "gptoss"
+	}
+
+	return ""
+}
+
+func isGptOssModelDir(modelDir string) bool {
+	cfg, ok := readSourceConfigMeta(modelDir)
+	return ok && isGptOssConfig(cfg)
 }
 
 func inferredDefaultParameters(modelDir string) map[string]any {
@@ -647,11 +669,15 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 
 		configData := model.ConfigV2{
 			ModelFormat:  "safetensors",
+			ModelFamily:  inferredModelFamily(opts.ModelDir),
 			FileType:     strings.ToLower(strings.TrimSpace(opts.Quantize)),
 			Capabilities: caps,
 			Requires:     MinOllamaVersion,
 			Parser:       resolveParserName(effectiveModelfile, parserName),
 			Renderer:     resolveRendererName(effectiveModelfile, rendererName),
+		}
+		if configData.ModelFamily != "" {
+			configData.ModelFamilies = []string{configData.ModelFamily}
 		}
 		configJSON, err := json.Marshal(configData)
 		if err != nil {
@@ -815,6 +841,10 @@ func getParserName(modelDir string) string {
 
 	if isQwen35Config(cfg) {
 		return "qwen3.5"
+	}
+
+	if isGptOssConfig(cfg) {
+		return "harmony"
 	}
 
 	// Check architectures for known parsers

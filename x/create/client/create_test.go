@@ -323,6 +323,14 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 			}`,
 			want: []string{"completion"},
 		},
+		{
+			name: "gptoss text model",
+			configJSON: `{
+				"architectures": ["GptOssForCausalLM"],
+				"model_type": "gptoss"
+			}`,
+			want: []string{"completion", "tools", "thinking"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -336,6 +344,36 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 				t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGetParserNameGptOss(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gptoss"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := getParserName(dir); got != "harmony" {
+		t.Fatalf("getParserName() = %q, want %q", got, "harmony")
+	}
+}
+
+func TestInferredModelFamilyGptOss(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gptoss"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := inferredModelFamily(dir); got != "gptoss" {
+		t.Fatalf("inferredModelFamily() = %q, want %q", got, "gptoss")
 	}
 }
 
