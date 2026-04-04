@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -95,7 +96,34 @@ func main() {
 	sourceFloats := sourceRow.Floats()
 	importedFloats := importedRow.Floats()
 
+	sourceTD, _, err := findTensor(*sourceDir, *sourceTensor)
+	if err != nil {
+		panic(err)
+	}
+	sourceRaw, err := io.ReadAll(sourceTD.Reader())
+	if err != nil {
+		panic(err)
+	}
+	importedTD, _, err := findImportedTensor(*modelsRoot, *modelName, *importedTensor)
+	if err != nil {
+		panic(err)
+	}
+	importedRaw, err := io.ReadAll(importedTD.Reader())
+	if err != nil {
+		panic(err)
+	}
+	sourceRawRow, err := bf16RowFloats(sourceTD.Shape, *tokenID, sourceRaw)
+	if err != nil {
+		panic(err)
+	}
+	importedRawRow, err := bf16RowFloats(importedTD.Shape, *tokenID, importedRaw)
+	if err != nil {
+		panic(err)
+	}
+
 	cos, maxAbs, meanAbs, sourceMin, sourceMax, importedMin, importedMax, sourceSum, importedSum := compareFloatSlices(sourceFloats, importedFloats)
+	sourceRawCos, sourceRawMaxAbs, sourceRawMeanAbs, _, _, _, _, _, _ := compareFloatSlices(sourceRawRow, sourceFloats)
+	importedRawCos, importedRawMaxAbs, importedRawMeanAbs, _, _, _, _, _, _ := compareFloatSlices(importedRawRow, importedFloats)
 
 	fmt.Printf("SOURCE_FILE %s\n", sourceFile)
 	fmt.Printf("SOURCE_TENSOR %s\n", *sourceTensor)
@@ -115,8 +143,16 @@ func main() {
 	fmt.Printf("TOKEN_ID %d\n", *tokenID)
 	fmt.Printf("SOURCE_ROW_SHAPE %v\n", sourceRow.Dims())
 	fmt.Printf("IMPORTED_ROW_SHAPE %v\n", importedRow.Dims())
+	fmt.Printf("SOURCE_RAW_ROW_SHA256 %s\n", floatSHA256(sourceRawRow))
 	fmt.Printf("SOURCE_ROW_SHA256 %s\n", floatSHA256(sourceFloats))
+	fmt.Printf("IMPORTED_RAW_ROW_SHA256 %s\n", floatSHA256(importedRawRow))
 	fmt.Printf("IMPORTED_ROW_SHA256 %s\n", floatSHA256(importedFloats))
+	fmt.Printf("SOURCE_RAW_VS_MLX_COSINE %.9f\n", sourceRawCos)
+	fmt.Printf("SOURCE_RAW_VS_MLX_MAX_ABS_DIFF %.9g\n", sourceRawMaxAbs)
+	fmt.Printf("SOURCE_RAW_VS_MLX_MEAN_ABS_DIFF %.9g\n", sourceRawMeanAbs)
+	fmt.Printf("IMPORTED_RAW_VS_MLX_COSINE %.9f\n", importedRawCos)
+	fmt.Printf("IMPORTED_RAW_VS_MLX_MAX_ABS_DIFF %.9g\n", importedRawMaxAbs)
+	fmt.Printf("IMPORTED_RAW_VS_MLX_MEAN_ABS_DIFF %.9g\n", importedRawMeanAbs)
 	fmt.Printf("COSINE_SIMILARITY %.9f\n", cos)
 	fmt.Printf("MAX_ABS_DIFF %.9g\n", maxAbs)
 	fmt.Printf("MEAN_ABS_DIFF %.9g\n", meanAbs)
@@ -269,4 +305,28 @@ func compareFloatSlices(a, b []float32) (cosine float64, maxAbs float32, meanAbs
 		cosine = dot / math.Sqrt(aNorm*bNorm)
 	}
 	return cosine, maxAbs, meanAbs, aMin, aMax, bMin, bMax, aSum, bSum
+}
+
+func bf16RowFloats(shape []int32, row int, raw []byte) ([]float32, error) {
+	if len(shape) != 2 {
+		return nil, fmt.Errorf("expected rank-2 tensor, got %v", shape)
+	}
+	rows, cols := int(shape[0]), int(shape[1])
+	if row < 0 || row >= rows {
+		return nil, fmt.Errorf("row %d out of range for %d rows", row, rows)
+	}
+	rowSize := cols * 2
+	start := row * rowSize
+	end := start + rowSize
+	if end > len(raw) {
+		return nil, fmt.Errorf("row bytes exceed raw length")
+	}
+	bts := raw[start:end]
+	out := make([]float32, cols)
+	for i := range cols {
+		bf16 := binary.LittleEndian.Uint16(bts[i*2:])
+		f32bits := uint32(bf16) << 16
+		out[i] = math.Float32frombits(f32bits)
+	}
+	return out, nil
 }
