@@ -94,10 +94,19 @@ func (gptossImportTransform) transformPrequantizedTensor(extractor *safetensors.
 	}
 
 	if strings.Contains(base, "ffn_gate_up_exps") {
-		return gptossSplitGateUpBlobs(base, td, scaleTD, biasTD)
+		rewrittenBlocksTD, err := gptossRewriteMXFP4Blocks(td)
+		if err != nil {
+			return nil, false, err
+		}
+		return gptossSplitGateUpBlobs(base, rewrittenBlocksTD, scaleTD, biasTD)
 	}
 
-	blob, err := gptossPrequantizedBlob(base+".weight", td, scaleTD, biasTD)
+	rewrittenBlocksTD, err := gptossRewriteMXFP4Blocks(td)
+	if err != nil {
+		return nil, false, err
+	}
+
+	blob, err := gptossPrequantizedBlob(base+".weight", rewrittenBlocksTD, scaleTD, biasTD)
 	if err != nil {
 		return nil, false, err
 	}
@@ -112,7 +121,7 @@ func gptossTensorName(name string) (string, bool) {
 		case "scales":
 			return base + ".weight.scale", true
 		case "bias":
-			return base + ".weight.bias", true
+			return base + ".bias", true
 		}
 	}
 	return "", false
@@ -146,9 +155,12 @@ func gptossTensorBase(name string) (string, bool) {
 }
 
 func gptossPrequantizedBlob(weightName string, blocksTD, scalesTD, biasTD *safetensors.TensorData) (prequantizedTensorBlob, error) {
-	tensors := []*safetensors.TensorData{blocksTD.WithName(weightName), scalesTD.WithName(weightName + ".scale")}
+	tensors := []*safetensors.TensorData{
+		blocksTD.WithName(weightName),
+		scalesTD.WithName(weightName + ".scale"),
+	}
 	if biasTD != nil {
-		tensors = append(tensors, biasTD.WithName(weightName+".bias"))
+		tensors = append(tensors, biasTD.WithName(strings.TrimSuffix(weightName, ".weight")+".bias"))
 	}
 	return prequantizedTensorBlob{Name: weightName, Tensors: tensors}, nil
 }
@@ -179,7 +191,7 @@ func gptossSplitGateUpBlobs(base string, blocksTD, scalesTD, biasTD *safetensors
 		gateBase+".weight",
 		safetensors.NewTensorDataFromBytes(gateBase+".weight", blocksTD.Dtype, blockShape, gateBlocks),
 		safetensors.NewTensorDataFromBytes(gateBase+".weight.scale", scalesTD.Dtype, scaleShape, gateScales),
-		gptossMaybeBiasTensor(gateBase+".weight.bias", biasTD, biasShape, gateBias),
+		gptossMaybeBiasTensor(gateBase+".bias", biasTD, biasShape, gateBias),
 	)
 	if err != nil {
 		return nil, false, err
@@ -189,7 +201,7 @@ func gptossSplitGateUpBlobs(base string, blocksTD, scalesTD, biasTD *safetensors
 		upBase+".weight",
 		safetensors.NewTensorDataFromBytes(upBase+".weight", blocksTD.Dtype, blockShape, upBlocks),
 		safetensors.NewTensorDataFromBytes(upBase+".weight.scale", scalesTD.Dtype, scaleShape, upScales),
-		gptossMaybeBiasTensor(upBase+".weight.bias", biasTD, biasShape, upBias),
+		gptossMaybeBiasTensor(upBase+".bias", biasTD, biasShape, upBias),
 	)
 	if err != nil {
 		return nil, false, err
@@ -200,7 +212,7 @@ func gptossSplitGateUpBlobs(base string, blocksTD, scalesTD, biasTD *safetensors
 
 func gptossSplitGateUpTensors(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
 	switch {
-	case strings.HasSuffix(td.Name, ".weight"), strings.HasSuffix(td.Name, ".weight.scale"), strings.HasSuffix(td.Name, ".weight.bias"):
+	case strings.HasSuffix(td.Name, ".weight"), strings.HasSuffix(td.Name, ".weight.scale"), strings.HasSuffix(td.Name, ".bias"):
 	default:
 		return []*safetensors.TensorData{td}, nil
 	}
@@ -224,6 +236,35 @@ func gptossMaybeBiasTensor(name string, source *safetensors.TensorData, shape []
 		return nil
 	}
 	return safetensors.NewTensorDataFromBytes(name, source.Dtype, shape, raw)
+}
+
+func gptossRewriteMXFP4Blocks(td *safetensors.TensorData) (*safetensors.TensorData, error) {
+	if td == nil {
+		return nil, nil
+	}
+
+	raw, err := io.ReadAll(td.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("read tensor %s: %w", td.Name, err)
+	}
+	if len(raw)%16 != 0 {
+		return nil, fmt.Errorf("rewrite mxfp4 tensor %s: raw byte length %d is not divisible by 16", td.Name, len(raw))
+	}
+
+	rewritten := make([]byte, len(raw))
+	copy(rewritten, raw)
+
+	var tmp [16]byte
+	for i := 0; i < len(rewritten); i += 16 {
+		for j := range 8 {
+			a, b := rewritten[i+j], rewritten[i+j+8]
+			tmp[2*j] = (a & 0x0F) | (b << 4)
+			tmp[2*j+1] = (a >> 4) | (b & 0xF0)
+		}
+		copy(rewritten[i:i+16], tmp[:])
+	}
+
+	return safetensors.NewTensorDataFromBytes(td.Name, td.Dtype, td.Shape, rewritten), nil
 }
 
 func splitTensorAxis1Raw(td *safetensors.TensorData) ([]byte, []byte, []int32, error) {
