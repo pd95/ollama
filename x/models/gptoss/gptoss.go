@@ -637,7 +637,7 @@ func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config, trace
 	if traceMoE {
 		logMoEStats("moe_post_swiglu", hidden)
 	}
-	down := mlx.GatherMM(hidden, mlx.Transpose(s.DownWeight, 0, 2, 1), nil, idxFlat, doSort)
+	down := mlx.GatherMM(hidden, s.DownWeight, nil, idxFlat, doSort)
 	if traceMoE {
 		logMoEStats("moe_down_raw", down)
 		downAltNoTranspose := mlx.GatherMM(hidden, s.DownWeight, nil, idxFlat, doSort)
