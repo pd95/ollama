@@ -10,6 +10,11 @@ import (
 
 type gptossImportTransform struct{}
 
+var gptossMXFP4Metadata = map[string]string{
+	"quant_type": "mxfp4",
+	"group_size": "32",
+}
+
 var gptossTensorReplacer = strings.NewReplacer(
 	"model.embed_tokens", "token_embd",
 	"model.layers", "blk",
@@ -146,11 +151,19 @@ func gptossTensorBase(name string) (string, bool) {
 }
 
 func gptossPrequantizedBlob(weightName string, blocksTD, scalesTD, biasTD *safetensors.TensorData) (prequantizedTensorBlob, error) {
-	tensors := []*safetensors.TensorData{blocksTD.WithName(weightName), scalesTD.WithName(weightName + ".scale")}
-	if biasTD != nil {
-		tensors = append(tensors, biasTD.WithName(strings.TrimSuffix(weightName, ".weight")+".bias"))
+	weightTD, err := gptossPackMXFP4Weight(weightName, blocksTD)
+	if err != nil {
+		return prequantizedTensorBlob{}, err
 	}
-	return prequantizedTensorBlob{Name: weightName, Tensors: tensors}, nil
+	scaleTD, err := gptossPackMXFP4Scale(weightName+".scale", scalesTD, blocksTD)
+	if err != nil {
+		return prequantizedTensorBlob{}, err
+	}
+	tensors := []*safetensors.TensorData{
+		weightTD,
+		scaleTD,
+	}
+	return prequantizedTensorBlob{Name: weightName, Tensors: tensors, Metadata: gptossMXFP4Metadata}, nil
 }
 
 func gptossSplitGateUpBlobs(base string, blocksTD, scalesTD, biasTD *safetensors.TensorData) ([]prequantizedTensorBlob, bool, error) {
@@ -224,6 +237,72 @@ func gptossMaybeBiasTensor(name string, source *safetensors.TensorData, shape []
 		return nil
 	}
 	return safetensors.NewTensorDataFromBytes(name, source.Dtype, shape, raw)
+}
+
+func gptossRewriteMXFP4Blocks(td *safetensors.TensorData) (*safetensors.TensorData, error) {
+	if td == nil {
+		return nil, nil
+	}
+
+	raw, err := io.ReadAll(td.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("read tensor %s: %w", td.Name, err)
+	}
+	if len(raw)%16 != 0 {
+		return nil, fmt.Errorf("rewrite mxfp4 tensor %s: raw byte length %d is not divisible by 16", td.Name, len(raw))
+	}
+
+	rewritten := make([]byte, len(raw))
+	copy(rewritten, raw)
+
+	var tmp [16]byte
+	for i := 0; i < len(rewritten); i += 16 {
+		for j := range 8 {
+			a, b := rewritten[i+j], rewritten[i+j+8]
+			tmp[2*j] = (a & 0x0F) | (b << 4)
+			tmp[2*j+1] = (a >> 4) | (b & 0xF0)
+		}
+		copy(rewritten[i:i+16], tmp[:])
+	}
+
+	return safetensors.NewTensorDataFromBytes(td.Name, td.Dtype, td.Shape, rewritten), nil
+}
+
+func gptossPackMXFP4Weight(name string, blocksTD *safetensors.TensorData) (*safetensors.TensorData, error) {
+	rewritten, err := gptossRewriteMXFP4Blocks(blocksTD)
+	if err != nil {
+		return nil, err
+	}
+	if rewritten == nil {
+		return nil, nil
+	}
+	if strings.ToUpper(rewritten.Dtype) != "U8" {
+		return nil, fmt.Errorf("pack mxfp4 weight %s: expected U8 blocks, got %s", rewritten.Name, rewritten.Dtype)
+	}
+	if len(rewritten.Shape) == 0 || rewritten.Shape[len(rewritten.Shape)-1] != 16 {
+		return nil, fmt.Errorf("pack mxfp4 weight %s: expected last dim 16, got %v", rewritten.Name, rewritten.Shape)
+	}
+	raw, err := io.ReadAll(rewritten.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("read tensor %s: %w", rewritten.Name, err)
+	}
+	shape := append([]int32(nil), rewritten.Shape[:len(rewritten.Shape)-1]...)
+	shape[len(shape)-1] *= 4
+	return safetensors.NewTensorDataFromBytes(name, "U32", shape, raw), nil
+}
+
+func gptossPackMXFP4Scale(name string, scalesTD, blocksTD *safetensors.TensorData) (*safetensors.TensorData, error) {
+	if scalesTD == nil {
+		return nil, nil
+	}
+	if strings.ToUpper(scalesTD.Dtype) != "U8" {
+		return nil, fmt.Errorf("pack mxfp4 scale %s: expected U8 scales, got %s", scalesTD.Name, scalesTD.Dtype)
+	}
+	shape := append([]int32(nil), scalesTD.Shape...)
+	if blocksTD != nil && len(shape) == len(blocksTD.Shape) && shape[len(shape)-1] == 1 {
+		shape = shape[:len(shape)-1]
+	}
+	return scalesTD.WithName(name).WithShape(shape), nil
 }
 
 func splitTensorAxis1Raw(td *safetensors.TensorData) ([]byte, []byte, []int32, error) {

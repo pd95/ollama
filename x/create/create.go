@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -612,8 +613,9 @@ type tensorImportTransform interface {
 }
 
 type prequantizedTensorBlob struct {
-	Name    string
-	Tensors []*safetensors.TensorData
+	Name     string
+	Tensors  []*safetensors.TensorData
+	Metadata map[string]string
 }
 
 type prequantizedTensorImportTransform interface {
@@ -763,8 +765,18 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 					}
 					if handled {
 						for _, blob := range blobs {
+							metadata := sourceQuantMetadata
+							if len(blob.Metadata) > 0 {
+								metadata = maps.Clone(sourceQuantMetadata)
+								if metadata == nil {
+									metadata = make(map[string]string, len(blob.Metadata))
+								}
+								for k, v := range blob.Metadata {
+									metadata[k] = v
+								}
+							}
 							layer, err := createLayer(
-								safetensors.BuildPackedSafetensorsReaderWithMetadata(blob.Tensors, sourceQuantMetadata),
+								safetensors.BuildPackedSafetensorsReaderWithMetadata(blob.Tensors, metadata),
 								"application/vnd.ollama.image.tensor",
 								blob.Name,
 							)

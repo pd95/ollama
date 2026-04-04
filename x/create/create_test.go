@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -82,11 +83,17 @@ func TestCreateSafetensorsModel_GptOssTransformsPrequantizedBlocks(t *testing.T)
 	}
 
 	createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
-		st.NewTensorDataFromBytes("model.embed_tokens.blocks", "U32", []int32{2, 4}, make([]byte, 2*4*4)),
-		st.NewTensorDataFromBytes("model.embed_tokens.scales", "F32", []int32{2, 4}, make([]byte, 2*4*4)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj.blocks", "U32", []int32{1, 4}, make([]byte, 1*4*4)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj.scales", "F32", []int32{1, 4}, make([]byte, 1*4*4)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj.biases", "BF16", []int32{1, 4}, make([]byte, 1*4*2)),
+		st.NewTensorDataFromBytes("model.embed_tokens_blocks", "U8", []int32{2, 4, 1, 16}, make([]byte, 2*4*1*16)),
+		st.NewTensorDataFromBytes("model.embed_tokens_scales", "U8", []int32{2, 4, 1}, make([]byte, 2*4*1)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_blocks", "U8", []int32{1, 4, 1, 16}, func() []byte {
+			out := make([]byte, 64)
+			for i := range out {
+				out[i] = byte(i)
+			}
+			return out
+		}()),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_scales", "U8", []int32{1, 4, 1}, []byte{21, 22, 23, 24}),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_bias", "BF16", []int32{1, 4}, make([]byte, 1*4*2)),
 	})
 
 	type layerCall struct {
@@ -124,9 +131,27 @@ func TestCreateSafetensorsModel_GptOssTransformsPrequantizedBlocks(t *testing.T)
 		t.Fatalf("missing up blob: %v", sortedMapKeys(calls))
 	}
 
+	tokenInfo := readSafetensorsHeaderInfo(t, calls["token_embd.weight"].data)
+	if got := tokenInfo["token_embd.weight"].Dtype; got != "U32" {
+		t.Fatalf("token weight dtype = %q, want %q", got, "U32")
+	}
+
 	gateNames := readSafetensorsHeaderNames(t, calls["blk.0.ffn_gate_exps.weight"].data)
-	if !slices.Equal(gateNames, []string{"blk.0.ffn_gate_exps.bias", "blk.0.ffn_gate_exps.weight", "blk.0.ffn_gate_exps.weight.scale"}) {
+	if !slices.Equal(gateNames, []string{"blk.0.ffn_gate_exps.weight", "blk.0.ffn_gate_exps.weight.scale"}) {
 		t.Fatalf("gate blob tensors = %v", gateNames)
+	}
+	gateInfo := readSafetensorsHeaderInfo(t, calls["blk.0.ffn_gate_exps.weight"].data)
+	if got := readSafetensorsMetadata(t, calls["blk.0.ffn_gate_exps.weight"].data); !maps.Equal(got, map[string]string{"quant_type": "mxfp4", "group_size": "32"}) {
+		t.Fatalf("gate metadata = %v", got)
+	}
+	if got := gateInfo["blk.0.ffn_gate_exps.weight"].Dtype; got != "U32" {
+		t.Fatalf("gate weight dtype = %q, want %q", got, "U32")
+	}
+	if got := gateInfo["blk.0.ffn_gate_exps.weight"].Shape; !slices.Equal(got, []int32{1, 2, 4}) {
+		t.Fatalf("gate weight shape = %v", got)
+	}
+	if got := gateInfo["blk.0.ffn_gate_exps.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 1}) {
+		t.Fatalf("gate scale shape = %v", got)
 	}
 }
 
@@ -383,6 +408,52 @@ func readSafetensorsHeaderNames(t *testing.T, data []byte) []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+func readSafetensorsHeaderInfo(t *testing.T, data []byte) map[string]struct {
+	Dtype string  `json:"dtype"`
+	Shape []int32 `json:"shape"`
+} {
+	t.Helper()
+
+	var headerSize uint64
+	if err := binary.Read(bytes.NewReader(data[:8]), binary.LittleEndian, &headerSize); err != nil {
+		t.Fatalf("failed to read header size: %v", err)
+	}
+
+	var header map[string]struct {
+		Dtype string  `json:"dtype"`
+		Shape []int32 `json:"shape"`
+	}
+	if err := json.Unmarshal(data[8:8+headerSize], &header); err != nil {
+		t.Fatalf("failed to parse header: %v", err)
+	}
+	delete(header, "__metadata__")
+	return header
+}
+
+func readSafetensorsMetadata(t *testing.T, data []byte) map[string]string {
+	t.Helper()
+
+	var headerSize uint64
+	if err := binary.Read(bytes.NewReader(data[:8]), binary.LittleEndian, &headerSize); err != nil {
+		t.Fatalf("failed to read header size: %v", err)
+	}
+
+	var header map[string]json.RawMessage
+	if err := json.Unmarshal(data[8:8+headerSize], &header); err != nil {
+		t.Fatalf("failed to parse header: %v", err)
+	}
+
+	raw, ok := header["__metadata__"]
+	if !ok {
+		return nil
+	}
+	var meta map[string]string
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("failed to parse metadata: %v", err)
+	}
+	return meta
 }
 
 func sortedMapKeys[V any](m map[string]V) []string {
