@@ -111,6 +111,24 @@ func FromValues[S ~[]E, E arrayTypes](s S, shape ...int) *Array {
 	return tt
 }
 
+func FromRawBytes(data []byte, dtype DType, shape ...int) *Array {
+	if len(shape) == 0 {
+		panic("shape must be provided for non-scalar tensors")
+	}
+	if len(data) == 0 {
+		panic("data must not be empty")
+	}
+
+	cShape := make([]C.int, len(shape))
+	for i := range shape {
+		cShape[i] = C.int(shape[i])
+	}
+
+	tt := New("")
+	tt.ctx = C.mlx_array_new_data(unsafe.Pointer(&data[0]), unsafe.SliceData(cShape), C.int(len(shape)), C.mlx_dtype(dtype))
+	return tt
+}
+
 func (t *Array) Set(other *Array) {
 	C.mlx_array_set(&t.ctx, other.ctx)
 }

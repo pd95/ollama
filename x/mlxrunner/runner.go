@@ -3,14 +3,18 @@ package mlxrunner
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/x/imagegen/safetensors"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
@@ -132,8 +136,109 @@ func loadTensorsFromManifest(root *model.Root) (map[string]*mlx.Array, error) {
 		}
 	}
 
+	if os.Getenv("OLLAMA_GPTOSS_BF16_EDGE_DEBUG") != "" {
+		for _, name := range []string{"output_norm.weight", "output.weight"} {
+			arr := allTensors[name]
+			if arr == nil || !arr.Valid() {
+				slog.Info("gptoss bf16 edge tensor", "name", name, "present", false)
+				continue
+			}
+			slog.Info("gptoss bf16 edge tensor", "name", name, "present", true, "dtype", arr.DType(), "shape", arr.Dims())
+			if arr.DType() != mlx.DTypeBFloat16 || scaleBaseNames[name] {
+				continue
+			}
+			blobPath, ok := tensorBlobPath(root, name)
+			if !ok {
+				slog.Info("gptoss bf16 edge compare", "name", name, "status", "blob_not_found")
+				continue
+			}
+			rawArr, err := loadDenseTensorFromRaw(blobPath, name)
+			if err != nil {
+				return nil, fmt.Errorf("compare raw tensor %s: %w", name, err)
+			}
+			slog.Info("gptoss bf16 edge compare", "name", name, compareArrayPrefix(arr, rawArr))
+		}
+	}
+
 	slog.Info("Loaded tensors from manifest", "count", len(allTensors))
 	return allTensors, nil
+}
+
+func tensorBlobPath(root *model.Root, tensorName string) (string, bool) {
+	for _, layer := range root.Manifest.GetTensorLayers("") {
+		if layer.Name == tensorName {
+			return root.Manifest.BlobPath(layer.Digest), true
+		}
+	}
+	return "", false
+}
+
+func loadDenseTensorFromRaw(blobPath, name string) (*mlx.Array, error) {
+	extractor, err := safetensors.OpenForExtraction(blobPath)
+	if err != nil {
+		return nil, err
+	}
+	defer extractor.Close()
+
+	td, err := extractor.GetTensor(name)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := io.ReadAll(td.Reader())
+	if err != nil {
+		return nil, err
+	}
+	shape := make([]int, len(td.Shape))
+	for i, d := range td.Shape {
+		shape[i] = int(d)
+	}
+	return mlx.FromRawBytes(raw, mlx.DTypeBFloat16, shape...), nil
+}
+
+func compareArrayPrefix(loaded, raw *mlx.Array) []any {
+	loadedF32 := loaded.AsType(mlx.DTypeFloat32)
+	rawF32 := raw.AsType(mlx.DTypeFloat32)
+	mlx.Eval(loadedF32, rawF32)
+	loadedVals := loadedF32.Floats()
+	rawVals := rawF32.Floats()
+
+	n := 8
+	if len(loadedVals) < n {
+		n = len(loadedVals)
+	}
+	if len(rawVals) < n {
+		n = len(rawVals)
+	}
+
+	maxAbsDiff := float32(0)
+	for i := 0; i < n; i++ {
+		diff := loadedVals[i] - rawVals[i]
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > maxAbsDiff {
+			maxAbsDiff = diff
+		}
+	}
+
+	return []any{
+		"loaded_prefix", loadedVals[:n],
+		"raw_prefix", rawVals[:n],
+		"prefix_equal", slicesEqualF32(loadedVals[:n], rawVals[:n]),
+		"max_abs_diff", maxAbsDiff,
+	}
+}
+
+func slicesEqualF32(a, b []float32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Runner) Run(host, port string, mux http.Handler) error {

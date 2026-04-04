@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 
 	"github.com/ollama/ollama/x/mlxrunner/cache"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
@@ -294,9 +295,26 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	if normWeight == nil {
 		return fmt.Errorf("missing final norm weight: output_norm.weight")
 	}
+	if os.Getenv("OLLAMA_GPTOSS_F32_OUTPUT_EDGE") != "" && normWeight.DType() == mlx.DTypeBFloat16 {
+		normWeight = normWeight.AsType(mlx.DTypeFloat32)
+	}
 	m.Norm = nn.NewRMSNorm(normWeight, m.RMSNormEps)
 
-	m.LMHead = linears.Make("output")
+	if os.Getenv("OLLAMA_GPTOSS_F32_OUTPUT_EDGE") != "" {
+		if w := tensors["output.weight"]; w != nil && tensors["output.weight_scale"] == nil && w.DType() == mlx.DTypeBFloat16 {
+			var bias *mlx.Array
+			if b := tensors["output.bias"]; b != nil {
+				bias = b
+				if bias.DType() == mlx.DTypeBFloat16 {
+					bias = bias.AsType(mlx.DTypeFloat32)
+				}
+			}
+			m.LMHead = nn.NewLinear(w.AsType(mlx.DTypeFloat32), bias)
+		}
+	}
+	if m.LMHead == nil {
+		m.LMHead = linears.Make("output")
+	}
 	if m.LMHead == nil {
 		m.LMHead = m.EmbedTokens.AsLinear()
 	}
