@@ -78,7 +78,11 @@ func main() {
 
 	index := mlx.FromValues([]int32{int32(*tokenID)}, 1)
 	sourceRow := sourceWeight.TakeAxis(index, 0)
+	sourcePrecastRow := sourceWeight.AsType(mlx.DTypeFloat32).TakeAxis(index, 0)
+	sourcePostcastRow := sourceWeight.TakeAxis(index, 0).AsType(mlx.DTypeFloat32)
 	var importedRow *mlx.Array
+	var importedPrecastRow *mlx.Array
+	var importedPostcastRow *mlx.Array
 	if importedScale != nil {
 		w := importedWeight.TakeAxis(index, 0)
 		s := importedScale.TakeAxis(index, 0)
@@ -88,13 +92,21 @@ func main() {
 		}
 		groupSize, bits, mode := inferImportedQuantParams(importedSF, *importedTensor, importedWeight, importedScale)
 		importedRow = mlx.Dequantize(w, s, qb, groupSize, bits, mode)
+		importedPrecastRow = importedRow
+		importedPostcastRow = importedRow.AsType(mlx.DTypeFloat32)
 	} else {
 		importedRow = importedWeight.TakeAxis(index, 0)
+		importedPrecastRow = importedWeight.AsType(mlx.DTypeFloat32).TakeAxis(index, 0)
+		importedPostcastRow = importedWeight.TakeAxis(index, 0).AsType(mlx.DTypeFloat32)
 	}
 
-	mlx.Eval(sourceRow, importedRow)
+	mlx.Eval(sourceRow, sourcePrecastRow, sourcePostcastRow, importedRow, importedPrecastRow, importedPostcastRow)
 	sourceFloats := sourceRow.Floats()
+	sourcePrecastFloats := sourcePrecastRow.Floats()
+	sourcePostcastFloats := sourcePostcastRow.Floats()
 	importedFloats := importedRow.Floats()
+	importedPrecastFloats := importedPrecastRow.Floats()
+	importedPostcastFloats := importedPostcastRow.Floats()
 
 	sourceTD, _, err := findTensor(*sourceDir, *sourceTensor)
 	if err != nil {
@@ -131,7 +143,11 @@ func main() {
 
 	cos, maxAbs, meanAbs, sourceMin, sourceMax, importedMin, importedMax, sourceSum, importedSum := compareFloatSlices(sourceFloats, importedFloats)
 	sourceRawCos, sourceRawMaxAbs, sourceRawMeanAbs, _, _, _, _, _, _ := compareFloatSlices(sourceRawRow, sourceFloats)
+	sourceRawPrecastCos, sourceRawPrecastMaxAbs, sourceRawPrecastMeanAbs, _, _, _, _, _, _ := compareFloatSlices(sourceRawRow, sourcePrecastFloats)
+	sourceRawPostcastCos, sourceRawPostcastMaxAbs, sourceRawPostcastMeanAbs, _, _, _, _, _, _ := compareFloatSlices(sourceRawRow, sourcePostcastFloats)
 	importedRawCos, importedRawMaxAbs, importedRawMeanAbs, _, _, _, _, _, _ := compareFloatSlices(importedRawRow, importedFloats)
+	importedRawPrecastCos, importedRawPrecastMaxAbs, importedRawPrecastMeanAbs, _, _, _, _, _, _ := compareFloatSlices(importedRawRow, importedPrecastFloats)
+	importedRawPostcastCos, importedRawPostcastMaxAbs, importedRawPostcastMeanAbs, _, _, _, _, _, _ := compareFloatSlices(importedRawRow, importedPostcastFloats)
 	sourceRawRebuiltCos, sourceRawRebuiltMaxAbs, sourceRawRebuiltMeanAbs, _, _, _, _, _, _ := compareFloatSlices(sourceRawRow, sourceRebuiltFloats)
 	importedRawRebuiltCos, importedRawRebuiltMaxAbs, importedRawRebuiltMeanAbs, _, _, _, _, _, _ := compareFloatSlices(importedRawRow, importedRebuiltFloats)
 
@@ -155,19 +171,35 @@ func main() {
 	fmt.Printf("IMPORTED_ROW_SHAPE %v\n", importedRow.Dims())
 	fmt.Printf("SOURCE_RAW_ROW_SHA256 %s\n", floatSHA256(sourceRawRow))
 	fmt.Printf("SOURCE_ROW_SHA256 %s\n", floatSHA256(sourceFloats))
+	fmt.Printf("SOURCE_PRECAST_ROW_SHA256 %s\n", floatSHA256(sourcePrecastFloats))
+	fmt.Printf("SOURCE_POSTCAST_ROW_SHA256 %s\n", floatSHA256(sourcePostcastFloats))
 	fmt.Printf("SOURCE_REBUILT_ROW_SHA256 %s\n", floatSHA256(sourceRebuiltFloats))
 	fmt.Printf("IMPORTED_RAW_ROW_SHA256 %s\n", floatSHA256(importedRawRow))
 	fmt.Printf("IMPORTED_ROW_SHA256 %s\n", floatSHA256(importedFloats))
+	fmt.Printf("IMPORTED_PRECAST_ROW_SHA256 %s\n", floatSHA256(importedPrecastFloats))
+	fmt.Printf("IMPORTED_POSTCAST_ROW_SHA256 %s\n", floatSHA256(importedPostcastFloats))
 	fmt.Printf("IMPORTED_REBUILT_ROW_SHA256 %s\n", floatSHA256(importedRebuiltFloats))
 	fmt.Printf("SOURCE_RAW_VS_MLX_COSINE %.9f\n", sourceRawCos)
 	fmt.Printf("SOURCE_RAW_VS_MLX_MAX_ABS_DIFF %.9g\n", sourceRawMaxAbs)
 	fmt.Printf("SOURCE_RAW_VS_MLX_MEAN_ABS_DIFF %.9g\n", sourceRawMeanAbs)
+	fmt.Printf("SOURCE_RAW_VS_PRECAST_COSINE %.9f\n", sourceRawPrecastCos)
+	fmt.Printf("SOURCE_RAW_VS_PRECAST_MAX_ABS_DIFF %.9g\n", sourceRawPrecastMaxAbs)
+	fmt.Printf("SOURCE_RAW_VS_PRECAST_MEAN_ABS_DIFF %.9g\n", sourceRawPrecastMeanAbs)
+	fmt.Printf("SOURCE_RAW_VS_POSTCAST_COSINE %.9f\n", sourceRawPostcastCos)
+	fmt.Printf("SOURCE_RAW_VS_POSTCAST_MAX_ABS_DIFF %.9g\n", sourceRawPostcastMaxAbs)
+	fmt.Printf("SOURCE_RAW_VS_POSTCAST_MEAN_ABS_DIFF %.9g\n", sourceRawPostcastMeanAbs)
 	fmt.Printf("SOURCE_RAW_VS_REBUILT_COSINE %.9f\n", sourceRawRebuiltCos)
 	fmt.Printf("SOURCE_RAW_VS_REBUILT_MAX_ABS_DIFF %.9g\n", sourceRawRebuiltMaxAbs)
 	fmt.Printf("SOURCE_RAW_VS_REBUILT_MEAN_ABS_DIFF %.9g\n", sourceRawRebuiltMeanAbs)
 	fmt.Printf("IMPORTED_RAW_VS_MLX_COSINE %.9f\n", importedRawCos)
 	fmt.Printf("IMPORTED_RAW_VS_MLX_MAX_ABS_DIFF %.9g\n", importedRawMaxAbs)
 	fmt.Printf("IMPORTED_RAW_VS_MLX_MEAN_ABS_DIFF %.9g\n", importedRawMeanAbs)
+	fmt.Printf("IMPORTED_RAW_VS_PRECAST_COSINE %.9f\n", importedRawPrecastCos)
+	fmt.Printf("IMPORTED_RAW_VS_PRECAST_MAX_ABS_DIFF %.9g\n", importedRawPrecastMaxAbs)
+	fmt.Printf("IMPORTED_RAW_VS_PRECAST_MEAN_ABS_DIFF %.9g\n", importedRawPrecastMeanAbs)
+	fmt.Printf("IMPORTED_RAW_VS_POSTCAST_COSINE %.9f\n", importedRawPostcastCos)
+	fmt.Printf("IMPORTED_RAW_VS_POSTCAST_MAX_ABS_DIFF %.9g\n", importedRawPostcastMaxAbs)
+	fmt.Printf("IMPORTED_RAW_VS_POSTCAST_MEAN_ABS_DIFF %.9g\n", importedRawPostcastMeanAbs)
 	fmt.Printf("IMPORTED_RAW_VS_REBUILT_COSINE %.9f\n", importedRawRebuiltCos)
 	fmt.Printf("IMPORTED_RAW_VS_REBUILT_MAX_ABS_DIFF %.9g\n", importedRawRebuiltMaxAbs)
 	fmt.Printf("IMPORTED_RAW_VS_REBUILT_MEAN_ABS_DIFF %.9g\n", importedRawRebuiltMeanAbs)
