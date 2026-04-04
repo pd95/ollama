@@ -587,7 +587,15 @@ func (l *Layer) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config, la
 		}
 	}
 	ffn := l.MoE.Forward(l.MLPNorm.Forward(h, cfg.RMSNormEps), cfg, layerIndex, traceLayers)
+	if shouldTraceLayer(layerIndex, traceLayers) {
+		logTensorStats("mlp_residual_source", h)
+		logTensorStats("moe_pre_residual_mlp", ffn)
+	}
 	out := mlx.Add(h, ffn)
+	if shouldTraceLayer(layerIndex, traceLayers) {
+		logTensorStats("mlp_post_add", out)
+		logTensorStats("mlp_add_diff", mlx.Sub(out, mlx.Add(h, ffn)))
+	}
 	if shouldTraceLayer(layerIndex, traceLayers) && gptossBadDecodeLayer.Load() == 0 {
 		stats := tensorStats(out)
 		if stats.valid {
