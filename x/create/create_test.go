@@ -971,11 +971,11 @@ func TestCreateSafetensorsModel_GptOssTransformsRawMXFP4(t *testing.T) {
 	}
 
 	createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
-		st.NewTensorDataFromBytes("model.embed_tokens.blocks", "U8", []int32{2, 4, 1, 1}, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
-		st.NewTensorDataFromBytes("model.embed_tokens.scales", "BF16", []int32{2, 4, 1}, make([]byte, 2*4*1*2)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_0.blocks", "U8", []int32{1, 4, 1, 2}, []byte{10, 11, 12, 13, 14, 15, 16, 17}),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_0.scales", "BF16", []int32{1, 4, 2}, make([]byte, 1*4*2*2)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_0.biases", "BF16", []int32{1, 4}, make([]byte, 1*4*2)),
+		st.NewTensorDataFromBytes("model.embed_tokens_blocks", "U8", []int32{2, 4, 1, 1}, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
+		st.NewTensorDataFromBytes("model.embed_tokens_scales", "BF16", []int32{2, 4, 1}, make([]byte, 2*4*1*2)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_blocks", "U8", []int32{1, 4, 1, 2}, []byte{10, 11, 12, 13, 14, 15, 16, 17}),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_scales", "BF16", []int32{1, 4, 2}, make([]byte, 1*4*2*2)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_bias", "BF16", []int32{1, 4}, make([]byte, 1*4*2)),
 	})
 
 	type layerCall struct {
@@ -1010,11 +1010,11 @@ func TestCreateSafetensorsModel_GptOssTransformsRawMXFP4(t *testing.T) {
 	}
 
 	for _, unexpected := range []string{
-		"model.embed_tokens.blocks",
-		"model.embed_tokens.scales",
-		"model.layers.0.mlp.experts.gate_up_proj_0.blocks",
-		"model.layers.0.mlp.experts.gate_up_proj_0.scales",
-		"model.layers.0.mlp.experts.gate_up_proj_0.biases",
+		"model.embed_tokens_blocks",
+		"model.embed_tokens_scales",
+		"model.layers.0.mlp.experts.gate_up_proj_blocks",
+		"model.layers.0.mlp.experts.gate_up_proj_scales",
+		"model.layers.0.mlp.experts.gate_up_proj_bias",
 	} {
 		if slices.Contains(tensorLayerNames, unexpected) {
 			t.Fatalf("unexpected standalone tensor layer for %s: %v", unexpected, tensorLayerNames)
@@ -1029,47 +1029,47 @@ func TestCreateSafetensorsModel_GptOssTransformsRawMXFP4(t *testing.T) {
 		t.Fatalf("token_embd.weight blob tensors = %v", got)
 	}
 
-	gateBlob, ok := calls["blk.0.ffn_gate_exps.0.weight"]
+	gateBlob, ok := calls["blk.0.ffn_gate_exps.weight"]
 	if !ok {
 		t.Fatalf("missing gate blob, got keys %v", sortedMapKeys(calls))
 	}
 	if got := readSafetensorsHeaderNames(t, gateBlob.data); !slices.Equal(got, []string{
-		"blk.0.ffn_gate_exps.0.weight",
-		"blk.0.ffn_gate_exps.0.weight.bias",
-		"blk.0.ffn_gate_exps.0.weight.scale",
+		"blk.0.ffn_gate_exps.weight",
+		"blk.0.ffn_gate_exps.weight.bias",
+		"blk.0.ffn_gate_exps.weight.scale",
 	}) {
 		t.Fatalf("gate blob tensors = %v", got)
 	}
 	gateInfo := readSafetensorsHeaderInfo(t, gateBlob.data)
-	if got := gateInfo["blk.0.ffn_gate_exps.0.weight"].Shape; !slices.Equal(got, []int32{1, 2, 1, 2}) {
+	if got := gateInfo["blk.0.ffn_gate_exps.weight"].Shape; !slices.Equal(got, []int32{1, 2, 1, 2}) {
 		t.Fatalf("gate weight shape = %v, want %v", got, []int32{1, 2, 1, 2})
 	}
-	if got := gateInfo["blk.0.ffn_gate_exps.0.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 2}) {
+	if got := gateInfo["blk.0.ffn_gate_exps.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 2}) {
 		t.Fatalf("gate scale shape = %v, want %v", got, []int32{1, 2, 2})
 	}
-	if got := gateInfo["blk.0.ffn_gate_exps.0.weight.bias"].Shape; !slices.Equal(got, []int32{1, 2}) {
+	if got := gateInfo["blk.0.ffn_gate_exps.weight.bias"].Shape; !slices.Equal(got, []int32{1, 2}) {
 		t.Fatalf("gate bias shape = %v, want %v", got, []int32{1, 2})
 	}
 
-	upBlob, ok := calls["blk.0.ffn_up_exps.0.weight"]
+	upBlob, ok := calls["blk.0.ffn_up_exps.weight"]
 	if !ok {
 		t.Fatalf("missing up blob, got keys %v", sortedMapKeys(calls))
 	}
 	if got := readSafetensorsHeaderNames(t, upBlob.data); !slices.Equal(got, []string{
-		"blk.0.ffn_up_exps.0.weight",
-		"blk.0.ffn_up_exps.0.weight.bias",
-		"blk.0.ffn_up_exps.0.weight.scale",
+		"blk.0.ffn_up_exps.weight",
+		"blk.0.ffn_up_exps.weight.bias",
+		"blk.0.ffn_up_exps.weight.scale",
 	}) {
 		t.Fatalf("up blob tensors = %v", got)
 	}
 	upInfo := readSafetensorsHeaderInfo(t, upBlob.data)
-	if got := upInfo["blk.0.ffn_up_exps.0.weight"].Shape; !slices.Equal(got, []int32{1, 2, 1, 2}) {
+	if got := upInfo["blk.0.ffn_up_exps.weight"].Shape; !slices.Equal(got, []int32{1, 2, 1, 2}) {
 		t.Fatalf("up weight shape = %v, want %v", got, []int32{1, 2, 1, 2})
 	}
-	if got := upInfo["blk.0.ffn_up_exps.0.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 2}) {
+	if got := upInfo["blk.0.ffn_up_exps.weight.scale"].Shape; !slices.Equal(got, []int32{1, 2, 2}) {
 		t.Fatalf("up scale shape = %v, want %v", got, []int32{1, 2, 2})
 	}
-	if got := upInfo["blk.0.ffn_up_exps.0.weight.bias"].Shape; !slices.Equal(got, []int32{1, 2}) {
+	if got := upInfo["blk.0.ffn_up_exps.weight.bias"].Shape; !slices.Equal(got, []int32{1, 2}) {
 		t.Fatalf("up bias shape = %v, want %v", got, []int32{1, 2})
 	}
 }
