@@ -62,39 +62,18 @@ func mlxDebugBegin(tokens *mlx.Array, caches []cache.Cache, cfg *Config) int32 {
 	selectedIndex := mlxDebugSelectedIndex(L)
 	switch mlxDebugForce.Swap(mlxDebugPhaseNone) {
 	case mlxDebugPhasePrefill:
-		if mlxDebugPrefill.CompareAndSwap(false, true) {
-			mlxDebugPhase.Store(mlxDebugPhasePrefill)
-			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=1 cache_offset=%d selected_index=%d\n", L, cacheOffset, selectedIndex)
-			return mlxDebugPhasePrefill
-		}
-		mlxDebugPhase.Store(mlxDebugPhaseNone)
-		return mlxDebugPhaseNone
-	case mlxDebugPhaseDecode:
-		if mlxDebugDecode.CompareAndSwap(false, true) {
-			mlxDebugPhase.Store(mlxDebugPhaseDecode)
-			fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=decode_first batch_seq=1 batch_size=1 cache_offset=%d selected_index=0\n", cacheOffset)
-			return mlxDebugPhaseDecode
-		}
-		mlxDebugPhase.Store(mlxDebugPhaseNone)
-		return mlxDebugPhaseNone
-	}
-	if tokens.NumDims() != 2 || tokens.Dim(0) != 1 {
-		mlxDebugPhase.Store(mlxDebugPhaseNone)
-		return mlxDebugPhaseNone
-	}
-	switch {
-	case L > 1 && mlxDebugPrefill.CompareAndSwap(false, true):
+		mlxDebugPrefill.Store(true)
 		mlxDebugPhase.Store(mlxDebugPhasePrefill)
 		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=prefill_last batch_seq=%d batch_size=1 cache_offset=%d selected_index=%d\n", L, cacheOffset, selectedIndex)
 		return mlxDebugPhasePrefill
-	case L == 1 && cacheOffset > 0 && mlxDebugDecode.CompareAndSwap(false, true):
+	case mlxDebugPhaseDecode:
+		mlxDebugDecode.Store(true)
 		mlxDebugPhase.Store(mlxDebugPhaseDecode)
 		fmt.Fprintf(os.Stderr, "GPTOSS_DEBUG path=mlx stage=step layer=-1 semantic=decode_first batch_seq=1 batch_size=1 cache_offset=%d selected_index=0\n", cacheOffset)
 		return mlxDebugPhaseDecode
-	default:
-		mlxDebugPhase.Store(mlxDebugPhaseNone)
-		return mlxDebugPhaseNone
 	}
+	mlxDebugPhase.Store(mlxDebugPhaseNone)
+	return mlxDebugPhaseNone
 }
 
 func mlxDebugRequestSemantic(semantic string) {
