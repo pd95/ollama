@@ -554,6 +554,57 @@ func TestMergedModelfileConfigQwen35OverridesDefaults(t *testing.T) {
 	}
 }
 
+func TestMergedModelfileConfigGptOssDefaults(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gptoss"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := mergedModelfileConfig(dir, nil)
+	if got == nil {
+		t.Fatal("mergedModelfileConfig() = nil, want defaults")
+	}
+	if got.Template != gptossDefaultTemplate {
+		t.Fatalf("Template mismatch")
+	}
+	if got.Parameters["temperature"] != float32(1) {
+		t.Fatalf("temperature = %#v, want %v", got.Parameters["temperature"], float32(1))
+	}
+}
+
+func TestMergedModelfileConfigGptOssOverridesTemplate(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gptoss"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mf := &ModelfileConfig{
+		Template: "{{ .Prompt }}",
+		Parameters: map[string]any{
+			"temperature": float32(0.2),
+		},
+	}
+
+	got := mergedModelfileConfig(dir, mf)
+	if got == nil {
+		t.Fatal("mergedModelfileConfig() = nil")
+	}
+	if got.Template != mf.Template {
+		t.Fatalf("Template = %q, want %q", got.Template, mf.Template)
+	}
+	if got.Parameters["temperature"] != float32(0.2) {
+		t.Fatalf("temperature = %#v, want %v", got.Parameters["temperature"], float32(0.2))
+	}
+}
+
 func mapsEqual(a, b map[string]any) bool {
 	if len(a) != len(b) {
 		return false
