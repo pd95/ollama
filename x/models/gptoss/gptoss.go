@@ -92,6 +92,8 @@ var gptossFirstDecodeNormTrace atomic.Bool
 var gptossFirstDecodeLayerTrace atomic.Bool
 var gptossBadDecodeLayer atomic.Int32
 
+const gptossTraceMoELayer int32 = 5
+
 func parseConfig(configData []byte) (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(configData, &cfg); err != nil {
@@ -558,7 +560,7 @@ func (l *Layer) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config, la
 			maybeMarkBadLayer(layerIndex, "attention", stats)
 		}
 	}
-	ffn := l.MoE.Forward(l.MLPNorm.Forward(h, cfg.RMSNormEps), cfg)
+	ffn := l.MoE.Forward(l.MLPNorm.Forward(h, cfg.RMSNormEps), cfg, layerIndex, traceLayers)
 	out := mlx.Add(h, ffn)
 	if shouldTraceLayer(layerIndex, traceLayers) && gptossBadDecodeLayer.Load() == 0 {
 		stats := tensorStats(out)
@@ -602,7 +604,7 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, B, L int32, cfg *Config
 	return a.OProj.Forward(out)
 }
 
-func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config) *mlx.Array {
+func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config, traceMoE bool) *mlx.Array {
 	dims := x.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
 	topK := cfg.ExpertsPerToken
@@ -624,9 +626,21 @@ func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config) *mlx.
 	}
 
 	gate := mlx.GatherMM(xFlat, mlx.Transpose(s.GateWeight, 0, 2, 1), nil, idxFlat, doSort)
+	if traceMoE {
+		logMoEStats("moe_gate", gate)
+	}
 	up := mlx.GatherMM(xFlat, mlx.Transpose(s.UpWeight, 0, 2, 1), nil, idxFlat, doSort)
+	if traceMoE {
+		logMoEStats("moe_up", up)
+	}
 	hidden := mlx.SwiGLUAlphaLimit(gate, up, 1.702, 7.0)
+	if traceMoE {
+		logMoEStats("moe_post_swiglu", hidden)
+	}
 	down := mlx.GatherMM(hidden, mlx.Transpose(s.DownWeight, 0, 2, 1), nil, idxFlat, doSort)
+	if traceMoE {
+		logMoEStats("moe_down_raw", down)
+	}
 
 	if doSort {
 		down = mlx.Reshape(mlx.Take(mlx.Squeeze(mlx.Squeeze(down, 2), 1), invOrder, 0), B*L, topK, cfg.HiddenSize)
@@ -634,12 +648,17 @@ func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config) *mlx.
 		down = mlx.Squeeze(down, 2)
 	}
 
-	return mlx.Reshape(down, B, L, topK, cfg.HiddenSize)
+	out := mlx.Reshape(down, B, L, topK, cfg.HiddenSize)
+	if traceMoE {
+		logMoEStats("moe_down", out)
+	}
+	return out
 }
 
-func (m *MoE) Forward(x *mlx.Array, cfg *Config) *mlx.Array {
+func (m *MoE) Forward(x *mlx.Array, cfg *Config, layerIndex int32, traceLayers bool) *mlx.Array {
 	dims := x.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
+	traceMoE := traceLayers && layerIndex == gptossTraceMoELayer
 
 	logits := m.Gate.Forward(x)
 	neg := mlx.Neg(logits)
@@ -651,8 +670,28 @@ func (m *MoE) Forward(x *mlx.Array, cfg *Config) *mlx.Array {
 	order := mlx.Argsort(mlx.Neg(scores), -1)
 	inds = mlx.TakeAlongAxis(inds, order, -1)
 	scores = mlx.TakeAlongAxis(scores, order, -1)
+	if traceMoE {
+		mlx.Eval(inds, scores)
+		slog.Info("moe_router_selected", "layer", layerIndex, "ids", inds.Ints(), "scores", scores.Floats())
+	}
 	scores = mlx.SoftmaxAxis(scores, -1, true)
-	expertOut := m.SwitchMLP.Forward(x, inds, cfg)
+	if traceMoE {
+		mlx.Eval(scores)
+		slog.Info("moe_router_probs", "layer", layerIndex, "probs", scores.Floats())
+	}
+	expertOut := m.SwitchMLP.Forward(x, inds, cfg, traceMoE)
 	y := mlx.Sum(mlx.Mul(expertOut, mlx.ExpandDims(scores, -1)), 2, false)
-	return mlx.Reshape(y, B, L, cfg.HiddenSize)
+	out := mlx.Reshape(y, B, L, cfg.HiddenSize)
+	if traceMoE {
+		logMoEStats("moe_post_residual_mlp", out)
+	}
+	return out
+}
+
+func logMoEStats(stage string, t *mlx.Array) {
+	stats := tensorStats(t)
+	if !stats.valid {
+		return
+	}
+	slog.Info(stage, "shape", t.Dims(), "dtype", t.DType(), "min", stats.min, "max", stats.max, "mean", stats.mean, "std", stats.std)
 }
