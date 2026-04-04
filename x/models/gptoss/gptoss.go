@@ -640,12 +640,10 @@ func (s *SwitchMLP) Forward(x *mlx.Array, indices *mlx.Array, cfg *Config, trace
 	down := mlx.GatherMM(hidden, s.DownWeight, nil, idxFlat, doSort)
 	if traceMoE {
 		logMoEStats("moe_down_raw", down)
-		downAltNoTranspose := mlx.GatherMM(hidden, s.DownWeight, nil, idxFlat, doSort)
-		logMoEStats("moe_down_raw_alt_no_transpose", downAltNoTranspose)
 		if !doSort {
-			idxFlatRev := mlx.Reshape(mlx.Take(mlx.Flatten(idxFlat), mlx.FromValues([]int32{3, 2, 1, 0}, 4), 0), B*L, topK)
-			downAltReversed := mlx.GatherMM(hidden, mlx.Transpose(s.DownWeight, 0, 2, 1), nil, idxFlatRev, doSort)
-			logMoEStats("moe_down_raw_alt_rev_idx", downAltReversed)
+			downRef := downReference(hidden, s.DownWeight, idxFlat, topK, cfg.HiddenSize)
+			logMoEStats("moe_down_ref", downRef)
+			logMoEStats("moe_down_ref_diff", mlx.Sub(down, downRef))
 		}
 	}
 
@@ -701,4 +699,26 @@ func logMoEStats(stage string, t *mlx.Array) {
 		return
 	}
 	slog.Info(stage, "shape", t.Dims(), "dtype", t.DType(), "min", stats.min, "max", stats.max, "mean", stats.mean, "std", stats.std)
+}
+
+func downReference(hidden, downWeight, idxFlat *mlx.Array, topK, hiddenSize int32) *mlx.Array {
+	if hidden == nil || downWeight == nil || idxFlat == nil {
+		return nil
+	}
+	mlx.Eval(idxFlat)
+	ids := idxFlat.Ints()
+	parts := make([]*mlx.Array, 0, len(ids))
+	for i, id := range ids {
+		h := sliceAxis0AndMaybeSqueeze(hidden, int32(i))
+		w := sliceAxis0AndMaybeSqueeze(downWeight, int32(id))
+		if h == nil || w == nil {
+			return nil
+		}
+		parts = append(parts, h.Matmul(mlx.Transpose(w, 1, 0)))
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	stacked := mlx.Stack(parts, 0)
+	return mlx.Reshape(stacked, 1, topK, 1, hiddenSize)
 }
