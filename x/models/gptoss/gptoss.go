@@ -11,6 +11,7 @@ import (
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
+	"github.com/ollama/ollama/x/models/nn"
 	"github.com/ollama/ollama/x/tokenizer"
 )
 
@@ -18,7 +19,7 @@ func init() {
 	base.Register("GptOssForCausalLM", NewModel)
 }
 
-// RopeScaling carries the GPT-OSS rope scaling block.
+// RopeScaling carries the gpt-oss rope scaling block.
 type RopeScaling struct {
 	Factor                        float32 `json:"factor"`
 	OriginalMaxPositionEmbeddings int32   `json:"original_max_position_embeddings"`
@@ -66,10 +67,48 @@ type Config struct {
 	QuantMethod    string                            `json:"-"`
 }
 
+// RopeParameters returns the runtime rope settings derived from config.
+func (c *Config) RopeParameters() (base, scale float32, originalContext int) {
+	if c == nil {
+		return 0, 1, 0
+	}
+	base = c.RopeTheta
+	scale = 1
+	if c.RopeScaling.Factor > 0 {
+		scale = 1 / c.RopeScaling.Factor
+	}
+	if c.RopeScaling.OriginalMaxPositionEmbeddings > 0 {
+		originalContext = int(c.RopeScaling.OriginalMaxPositionEmbeddings)
+	}
+	return base, scale, originalContext
+}
+
 // Model is the gpt-oss text-only model.
 type Model struct {
+	EmbedTokens nn.EmbeddingLayer
+	Layers      []*Layer
+	Norm        *nn.RMSNorm
+	LMHead      nn.LinearLayer
+
 	tok *tokenizer.Tokenizer
 	*Config
+}
+
+// Layer is a single gpt-oss decoder block.
+type Layer struct {
+	AttentionNorm *nn.RMSNorm
+	Attention     *Attention
+	FFNNorm       *nn.RMSNorm
+	Router        nn.LinearLayer
+}
+
+// Attention implements the split gpt-oss attention path.
+type Attention struct {
+	QProj nn.LinearLayer
+	KProj nn.LinearLayer
+	VProj nn.LinearLayer
+	OProj nn.LinearLayer
+	Sinks *mlx.Array
 }
 
 // NewModel creates a gpt-oss model from a manifest root.
@@ -129,6 +168,7 @@ func NewModel(root *model.Root) (base.Model, error) {
 
 	return &Model{
 		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
 		tok:    tok,
 	}, nil
 }
@@ -225,14 +265,20 @@ func parseConfig(configData []byte) (Config, error) {
 	return cfg, nil
 }
 
-// Forward is intentionally skeletal for Phase 2.
-func (m *Model) Forward(_ *mlx.Array, _ []cache.Cache) *mlx.Array {
-	return nil
+// Forward is intentionally unavailable until the MLP/expert path lands in Phase 4.
+func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
+	if m == nil || m.Config == nil || m.EmbedTokens == nil || m.Norm == nil || tokens == nil {
+		return nil
+	}
+	panic("gpt-oss forward path requires unimplemented MLP/expert execution")
 }
 
-// Unembed is intentionally skeletal for Phase 2.
-func (m *Model) Unembed(_ *mlx.Array) *mlx.Array {
-	return nil
+// Unembed projects hidden states back into vocabulary space.
+func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
+	if m == nil || m.LMHead == nil || x == nil {
+		return nil
+	}
+	return m.LMHead.Forward(x)
 }
 
 // NumLayers returns the configured layer count.
@@ -262,7 +308,257 @@ func (m *Model) MaxContextLength() int {
 	return 0
 }
 
-// LoadWeights is intentionally skeletal for Phase 2.
-func (m *Model) LoadWeights(map[string]*mlx.Array) error {
-	return fmt.Errorf("gpt-oss weight loading is not implemented yet")
+// NewCaches returns one cache per layer, matching the classic gpt-oss
+// alternating sliding-window / causal parity.
+func (m *Model) NewCaches() []cache.Cache {
+	caches := make([]cache.Cache, m.NumLayers())
+	for i := range caches {
+		if i%2 == 0 {
+			caches[i] = cache.NewRotatingKVCache(int(m.SlidingWindow))
+			continue
+		}
+		caches[i] = cache.NewKVCache()
+	}
+	return caches
+}
+
+func (l *Layer) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
+	if l == nil || l.Attention == nil || l.AttentionNorm == nil || x == nil || cfg == nil {
+		return x
+	}
+
+	residual := x
+	x = l.AttentionNorm.Forward(x, cfg.RMSNormEps)
+	x = l.Attention.Forward(x, c, batchSize, seqLen, cfg, layerIndex)
+	return residual.Add(x)
+}
+
+func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
+	if a == nil || a.QProj == nil || a.KProj == nil || a.VProj == nil || a.OProj == nil || x == nil || cfg == nil {
+		return x
+	}
+
+	query := a.QProj.Forward(x)
+	key := a.KProj.Forward(x)
+	value := a.VProj.Forward(x)
+
+	batch := int32(batchSize)
+	seq := int32(seqLen)
+	numHeads := int32(cfg.NumAttentionHeads)
+	numKVHeads := int32(cfg.NumKeyValueHeads)
+	headDim := int32(cfg.HeadDim)
+
+	query = mlx.Reshape(query, batch, seq, numHeads, headDim)
+	key = mlx.Reshape(key, batch, seq, numKVHeads, headDim)
+	value = mlx.Reshape(value, batch, seq, numKVHeads, headDim)
+
+	query = mlx.Transpose(query, 0, 2, 1, 3)
+	key = mlx.Transpose(key, 0, 2, 1, 3)
+	value = mlx.Transpose(value, 0, 2, 1, 3)
+
+	offset := 0
+	if c != nil {
+		offset = c.Offset()
+	}
+	ropeBase, ropeScale, _ := cfg.RopeParameters()
+	query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
+	key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
+
+	if c != nil {
+		key, value = c.Update(key, value)
+	}
+
+	maskMode := "causal"
+	if layerIndex%2 == 0 {
+		maskMode = "sliding_window"
+	}
+
+	attention := mlx.ScaledDotProductAttentionWithSinks(
+		query,
+		key,
+		value,
+		float32(1.0/math.Sqrt(float64(cfg.HeadDim))),
+		maskMode,
+		nil,
+		a.Sinks,
+	)
+	attention = mlx.Transpose(attention, 0, 2, 1, 3)
+	attention = mlx.Reshape(attention, batch, seq, numHeads*headDim)
+	return a.OProj.Forward(attention)
+}
+
+func requireTensor(tensors map[string]*mlx.Array, name string) (*mlx.Array, error) {
+	t := tensors[name]
+	if t == nil || !t.Valid() {
+		return nil, fmt.Errorf("missing tensor %q", name)
+	}
+	return t, nil
+}
+
+func validateTensorShape(name string, t *mlx.Array, want []int, wantExpr string) error {
+	if t == nil || !t.Valid() {
+		return fmt.Errorf("missing tensor %q", name)
+	}
+
+	got := t.Dims()
+	if len(got) != len(want) {
+		return fmt.Errorf("tensor %q shape %v, want %v (%s)", name, got, want, wantExpr)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return fmt.Errorf("tensor %q shape %v, want %v (%s)", name, got, want, wantExpr)
+		}
+	}
+	return nil
+}
+
+func validateLayerTensorShape(layer int, name string, t *mlx.Array, want []int, wantExpr string) error {
+	if err := validateTensorShape(name, t, want, wantExpr); err != nil {
+		return fmt.Errorf("layer %d: %w", layer, err)
+	}
+	return nil
+}
+
+func loadLinearLayer(tensors map[string]*mlx.Array, linears model.LinearFactory, layer int, path string, wantOut, wantIn int, wantExpr string) (nn.LinearLayer, error) {
+	weightName := path + ".weight"
+	weight, err := requireTensor(tensors, weightName)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: %w", layer, err)
+	}
+	if err := validateLayerTensorShape(layer, weightName, weight, []int{wantOut, wantIn}, wantExpr); err != nil {
+		return nil, err
+	}
+
+	biasName := path + ".bias"
+	bias, err := requireTensor(tensors, biasName)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: %w", layer, err)
+	}
+	if err := validateLayerTensorShape(layer, biasName, bias, []int{wantOut}, fmt.Sprintf("%s bias length", path)); err != nil {
+		return nil, err
+	}
+
+	layerLinear := linears.Make(path)
+	if layerLinear == nil {
+		return nil, fmt.Errorf("layer %d: failed to construct linear layer from %q", layer, weightName)
+	}
+	return layerLinear, nil
+}
+
+func loadLayerNormTensor(tensors map[string]*mlx.Array, layer int, name string, want int, wantExpr string) (*nn.RMSNorm, error) {
+	weight, err := requireTensor(tensors, name)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: %w", layer, err)
+	}
+	if err := validateLayerTensorShape(layer, name, weight, []int{want}, wantExpr); err != nil {
+		return nil, err
+	}
+	return nn.NewRMSNorm(weight, 0), nil
+}
+
+// LoadWeights assigns dense tensors and structural placeholders to the model.
+func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
+	if m == nil || m.Config == nil {
+		return fmt.Errorf("missing gpt-oss config")
+	}
+	if len(m.Layers) == 0 {
+		m.Layers = make([]*Layer, m.NumLayers())
+	}
+
+	linears := model.NewLinearFactory(tensors, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+
+	embeddingWeight, err := requireTensor(tensors, "embedding.weight")
+	if err != nil {
+		return err
+	}
+	if err := validateTensorShape("embedding.weight", embeddingWeight, []int{int(m.VocabSize), int(m.HiddenSize)}, "vocab_size x hidden_size"); err != nil {
+		return err
+	}
+	embedTokens := model.MakeEmbeddingLayer(tensors, "embedding", m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+	if embedTokens == nil {
+		return fmt.Errorf("failed to construct embedding layer from %q", "embedding.weight")
+	}
+	m.EmbedTokens = embedTokens
+
+	outputNormWeight, err := requireTensor(tensors, "output_norm.weight")
+	if err != nil {
+		return err
+	}
+	if err := validateTensorShape("output_norm.weight", outputNormWeight, []int{int(m.HiddenSize)}, "hidden_size"); err != nil {
+		return err
+	}
+	m.Norm = nn.NewRMSNorm(outputNormWeight, m.RMSNormEps)
+
+	outputWeight, err := requireTensor(tensors, "output.weight")
+	if err != nil {
+		return err
+	}
+	if err := validateTensorShape("output.weight", outputWeight, []int{int(m.VocabSize), int(m.HiddenSize)}, "vocab_size x hidden_size"); err != nil {
+		return err
+	}
+	m.LMHead = linears.Make("output")
+	if m.LMHead == nil {
+		return fmt.Errorf("failed to construct linear layer from %q", "output.weight")
+	}
+
+	expectedQ := int(m.NumAttentionHeads * m.HeadDim)
+	expectedKV := int(m.NumKeyValueHeads * m.HeadDim)
+	for i := range m.Layers {
+		prefix := fmt.Sprintf("blocks.%d", i)
+
+		attnNorm, err := loadLayerNormTensor(tensors, i, prefix+".attn_norm.weight", int(m.HiddenSize), "hidden_size")
+		if err != nil {
+			return err
+		}
+
+		qProj, err := loadLinearLayer(tensors, linears, i, prefix+".q_proj", expectedQ, int(m.HiddenSize), "num_attention_heads * head_dim x hidden_size")
+		if err != nil {
+			return err
+		}
+		kProj, err := loadLinearLayer(tensors, linears, i, prefix+".k_proj", expectedKV, int(m.HiddenSize), "num_key_value_heads * head_dim x hidden_size")
+		if err != nil {
+			return err
+		}
+		vProj, err := loadLinearLayer(tensors, linears, i, prefix+".v_proj", expectedKV, int(m.HiddenSize), "num_key_value_heads * head_dim x hidden_size")
+		if err != nil {
+			return err
+		}
+		oProj, err := loadLinearLayer(tensors, linears, i, prefix+".attn_out", int(m.HiddenSize), expectedQ, "hidden_size x num_attention_heads * head_dim")
+		if err != nil {
+			return err
+		}
+
+		sinks, err := requireTensor(tensors, prefix+".attn_sinks")
+		if err != nil {
+			return fmt.Errorf("layer %d: %w", i, err)
+		}
+		if err := validateLayerTensorShape(i, prefix+".attn_sinks", sinks, []int{int(m.NumAttentionHeads)}, "num_attention_heads"); err != nil {
+			return err
+		}
+
+		ffnNorm, err := loadLayerNormTensor(tensors, i, prefix+".ffn_norm.weight", int(m.HiddenSize), "hidden_size")
+		if err != nil {
+			return err
+		}
+
+		router, err := loadLinearLayer(tensors, linears, i, prefix+".router", int(m.NumLocalExperts), int(m.HiddenSize), "num_local_experts x hidden_size")
+		if err != nil {
+			return err
+		}
+
+		m.Layers[i] = &Layer{
+			AttentionNorm: attnNorm,
+			Attention: &Attention{
+				QProj: qProj,
+				KProj: kProj,
+				VProj: vProj,
+				OProj: oProj,
+				Sinks: sinks,
+			},
+			FFNNorm: ffnNorm,
+			Router:  router,
+		}
+	}
+
+	return nil
 }
