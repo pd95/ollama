@@ -8,14 +8,18 @@ import (
 )
 
 func ScaledDotProductAttention(query, key, value, mask *Array, scale float32) *Array {
+	return ScaledDotProductAttentionWithSinks(query, key, value, scale, "causal", mask, nil)
+}
+
+func ScaledDotProductAttentionWithSinks(query, key, value *Array, scale float32, maskMode string, mask, sinks *Array) *Array {
 	if mask == nil {
 		mask = New("")
 	}
+	if sinks == nil {
+		sinks = New("")
+	}
 
-	sinks := New("")
-
-	mode := "causal"
-	cMode := C.CString(mode)
+	cMode := C.CString(maskMode)
 	defer C.free(unsafe.Pointer(cMode))
 
 	out := New("FAST_SDPA")
