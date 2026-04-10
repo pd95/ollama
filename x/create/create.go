@@ -429,7 +429,11 @@ func (cfg sourceModelConfig) QuantMetadata() map[string]string {
 		}
 	}
 
-	quantType := sourceQuantType(q.Mode, q.Bits)
+	mode := q.Mode
+	if mode == "" {
+		mode = q.QuantMethod
+	}
+	quantType := sourceQuantType(mode, q.Bits)
 	if quantType == "" {
 		return nil
 	}
@@ -474,6 +478,7 @@ func (cfg sourceModelConfig) HFFP8WeightBlockSize() (rows, cols int32, ok bool) 
 type tensorImportTransformFactory func(rawConfig json.RawMessage) (quantizePolicy, error)
 
 var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
+	"GptOssForCausalLM":                     newGPTOSSImportTransform,
 	"Qwen3_5ForCausalLM":                    newQwen35ImportTransform,
 	"Qwen3_5ForConditionalGeneration":       newQwen35ImportTransform,
 	"Qwen3NextForCausalLM":                  newQwen35ImportTransform,
