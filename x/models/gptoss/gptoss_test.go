@@ -182,6 +182,54 @@ func TestLoadWeightsDensePath(t *testing.T) {
 		if layer.Attention.Sinks == nil {
 			t.Fatalf("layer %d Attention.Sinks = nil", i)
 		}
+		if layer.Experts == nil || layer.Experts.GateUp == nil || layer.Experts.GateUp.Gate == nil || layer.Experts.GateUp.Up == nil || layer.Experts.Down == nil {
+			t.Fatalf("layer %d Experts = %+v, want loaded expert projections", i, layer.Experts)
+		}
+		if got := layer.Experts.GateUp.Gate.Weight.DType(); got != mlx.DTypeBFloat16 {
+			t.Fatalf("layer %d GateUp.Gate dtype = %v, want %v", i, got, mlx.DTypeBFloat16)
+		}
+		if got := layer.Experts.GateUp.Gate.Bias.DType(); got != mlx.DTypeBFloat16 {
+			t.Fatalf("layer %d GateUp.Gate bias dtype = %v, want %v", i, got, mlx.DTypeBFloat16)
+		}
+		if layer.Experts.GateUp.Gate.Scales != nil {
+			t.Fatalf("layer %d GateUp.Gate Scales = %v, want nil after dequantize-on-load", i, layer.Experts.GateUp.Gate.Scales)
+		}
+		if got := layer.Experts.GateUp.Up.Weight.DType(); got != mlx.DTypeBFloat16 {
+			t.Fatalf("layer %d GateUp.Up dtype = %v, want %v", i, got, mlx.DTypeBFloat16)
+		}
+		if got := layer.Experts.GateUp.Up.Bias.DType(); got != mlx.DTypeBFloat16 {
+			t.Fatalf("layer %d GateUp.Up bias dtype = %v, want %v", i, got, mlx.DTypeBFloat16)
+		}
+		if layer.Experts.GateUp.Up.Scales != nil {
+			t.Fatalf("layer %d GateUp.Up Scales = %v, want nil after dequantize-on-load", i, layer.Experts.GateUp.Up.Scales)
+		}
+		if got := layer.Experts.Down.Weight.DType(); got != mlx.DTypeBFloat16 {
+			t.Fatalf("layer %d Down dtype = %v, want %v", i, got, mlx.DTypeBFloat16)
+		}
+		if got := layer.Experts.Down.Bias.DType(); got != mlx.DTypeBFloat16 {
+			t.Fatalf("layer %d Down bias dtype = %v, want %v", i, got, mlx.DTypeBFloat16)
+		}
+		if layer.Experts.Down.Scales != nil {
+			t.Fatalf("layer %d Down Scales = %v, want nil after dequantize-on-load", i, layer.Experts.Down.Scales)
+		}
+		if dims := layer.Experts.GateUp.Gate.Weight.Dims(); len(dims) != 3 || dims[0] != int(cfg.NumLocalExperts) || dims[1] != int(cfg.IntermediateSize) || dims[2] != int(cfg.HiddenSize) {
+			t.Fatalf("layer %d GateUp.Gate dims = %v, want [%d %d %d]", i, dims, cfg.NumLocalExperts, cfg.IntermediateSize, cfg.HiddenSize)
+		}
+		if dims := layer.Experts.GateUp.Gate.Bias.Dims(); len(dims) != 2 || dims[0] != int(cfg.NumLocalExperts) || dims[1] != int(cfg.IntermediateSize) {
+			t.Fatalf("layer %d GateUp.Gate bias dims = %v, want [%d %d]", i, dims, cfg.NumLocalExperts, cfg.IntermediateSize)
+		}
+		if dims := layer.Experts.GateUp.Up.Weight.Dims(); len(dims) != 3 || dims[0] != int(cfg.NumLocalExperts) || dims[1] != int(cfg.IntermediateSize) || dims[2] != int(cfg.HiddenSize) {
+			t.Fatalf("layer %d GateUp.Up dims = %v, want [%d %d %d]", i, dims, cfg.NumLocalExperts, cfg.IntermediateSize, cfg.HiddenSize)
+		}
+		if dims := layer.Experts.GateUp.Up.Bias.Dims(); len(dims) != 2 || dims[0] != int(cfg.NumLocalExperts) || dims[1] != int(cfg.IntermediateSize) {
+			t.Fatalf("layer %d GateUp.Up bias dims = %v, want [%d %d]", i, dims, cfg.NumLocalExperts, cfg.IntermediateSize)
+		}
+		if dims := layer.Experts.Down.Weight.Dims(); len(dims) != 3 || dims[0] != int(cfg.NumLocalExperts) || dims[1] != int(cfg.HiddenSize) || dims[2] != int(cfg.IntermediateSize) {
+			t.Fatalf("layer %d Down dims = %v, want [%d %d %d]", i, dims, cfg.NumLocalExperts, cfg.HiddenSize, cfg.IntermediateSize)
+		}
+		if dims := layer.Experts.Down.Bias.Dims(); len(dims) != 2 || dims[0] != int(cfg.NumLocalExperts) || dims[1] != int(cfg.HiddenSize) {
+			t.Fatalf("layer %d Down bias dims = %v, want [%d %d]", i, dims, cfg.NumLocalExperts, cfg.HiddenSize)
+		}
 	}
 
 	caches := m.NewCaches()
@@ -242,6 +290,69 @@ func TestLoadWeightsShapeValidationFails(t *testing.T) {
 	}
 }
 
+func TestLoadWeightsExpertDTypeValidationFails(t *testing.T) {
+	skipIfNoMLX(t)
+
+	cfg := denseTestConfig(t)
+	m := &Model{
+		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
+	}
+
+	tensors := denseTestTensors(t, cfg)
+	tensors["blocks.0.experts.gate_up_proj.blocks"] = tensors["blocks.0.experts.gate_up_proj.blocks"].AsType(mlx.DTypeBFloat16)
+
+	err := m.LoadWeights(tensors)
+	if err == nil {
+		t.Fatal("LoadWeights() error = nil, want expert dtype validation failure")
+	}
+	if !strings.Contains(err.Error(), "blocks.0.experts.gate_up_proj.blocks") || !strings.Contains(err.Error(), "dtype BF16, want U8") {
+		t.Fatalf("LoadWeights() error = %q, want expert dtype mismatch", err)
+	}
+}
+
+func TestLoadWeightsExpertMissingTensorFails(t *testing.T) {
+	skipIfNoMLX(t)
+
+	cfg := denseTestConfig(t)
+	m := &Model{
+		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
+	}
+
+	tensors := denseTestTensors(t, cfg)
+	delete(tensors, "blocks.0.experts.down_proj.bias")
+
+	err := m.LoadWeights(tensors)
+	if err == nil {
+		t.Fatal("LoadWeights() error = nil, want expert missing tensor failure")
+	}
+	if !strings.Contains(err.Error(), "blocks.0.experts.down_proj.bias") || !strings.Contains(err.Error(), "missing tensor") {
+		t.Fatalf("LoadWeights() error = %q, want missing expert tensor", err)
+	}
+}
+
+func TestLoadWeightsExpertShapeValidationFails(t *testing.T) {
+	skipIfNoMLX(t)
+
+	cfg := denseTestConfig(t)
+	m := &Model{
+		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
+	}
+
+	tensors := denseTestTensors(t, cfg)
+	tensors["blocks.0.experts.down_proj.blocks"] = mlx.FromValues(make([]uint8, int(cfg.NumLocalExperts)*int(cfg.HiddenSize)*90*8), int(cfg.NumLocalExperts), int(cfg.HiddenSize), 90, 8)
+
+	err := m.LoadWeights(tensors)
+	if err == nil {
+		t.Fatal("LoadWeights() error = nil, want expert shape validation failure")
+	}
+	if !strings.Contains(err.Error(), "blocks.0.experts.down_proj.blocks") || !strings.Contains(err.Error(), "shape [2 4 90 8]") {
+		t.Fatalf("LoadWeights() error = %q, want expert shape mismatch", err)
+	}
+}
+
 func TestNewCachesLayerParity(t *testing.T) {
 	cfg := denseTestConfig(t)
 	m := &Model{
@@ -292,7 +403,7 @@ func TestForwardFailsBeforePartialExecution(t *testing.T) {
 		if r == nil {
 			t.Fatal("Forward() did not panic, want explicit failure")
 		}
-		if !strings.Contains(fmt.Sprint(r), "unimplemented MLP/expert execution") {
+		if !strings.Contains(fmt.Sprint(r), "validated expert execution") {
 			t.Fatalf("panic = %v, want explicit gpt-oss forward failure", r)
 		}
 	}()
@@ -366,6 +477,12 @@ func denseTestTensors(t *testing.T, cfg Config) map[string]*mlx.Array {
 		tensors[prefix+".ffn_norm.weight"] = denseVector(int(cfg.HiddenSize), 13+float32(i))
 		tensors[prefix+".router.weight"] = denseMatrix(int(cfg.NumLocalExperts), int(cfg.HiddenSize), 14+float32(i))
 		tensors[prefix+".router.bias"] = denseVector(int(cfg.NumLocalExperts), 15+float32(i))
+		tensors[prefix+".experts.gate_up_proj.blocks"] = expertBlocks(int(cfg.NumLocalExperts), int(cfg.IntermediateSize)*2, 1+uint8(i))
+		tensors[prefix+".experts.gate_up_proj.scales"] = expertBlocks(int(cfg.NumLocalExperts), int(cfg.IntermediateSize)*2, 2+uint8(i))
+		tensors[prefix+".experts.gate_up_proj.bias"] = expertBias(int(cfg.NumLocalExperts), int(cfg.IntermediateSize)*2, 0)
+		tensors[prefix+".experts.down_proj.blocks"] = expertBlocks(int(cfg.NumLocalExperts), int(cfg.HiddenSize), 3+uint8(i))
+		tensors[prefix+".experts.down_proj.scales"] = expertBlocks(int(cfg.NumLocalExperts), int(cfg.HiddenSize), 4+uint8(i))
+		tensors[prefix+".experts.down_proj.bias"] = expertBias(int(cfg.NumLocalExperts), int(cfg.HiddenSize), 0)
 	}
 
 	return tensors
@@ -385,6 +502,22 @@ func denseVector(length int, start float32) *mlx.Array {
 		values[i] = start + float32(i)
 	}
 	return mlx.FromValues(values, length)
+}
+
+func expertBlocks(experts, out int, start uint8) *mlx.Array {
+	values := make([]uint8, experts*out*90*16)
+	for i := range values {
+		values[i] = start + uint8(i%7)
+	}
+	return mlx.FromValues(values, experts, out, 90, 16)
+}
+
+func expertBias(experts, out int, start float32) *mlx.Array {
+	values := make([]float32, experts*out)
+	for i := range values {
+		values[i] = start + float32(i)/100
+	}
+	return mlx.FromValues(values, experts, out).AsType(mlx.DTypeBFloat16)
 }
 
 func testRoot(t *testing.T, configJSON, tokenizerJSON []byte) *model.Root {
