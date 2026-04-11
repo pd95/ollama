@@ -295,7 +295,23 @@ func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
 	if m == nil || m.Config == nil || m.EmbedTokens == nil || m.Norm == nil || tokens == nil {
 		return nil
 	}
-	panic("gpt-oss forward path requires validated expert execution")
+
+	dims := tokens.Dims()
+	if len(dims) != 2 {
+		panic(fmt.Sprintf("gpt-oss forward requires 2D token input, got %v", dims))
+	}
+
+	batchSize, seqLen := dims[0], dims[1]
+	h := m.EmbedTokens.Forward(tokens)
+	for i, layer := range m.Layers {
+		var c cache.Cache
+		if caches != nil && i < len(caches) {
+			c = caches[i]
+		}
+		h = layer.Forward(h, c, batchSize, seqLen, m.Config, i)
+	}
+
+	return m.Norm.Forward(h, m.RMSNormEps)
 }
 
 // Unembed projects hidden states back into vocabulary space.
@@ -348,7 +364,34 @@ func (m *Model) NewCaches() []cache.Cache {
 }
 
 func (l *Layer) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
-	panic("gpt-oss layer forward requires validated expert execution")
+	if l == nil || l.Attention == nil || l.AttentionNorm == nil || l.FFNNorm == nil || l.Router == nil || l.Experts == nil || x == nil || cfg == nil {
+		panic("gpt-oss layer is not fully loaded")
+	}
+
+	residual := x
+	x = l.AttentionNorm.Forward(x, cfg.RMSNormEps)
+	x = l.Attention.Forward(x, c, batchSize, seqLen, cfg, layerIndex)
+	if x == nil || !x.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention output is invalid", layerIndex))
+	}
+
+	h := residual.Add(x)
+	if h == nil || !h.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d residual add output is invalid", layerIndex))
+	}
+
+	x = l.FFNNorm.Forward(h, cfg.RMSNormEps)
+	router := l.Router.Forward(x)
+	if router == nil || !router.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d router output is invalid", layerIndex))
+	}
+
+	x = l.Experts.Forward(x, router, cfg, layerIndex)
+	if x == nil || !x.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d expert output is invalid", layerIndex))
+	}
+
+	return h.Add(x)
 }
 
 func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
@@ -430,6 +473,99 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 	return attention
 }
 
+func (p *ExpertProjection) Forward(x, indices *mlx.Array, sorted bool) *mlx.Array {
+	if p == nil || p.Weight == nil || x == nil || indices == nil {
+		return nil
+	}
+
+	weight := mlx.Transpose(p.Weight, 0, 2, 1)
+	out := mlx.GatherMM(x, weight, nil, indices, sorted)
+	if p.Bias == nil || !p.Bias.Valid() {
+		return out
+	}
+
+	bias := mlx.TakeAlongAxis(p.Bias, indices, 0)
+	bias = mlx.ExpandDims(bias, 2)
+	return mlx.Add(out, bias)
+}
+
+func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *mlx.Array {
+	if e == nil || e.GateUp == nil || e.GateUp.Gate == nil || e.GateUp.Up == nil || e.Down == nil || x == nil || router == nil || cfg == nil {
+		panic("gpt-oss expert path is not fully loaded")
+	}
+	if !x.Valid() || !router.Valid() {
+		panic("gpt-oss expert path received invalid tensors")
+	}
+
+	dims := x.Dims()
+	if len(dims) != 3 {
+		panic(fmt.Sprintf("gpt-oss expert path expects 3D hidden states, got %v", dims))
+	}
+
+	B, L := int32(dims[0]), int32(dims[1])
+	topK := cfg.NumExpertsPerTok
+
+	neg := mlx.Neg(router)
+	inds := mlx.Argpartition(neg, int(topK)-1, -1)
+	shape := inds.Dims()
+	inds = mlx.SliceStartStop(inds, []int32{0, 0, 0}, []int32{int32(shape[0]), int32(shape[1]), topK})
+
+	scores := mlx.TakeAlongAxis(router, inds, -1)
+	scores = mlx.SoftmaxAxis(scores, -1, true)
+
+	xExpanded := mlx.ExpandDims(mlx.ExpandDims(x, -2), -2)
+	xFlat := mlx.Reshape(xExpanded, B*L, 1, 1, cfg.HiddenSize)
+	idxFlat := mlx.Reshape(inds, B*L, topK)
+
+	doSort := B*L >= 64
+	var invOrder *mlx.Array
+	if doSort {
+		n := B * L * topK
+		idxAll := mlx.Flatten(idxFlat)
+		order := mlx.Argsort(idxAll, 0)
+		invOrder = mlx.Argsort(order, 0)
+		xFlat = mlx.ExpandDims(mlx.Take(mlx.Squeeze(xFlat, 1), mlx.FloorDivideScalar(order, topK), 0), 1)
+		idxFlat = mlx.Reshape(mlx.Take(idxAll, order, 0), n, 1)
+	}
+
+	gate := e.GateUp.Gate.Forward(xFlat, idxFlat, doSort)
+	up := e.GateUp.Up.Forward(xFlat, idxFlat, doSort)
+	if gate == nil || up == nil || !gate.Valid() || !up.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d expert gate/up projection is invalid", layerIndex))
+	}
+
+	hidden := swiGLUAlphaLimit(gate, up)
+	down := e.Down.Forward(hidden, idxFlat, doSort)
+	if down == nil || !down.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d expert down projection is invalid", layerIndex))
+	}
+
+	if doSort {
+		down = mlx.Reshape(
+			mlx.Take(mlx.Squeeze(mlx.Squeeze(down, 2), 1), invOrder, 0),
+			B*L, topK, cfg.HiddenSize,
+		)
+	} else {
+		down = mlx.Squeeze(down, 2)
+	}
+
+	down = mlx.Reshape(down, B, L, topK, cfg.HiddenSize)
+	return mlx.Sum(mlx.Mul(down, mlx.ExpandDims(scores, -1)), 2, false)
+}
+
+func swiGLUAlphaLimit(gate, up *mlx.Array) *mlx.Array {
+	if gate == nil || up == nil {
+		return nil
+	}
+
+	alpha := mlx.FromValue[float32](1.702).AsType(gate.DType())
+	limit := mlx.FromValue[float32](7).AsType(gate.DType())
+	negLimit := mlx.Neg(limit)
+	clippedLow := mlx.Where(gate.Less(negLimit), negLimit, gate)
+	clipped := mlx.Where(limit.Less(clippedLow), limit, clippedLow)
+	return mlx.Mul(mlx.SiLU(mlx.Mul(clipped, alpha)), up)
+}
+
 func expertSlice(t *mlx.Array, expert int32) *mlx.Array {
 	if t == nil || !t.Valid() {
 		return nil
@@ -449,6 +585,28 @@ func expertSlice(t *mlx.Array, expert int32) *mlx.Array {
 	}
 
 	return mlx.Squeeze(mlx.SliceStartStop(t, start, stop), 0)
+}
+
+func interleavedIndices(count int, offset int32) *mlx.Array {
+	indices := make([]int32, count)
+	for i := range count {
+		indices[i] = int32(i*2) + offset
+	}
+	return mlx.FromValues(indices, count)
+}
+
+func splitGateUpInterleaved(dense, bias *mlx.Array, mid int) (gateWeight, upWeight, gateBias, upBias *mlx.Array) {
+	if dense == nil || !dense.Valid() || bias == nil || !bias.Valid() || mid <= 0 {
+		return nil, nil, nil, nil
+	}
+
+	even := interleavedIndices(mid, 0)
+	odd := interleavedIndices(mid, 1)
+	gateWeight = mlx.Take(dense, even, 0)
+	upWeight = mlx.Take(dense, odd, 0)
+	gateBias = mlx.Take(bias, even, 0)
+	upBias = mlx.Take(bias, odd, 0)
+	return gateWeight, upWeight, gateBias, upBias
 }
 
 func requireTensor(tensors map[string]*mlx.Array, name string) (*mlx.Array, error) {
@@ -635,11 +793,15 @@ func loadExpertPair(tensors map[string]*mlx.Array, layer int, prefix string, wan
 			return nil, err
 		}
 
-		gateWeights = append(gateWeights, mlx.SliceStartStop(dense, []int32{0, 0}, []int32{int32(mid), int32(wantIn)}))
-		upWeights = append(upWeights, mlx.SliceStartStop(dense, []int32{int32(mid), 0}, []int32{int32(wantOut), int32(wantIn)}))
+		gateWeight, upWeight, gateBias, upBias := splitGateUpInterleaved(dense, expertBias, mid)
+		if gateWeight == nil || upWeight == nil || gateBias == nil || upBias == nil {
+			return nil, fmt.Errorf("layer %d: failed to split interleaved gate_up expert tensor %q", layer, expertWeightName)
+		}
 
-		gateBiases = append(gateBiases, mlx.SliceStartStop(expertBias, []int32{0}, []int32{int32(mid)}))
-		upBiases = append(upBiases, mlx.SliceStartStop(expertBias, []int32{int32(mid)}, []int32{int32(wantOut)}))
+		gateWeights = append(gateWeights, gateWeight)
+		upWeights = append(upWeights, upWeight)
+		gateBiases = append(gateBiases, gateBias)
+		upBiases = append(upBiases, upBias)
 	}
 
 	gateWeight := mlx.Stack(gateWeights, 0)
