@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,7 +13,6 @@ import (
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
-	"github.com/ollama/ollama/x/models/nn"
 )
 
 func TestParseConfig(t *testing.T) {
@@ -353,6 +353,49 @@ func TestLoadWeightsExpertShapeValidationFails(t *testing.T) {
 	}
 }
 
+func TestSplitGateUpInterleavedUsesEvenOddOrdering(t *testing.T) {
+	skipIfNoMLX(t)
+
+	dense := mlx.FromValues([]float32{
+		0, 1,
+		10, 11,
+		20, 21,
+		30, 31,
+		40, 41,
+		50, 51,
+	}, 6, 2).AsType(mlx.DTypeBFloat16)
+	bias := mlx.FromValues([]float32{0, 10, 20, 30, 40, 50}, 6).AsType(mlx.DTypeBFloat16)
+
+	gateWeight, upWeight, gateBias, upBias := splitGateUpInterleaved(dense, bias, 3)
+	if gateWeight == nil || upWeight == nil || gateBias == nil || upBias == nil {
+		t.Fatal("splitGateUpInterleaved() returned nil tensors")
+	}
+
+	if dims := gateWeight.Dims(); len(dims) != 2 || dims[0] != 3 || dims[1] != 2 {
+		t.Fatalf("gateWeight dims = %v, want [3 2]", dims)
+	}
+	if dims := upWeight.Dims(); len(dims) != 2 || dims[0] != 3 || dims[1] != 2 {
+		t.Fatalf("upWeight dims = %v, want [3 2]", dims)
+	}
+
+	gateWeightVals := gateWeight.AsType(mlx.DTypeFloat32).Floats()
+	upWeightVals := upWeight.AsType(mlx.DTypeFloat32).Floats()
+	gateBiasVals := gateBias.AsType(mlx.DTypeFloat32).Floats()
+	upBiasVals := upBias.AsType(mlx.DTypeFloat32).Floats()
+	if got := []float32{gateWeightVals[0], gateWeightVals[2], gateWeightVals[4]}; !slices.Equal(got, []float32{0, 20, 40}) {
+		t.Fatalf("gateWeight first-column values = %v, want [0 20 40]", got)
+	}
+	if got := []float32{upWeightVals[0], upWeightVals[2], upWeightVals[4]}; !slices.Equal(got, []float32{10, 30, 50}) {
+		t.Fatalf("upWeight first-column values = %v, want [10 30 50]", got)
+	}
+	if !slices.Equal(gateBiasVals, []float32{0, 20, 40}) {
+		t.Fatalf("gateBias values = %v, want [0 20 40]", gateBiasVals)
+	}
+	if !slices.Equal(upBiasVals, []float32{10, 30, 50}) {
+		t.Fatalf("upBias values = %v, want [10 30 50]", upBiasVals)
+	}
+}
+
 func TestNewCachesLayerParity(t *testing.T) {
 	cfg := denseTestConfig(t)
 	m := &Model{
@@ -387,29 +430,27 @@ func TestRopeParametersDerivedFromConfig(t *testing.T) {
 	}
 }
 
-func TestForwardFailsBeforePartialExecution(t *testing.T) {
+func TestForwardRunsCompletePath(t *testing.T) {
 	skipIfNoMLX(t)
 
 	cfg := denseTestConfig(t)
 	m := &Model{
-		Config:      &cfg,
-		Layers:      make([]*Layer, cfg.NumHiddenLayers),
-		EmbedTokens: nn.NewEmbedding(denseMatrix(int(cfg.VocabSize), int(cfg.HiddenSize), 1)),
-		Norm:        nn.NewRMSNorm(denseVector(int(cfg.HiddenSize), 2), cfg.RMSNormEps),
+		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
 	}
-
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("Forward() did not panic, want explicit failure")
-		}
-		if !strings.Contains(fmt.Sprint(r), "validated expert execution") {
-			t.Fatalf("panic = %v, want explicit gpt-oss forward failure", r)
-		}
-	}()
-
+	if err := m.LoadWeights(denseTestTensors(t, cfg)); err != nil {
+		t.Fatalf("LoadWeights() error = %v", err)
+	}
+	caches := m.NewCaches()
 	tokens := mlx.FromValues([]int32{1, 2}, 1, 2)
-	m.Forward(tokens, nil)
+	out := m.Forward(tokens, caches)
+
+	if out == nil || !out.Valid() {
+		t.Fatal("Forward() returned invalid output")
+	}
+	if dims := out.Dims(); len(dims) != 3 || dims[0] != 1 || dims[1] != 2 || dims[2] != int(cfg.HiddenSize) {
+		t.Fatalf("Forward() dims = %v, want [1 2 %d]", dims, cfg.HiddenSize)
+	}
 }
 
 func skipIfNoMLX(t *testing.T) {
