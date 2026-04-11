@@ -100,6 +100,7 @@ type Layer struct {
 	Attention     *Attention
 	FFNNorm       *nn.RMSNorm
 	Router        nn.LinearLayer
+	Experts       *Experts
 }
 
 // Attention implements the split gpt-oss attention path.
@@ -109,6 +110,28 @@ type Attention struct {
 	VProj nn.LinearLayer
 	OProj nn.LinearLayer
 	Sinks *mlx.Array
+}
+
+// Experts holds the loaded gpt-oss MoE expert projections.
+type Experts struct {
+	GateUp *ExpertPair
+	Down   *ExpertProjection
+}
+
+// ExpertPair stores the split gate and up projections from the packed expert tensor.
+type ExpertPair struct {
+	Gate *ExpertProjection
+	Up   *ExpertProjection
+}
+
+// ExpertProjection wraps a dense expert weight matrix.
+type ExpertProjection struct {
+	Weight    *mlx.Array
+	Scales    *mlx.Array
+	Bias      *mlx.Array
+	GroupSize int
+	Bits      int
+	Mode      string
 }
 
 // NewModel creates a gpt-oss model from a manifest root.
@@ -228,6 +251,9 @@ func parseConfig(configData []byte) (Config, error) {
 	if cfg.NumExpertsPerTok <= 0 {
 		return Config{}, fmt.Errorf("invalid num_experts_per_tok: %d", cfg.NumExpertsPerTok)
 	}
+	if cfg.NumExpertsPerTok > cfg.NumLocalExperts {
+		return Config{}, fmt.Errorf("num_experts_per_tok (%d) must be <= num_local_experts (%d)", cfg.NumExpertsPerTok, cfg.NumLocalExperts)
+	}
 	if cfg.SlidingWindow <= 0 {
 		return Config{}, fmt.Errorf("invalid sliding_window: %d", cfg.SlidingWindow)
 	}
@@ -265,12 +291,11 @@ func parseConfig(configData []byte) (Config, error) {
 	return cfg, nil
 }
 
-// Forward is intentionally unavailable until the MLP/expert path lands in Phase 4.
 func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
 	if m == nil || m.Config == nil || m.EmbedTokens == nil || m.Norm == nil || tokens == nil {
 		return nil
 	}
-	panic("gpt-oss forward path requires unimplemented MLP/expert execution")
+	panic("gpt-oss forward path requires validated expert execution")
 }
 
 // Unembed projects hidden states back into vocabulary space.
@@ -323,14 +348,7 @@ func (m *Model) NewCaches() []cache.Cache {
 }
 
 func (l *Layer) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
-	if l == nil || l.Attention == nil || l.AttentionNorm == nil || x == nil || cfg == nil {
-		return x
-	}
-
-	residual := x
-	x = l.AttentionNorm.Forward(x, cfg.RMSNormEps)
-	x = l.Attention.Forward(x, c, batchSize, seqLen, cfg, layerIndex)
-	return residual.Add(x)
+	panic("gpt-oss layer forward requires validated expert execution")
 }
 
 func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
@@ -341,6 +359,9 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 	query := a.QProj.Forward(x)
 	key := a.KProj.Forward(x)
 	value := a.VProj.Forward(x)
+	if query == nil || key == nil || value == nil || !query.Valid() || !key.Valid() || !value.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention projections are invalid", layerIndex))
+	}
 
 	batch := int32(batchSize)
 	seq := int32(seqLen)
@@ -351,10 +372,16 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 	query = mlx.Reshape(query, batch, seq, numHeads, headDim)
 	key = mlx.Reshape(key, batch, seq, numKVHeads, headDim)
 	value = mlx.Reshape(value, batch, seq, numKVHeads, headDim)
+	if query == nil || key == nil || value == nil || !query.Valid() || !key.Valid() || !value.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention reshape is invalid", layerIndex))
+	}
 
 	query = mlx.Transpose(query, 0, 2, 1, 3)
 	key = mlx.Transpose(key, 0, 2, 1, 3)
 	value = mlx.Transpose(value, 0, 2, 1, 3)
+	if query == nil || key == nil || value == nil || !query.Valid() || !key.Valid() || !value.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention transpose is invalid", layerIndex))
+	}
 
 	offset := 0
 	if c != nil {
@@ -363,9 +390,15 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 	ropeBase, ropeScale, _ := cfg.RopeParameters()
 	query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
 	key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
+	if query == nil || key == nil || !query.Valid() || !key.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention RoPE is invalid", layerIndex))
+	}
 
 	if c != nil {
 		key, value = c.Update(key, value)
+	}
+	if key == nil || value == nil || !key.Valid() || !value.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention cache update is invalid", layerIndex))
 	}
 
 	maskMode := "causal"
@@ -382,9 +415,40 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 		nil,
 		a.Sinks,
 	)
+	if attention == nil || !attention.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention sdpa is invalid", layerIndex))
+	}
 	attention = mlx.Transpose(attention, 0, 2, 1, 3)
 	attention = mlx.Reshape(attention, batch, seq, numHeads*headDim)
-	return a.OProj.Forward(attention)
+	if attention == nil || !attention.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention output reshape is invalid", layerIndex))
+	}
+	attention = a.OProj.Forward(attention)
+	if attention == nil || !attention.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention output projection is invalid", layerIndex))
+	}
+	return attention
+}
+
+func expertSlice(t *mlx.Array, expert int32) *mlx.Array {
+	if t == nil || !t.Valid() {
+		return nil
+	}
+
+	dims := t.Dims()
+	if len(dims) == 0 {
+		return nil
+	}
+
+	start := make([]int32, len(dims))
+	stop := make([]int32, len(dims))
+	start[0] = expert
+	stop[0] = expert + 1
+	for i := 1; i < len(dims); i++ {
+		stop[i] = int32(dims[i])
+	}
+
+	return mlx.Squeeze(mlx.SliceStartStop(t, start, stop), 0)
 }
 
 func requireTensor(tensors map[string]*mlx.Array, name string) (*mlx.Array, error) {
@@ -415,6 +479,16 @@ func validateTensorShape(name string, t *mlx.Array, want []int, wantExpr string)
 func validateLayerTensorShape(layer int, name string, t *mlx.Array, want []int, wantExpr string) error {
 	if err := validateTensorShape(name, t, want, wantExpr); err != nil {
 		return fmt.Errorf("layer %d: %w", layer, err)
+	}
+	return nil
+}
+
+func validateLayerTensorDType(layer int, name string, t *mlx.Array, want mlx.DType, wantExpr string) error {
+	if t == nil || !t.Valid() {
+		return fmt.Errorf("layer %d: missing tensor %q", layer, name)
+	}
+	if got := t.DType(); got != want {
+		return fmt.Errorf("layer %d: tensor %q dtype %s, want %s (%s)", layer, name, got, want, wantExpr)
 	}
 	return nil
 }
@@ -454,6 +528,200 @@ func loadLayerNormTensor(tensors map[string]*mlx.Array, layer int, name string, 
 		return nil, err
 	}
 	return nn.NewRMSNorm(weight, 0), nil
+}
+
+func expertQuantParams(cfg *Config, tensorName string, weight, scales *mlx.Array) (groupSize, bits int, mode string, err error) {
+	if cfg == nil {
+		return 0, 0, "", fmt.Errorf("missing gpt-oss config")
+	}
+
+	groupSize, bits, mode = model.ResolveLinearQuantParams(
+		cfg.QuantGroupSize,
+		cfg.QuantBits,
+		cfg.QuantMode,
+		cfg.TensorQuant,
+		tensorName,
+		weight,
+		scales,
+	)
+	if mode == "" && cfg.QuantMethod != "" {
+		groupSize, bits, mode = model.QuantizationParams(cfg.QuantMethod)
+	}
+	if mode == "" {
+		return 0, 0, "", fmt.Errorf("missing quantization params for %q", tensorName)
+	}
+	return groupSize, bits, mode, nil
+}
+
+func dequantizeExpertWeight(layer int, name string, weight, scales *mlx.Array, cfg *Config) (*mlx.Array, error) {
+	if err := validateLayerTensorDType(layer, name, weight, mlx.DTypeUint8, "expert quantized blocks"); err != nil {
+		return nil, err
+	}
+	if err := validateLayerTensorDType(layer, name, scales, mlx.DTypeUint8, "expert quantized scales"); err != nil {
+		return nil, err
+	}
+
+	groupSize, bits, mode, err := expertQuantParams(cfg, name, weight, scales)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: %w", layer, err)
+	}
+	dense := mlx.Dequantize(weight, scales, nil, groupSize, bits, mode)
+	if dense == nil || !dense.Valid() {
+		return nil, fmt.Errorf("layer %d: failed to dequantize expert tensor %q", layer, name)
+	}
+	dense = dense.AsType(mlx.DTypeBFloat16)
+	mlx.Eval(dense)
+	return dense, nil
+}
+
+func loadExpertPair(tensors map[string]*mlx.Array, layer int, prefix string, wantOut, wantIn int, cfg *Config) (*ExpertPair, error) {
+	weightName := prefix + ".blocks"
+	scalesName := prefix + ".scales"
+	biasName := prefix + ".bias"
+
+	weight, err := requireTensor(tensors, weightName)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: %w", layer, err)
+	}
+	scales, err := requireTensor(tensors, scalesName)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: %w", layer, err)
+	}
+	bias, err := requireTensor(tensors, biasName)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: %w", layer, err)
+	}
+
+	if err := validateLayerTensorShape(layer, weightName, weight, []int{int(cfg.NumLocalExperts), wantOut, 90, 16}, fmt.Sprintf("num_local_experts x %s x 90 x 16", prefix)); err != nil {
+		return nil, err
+	}
+	if err := validateLayerTensorShape(layer, scalesName, scales, []int{int(cfg.NumLocalExperts), wantOut, 90}, fmt.Sprintf("num_local_experts x %s x 90 scales", prefix)); err != nil {
+		return nil, err
+	}
+	if err := validateLayerTensorShape(layer, biasName, bias, []int{int(cfg.NumLocalExperts), wantOut}, fmt.Sprintf("num_local_experts x %s bias", prefix)); err != nil {
+		return nil, err
+	}
+
+	if wantOut%2 != 0 {
+		return nil, fmt.Errorf("layer %d: %s output dim must be even, got %d", layer, prefix, wantOut)
+	}
+
+	mid := wantOut / 2
+	gateWeights := make([]*mlx.Array, 0, cfg.NumLocalExperts)
+	upWeights := make([]*mlx.Array, 0, cfg.NumLocalExperts)
+	gateBiases := make([]*mlx.Array, 0, cfg.NumLocalExperts)
+	upBiases := make([]*mlx.Array, 0, cfg.NumLocalExperts)
+	for e := int32(0); e < cfg.NumLocalExperts; e++ {
+		expertWeight := expertSlice(weight, e)
+		expertScales := expertSlice(scales, e)
+		expertBias := expertSlice(bias, e)
+
+		expertWeightName := fmt.Sprintf("%s.expert[%d]", weightName, e)
+		if err := validateLayerTensorShape(layer, expertWeightName, expertWeight, []int{wantOut, 90, 16}, fmt.Sprintf("%s expert slice", prefix)); err != nil {
+			return nil, err
+		}
+		if err := validateLayerTensorShape(layer, expertWeightName+".scales", expertScales, []int{wantOut, 90}, fmt.Sprintf("%s expert scales", prefix)); err != nil {
+			return nil, err
+		}
+		if err := validateLayerTensorShape(layer, expertWeightName+".bias", expertBias, []int{wantOut}, fmt.Sprintf("%s expert bias", prefix)); err != nil {
+			return nil, err
+		}
+
+		dense, err := dequantizeExpertWeight(layer, expertWeightName, expertWeight, expertScales, cfg)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateLayerTensorShape(layer, expertWeightName+".dequantized", dense, []int{wantOut, wantIn}, fmt.Sprintf("dequantized %s", prefix)); err != nil {
+			return nil, err
+		}
+
+		gateWeights = append(gateWeights, mlx.SliceStartStop(dense, []int32{0, 0}, []int32{int32(mid), int32(wantIn)}))
+		upWeights = append(upWeights, mlx.SliceStartStop(dense, []int32{int32(mid), 0}, []int32{int32(wantOut), int32(wantIn)}))
+
+		gateBiases = append(gateBiases, mlx.SliceStartStop(expertBias, []int32{0}, []int32{int32(mid)}))
+		upBiases = append(upBiases, mlx.SliceStartStop(expertBias, []int32{int32(mid)}, []int32{int32(wantOut)}))
+	}
+
+	gateWeight := mlx.Stack(gateWeights, 0)
+	upWeight := mlx.Stack(upWeights, 0)
+	gateBias := mlx.Stack(gateBiases, 0)
+	upBias := mlx.Stack(upBiases, 0)
+	mlx.Eval(gateWeight, upWeight, gateBias, upBias)
+
+	return &ExpertPair{
+		Gate: &ExpertProjection{
+			Weight: gateWeight,
+			Bias:   gateBias,
+		},
+		Up: &ExpertProjection{
+			Weight: upWeight,
+			Bias:   upBias,
+		},
+	}, nil
+}
+
+func loadExpertProjection(tensors map[string]*mlx.Array, layer int, prefix string, wantOut, wantIn int, cfg *Config) (*ExpertProjection, error) {
+	weightName := prefix + ".blocks"
+	scalesName := prefix + ".scales"
+	biasName := prefix + ".bias"
+
+	weight, err := requireTensor(tensors, weightName)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: %w", layer, err)
+	}
+	scales, err := requireTensor(tensors, scalesName)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: %w", layer, err)
+	}
+	bias, err := requireTensor(tensors, biasName)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: %w", layer, err)
+	}
+
+	if err := validateLayerTensorShape(layer, weightName, weight, []int{int(cfg.NumLocalExperts), wantOut, 90, 16}, fmt.Sprintf("num_local_experts x %s x 90 x 16", prefix)); err != nil {
+		return nil, err
+	}
+	if err := validateLayerTensorShape(layer, scalesName, scales, []int{int(cfg.NumLocalExperts), wantOut, 90}, fmt.Sprintf("num_local_experts x %s x 90 scales", prefix)); err != nil {
+		return nil, err
+	}
+	if err := validateLayerTensorShape(layer, biasName, bias, []int{int(cfg.NumLocalExperts), wantOut}, fmt.Sprintf("num_local_experts x %s bias", prefix)); err != nil {
+		return nil, err
+	}
+
+	weights := make([]*mlx.Array, 0, cfg.NumLocalExperts)
+	biases := make([]*mlx.Array, 0, cfg.NumLocalExperts)
+	for e := int32(0); e < cfg.NumLocalExperts; e++ {
+		expertWeight := expertSlice(weight, e)
+		expertScales := expertSlice(scales, e)
+		expertBias := expertSlice(bias, e)
+
+		expertWeightName := fmt.Sprintf("%s.expert[%d]", weightName, e)
+		if err := validateLayerTensorShape(layer, expertWeightName, expertWeight, []int{wantOut, 90, 16}, fmt.Sprintf("%s expert slice", prefix)); err != nil {
+			return nil, err
+		}
+		if err := validateLayerTensorShape(layer, expertWeightName+".scales", expertScales, []int{wantOut, 90}, fmt.Sprintf("%s expert scales", prefix)); err != nil {
+			return nil, err
+		}
+		if err := validateLayerTensorShape(layer, expertWeightName+".bias", expertBias, []int{wantOut}, fmt.Sprintf("%s expert bias", prefix)); err != nil {
+			return nil, err
+		}
+
+		dense, err := dequantizeExpertWeight(layer, expertWeightName, expertWeight, expertScales, cfg)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateLayerTensorShape(layer, expertWeightName+".dequantized", dense, []int{wantOut, wantIn}, fmt.Sprintf("dequantized %s", prefix)); err != nil {
+			return nil, err
+		}
+		weights = append(weights, dense)
+		biases = append(biases, expertBias)
+	}
+
+	weightStack := mlx.Stack(weights, 0)
+	biasStack := mlx.Stack(biases, 0)
+	mlx.Eval(weightStack, biasStack)
+
+	return &ExpertProjection{Weight: weightStack, Bias: biasStack}, nil
 }
 
 // LoadWeights assigns dense tensors and structural placeholders to the model.
@@ -546,6 +814,15 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			return err
 		}
 
+		gateUp, err := loadExpertPair(tensors, i, prefix+".experts.gate_up_proj", int(m.IntermediateSize)*2, int(m.HiddenSize), m.Config)
+		if err != nil {
+			return err
+		}
+		down, err := loadExpertProjection(tensors, i, prefix+".experts.down_proj", int(m.HiddenSize), int(m.IntermediateSize), m.Config)
+		if err != nil {
+			return err
+		}
+
 		m.Layers[i] = &Layer{
 			AttentionNorm: attnNorm,
 			Attention: &Attention{
@@ -557,6 +834,10 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			},
 			FFNNorm: ffnNorm,
 			Router:  router,
+			Experts: &Experts{
+				GateUp: gateUp,
+				Down:   down,
+			},
 		}
 	}
 
