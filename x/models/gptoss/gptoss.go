@@ -300,10 +300,6 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
 	}
 
 	batchSize, seqLen := dims[0], dims[1]
-	if caches != nil && batchSize == 1 && seqLen > 1 {
-		return m.forwardSequential(b.InputIDs, caches, seqLen)
-	}
-
 	return m.forwardDense(b.InputIDs, caches, batchSize, seqLen)
 }
 
@@ -318,24 +314,6 @@ func (m *Model) forwardDense(tokens *mlx.Array, caches []cache.Cache, batchSize,
 	}
 
 	return m.Norm.Forward(h, m.RMSNormEps)
-}
-
-func (m *Model) forwardSequential(tokens *mlx.Array, caches []cache.Cache, seqLen int) *mlx.Array {
-	steps := make([]*mlx.Array, 0, seqLen)
-	for pos := 0; pos < seqLen; pos++ {
-		stepTokens := mlx.SliceStartStop(tokens, []int32{0, int32(pos)}, []int32{1, int32(pos + 1)})
-		h := m.EmbedTokens.Forward(stepTokens)
-		for i, layer := range m.Layers {
-			var c cache.Cache
-			if caches != nil && i < len(caches) {
-				c = caches[i]
-			}
-			h = layer.Forward(h, c, 1, 1, m.Config, i)
-		}
-		steps = append(steps, h)
-	}
-
-	return m.Norm.Forward(mlx.Concatenate(steps, 1), m.RMSNormEps)
 }
 
 // Unembed projects hidden states back into vocabulary space.
@@ -843,6 +821,14 @@ func loadLayerNormTensor(tensors map[string]*mlx.Array, layer int, name string, 
 }
 
 func loadExpertPair(tensors map[string]*mlx.Array, layer int, prefix string, wantOut, wantIn int, cfg *Config) (*ExpertPair, error) {
+	pair, err := loadDirectExpertPair(tensors, layer, prefix, wantOut/2, wantIn, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if pair != nil {
+		return pair, nil
+	}
+
 	weightName := prefix + ".weight"
 	biasName := prefix + ".bias"
 
@@ -925,6 +911,14 @@ func loadExpertPair(tensors map[string]*mlx.Array, layer int, prefix string, wan
 }
 
 func loadExpertProjection(tensors map[string]*mlx.Array, layer int, prefix string, wantOut, wantIn int, cfg *Config) (*ExpertProjection, error) {
+	proj, err := loadDirectExpertProjection(tensors, layer, prefix, wantOut, wantIn, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if proj != nil {
+		return proj, nil
+	}
+
 	weightName := prefix + ".weight"
 	biasName := prefix + ".bias"
 
@@ -978,6 +972,50 @@ func loadExpertProjection(tensors map[string]*mlx.Array, layer int, prefix strin
 		Weight: weightStack,
 		Bias:   biasStack,
 	}, nil
+}
+
+func loadDirectExpertPair(tensors map[string]*mlx.Array, layer int, legacyPrefix string, wantOut, wantIn int, cfg *Config) (*ExpertPair, error) {
+	gatePrefix := strings.Replace(legacyPrefix, "gate_up_proj", "gate_proj", 1)
+	upPrefix := strings.Replace(legacyPrefix, "gate_up_proj", "up_proj", 1)
+	gate, err := loadDirectExpertProjection(tensors, layer, gatePrefix, wantOut, wantIn, cfg)
+	if err != nil {
+		return nil, err
+	}
+	up, err := loadDirectExpertProjection(tensors, layer, upPrefix, wantOut, wantIn, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if gate == nil || up == nil {
+		return nil, fmt.Errorf("layer %d: missing direct gate/up expert tensors for %q", layer, legacyPrefix)
+	}
+	return &ExpertPair{Gate: gate, Up: up}, nil
+}
+
+func loadDirectExpertProjection(tensors map[string]*mlx.Array, layer int, prefix string, wantOut, wantIn int, cfg *Config) (*ExpertProjection, error) {
+	weightName := prefix + ".weight"
+	biasName := prefix + ".bias"
+	weight := tensors[weightName]
+	bias := tensors[biasName]
+	if weight == nil && bias == nil {
+		return nil, nil
+	}
+	if weight == nil || bias == nil {
+		return nil, fmt.Errorf("layer %d: missing direct expert tensor %q or %q", layer, weightName, biasName)
+	}
+
+	if err := validateLayerTensorShape(layer, weightName, weight, []int{int(cfg.NumLocalExperts), wantIn, wantOut}, fmt.Sprintf("num_local_experts x in x out for %s", prefix)); err != nil {
+		return nil, err
+	}
+	if err := validateLayerTensorShape(layer, biasName, bias, []int{int(cfg.NumLocalExperts), wantOut}, fmt.Sprintf("num_local_experts x out bias for %s", prefix)); err != nil {
+		return nil, err
+	}
+	if err := validateLayerTensorDType(layer, weightName, weight, mlx.DTypeBFloat16, "runtime-ready offline expert weights"); err != nil {
+		return nil, err
+	}
+	if err := validateLayerTensorDType(layer, biasName, bias, mlx.DTypeBFloat16, "runtime-ready offline expert bias"); err != nil {
+		return nil, err
+	}
+	return &ExpertProjection{Weight: weight, Bias: bias}, nil
 }
 
 // LoadWeights assigns dense tensors and structural placeholders to the model.

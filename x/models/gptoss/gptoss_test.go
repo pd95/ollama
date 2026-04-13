@@ -301,13 +301,13 @@ func TestLoadWeightsExpertDTypeValidationFails(t *testing.T) {
 	}
 
 	tensors := denseTestTensors(t, cfg)
-	tensors["blocks.0.experts.gate_up_proj.weight"] = tensors["blocks.0.experts.gate_up_proj.weight"].AsType(mlx.DTypeFloat32)
+	tensors["blocks.0.experts.gate_proj.weight"] = tensors["blocks.0.experts.gate_proj.weight"].AsType(mlx.DTypeFloat32)
 
 	err := m.LoadWeights(tensors)
 	if err == nil {
 		t.Fatal("LoadWeights() error = nil, want expert dtype validation failure")
 	}
-	if !strings.Contains(err.Error(), "blocks.0.experts.gate_up_proj.weight") || !strings.Contains(err.Error(), "dtype F32, want BF16") {
+	if !strings.Contains(err.Error(), "blocks.0.experts.gate_proj.weight") || !strings.Contains(err.Error(), "dtype F32, want BF16") {
 		t.Fatalf("LoadWeights() error = %q, want expert dtype mismatch", err)
 	}
 }
@@ -328,7 +328,7 @@ func TestLoadWeightsExpertMissingTensorFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadWeights() error = nil, want expert missing tensor failure")
 	}
-	if !strings.Contains(err.Error(), "blocks.0.experts.down_proj.bias") || !strings.Contains(err.Error(), "missing tensor") {
+	if !strings.Contains(err.Error(), "blocks.0.experts.down_proj.bias") || !strings.Contains(err.Error(), "missing direct expert tensor") {
 		t.Fatalf("LoadWeights() error = %q, want missing expert tensor", err)
 	}
 }
@@ -578,6 +578,48 @@ func TestLayerLastTokenMatchesPrefillStepPath(t *testing.T) {
 	for i := range fullLast {
 		if diff := math.Abs(float64(fullLast[i] - stepLast[i])); diff > 1e-2 {
 			t.Fatalf("layer last-token output[%d] = %v, want %v (diff %v)", i, stepLast[i], fullLast[i], diff)
+		}
+	}
+}
+
+func TestUnembedLastTokenMatchesPrefillStepPath(t *testing.T) {
+	skipIfNoMLX(t)
+
+	cfg := denseTestConfig(t)
+	cfg.HiddenSize = 64
+	cfg.IntermediateSize = 128
+	cfg.NumAttentionHeads = 1
+	cfg.NumKeyValueHeads = 1
+	cfg.HeadDim = 64
+	cfg.NumLocalExperts = 4
+	cfg.NumExpertsPerTok = 2
+	cfg.SlidingWindow = 16
+
+	m := &Model{
+		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
+	}
+	if err := m.LoadWeights(denseTestTensors(t, cfg)); err != nil {
+		t.Fatalf("LoadWeights() error = %v", err)
+	}
+
+	hVals := make([]float32, 6*64)
+	for i := range hVals {
+		hVals[i] = float32((i%23)-11) / 11
+	}
+
+	full := m.Unembed(mlx.FromValues(hVals, 1, 6, 64).AsType(mlx.DTypeBFloat16))
+	fullLast := materializedFloats(full.Slice(mlx.Slice(), mlx.Slice(full.Dim(1)-1), mlx.Slice()).Squeeze(1).AsType(mlx.DTypeFloat32))
+
+	step := m.Unembed(mlx.FromValues(hVals[5*64:], 1, 1, 64).AsType(mlx.DTypeBFloat16))
+	stepLast := materializedFloats(step.Squeeze(1).AsType(mlx.DTypeFloat32))
+
+	if len(fullLast) != len(stepLast) {
+		t.Fatalf("unembed output length mismatch: full=%d step=%d", len(fullLast), len(stepLast))
+	}
+	for i := range fullLast {
+		if diff := math.Abs(float64(fullLast[i] - stepLast[i])); diff > 1e-2 {
+			t.Fatalf("unembed last-token output[%d] = %v, want %v (diff %v)", i, stepLast[i], fullLast[i], diff)
 		}
 	}
 }
@@ -1982,9 +2024,11 @@ func denseTestTensors(t *testing.T, cfg Config) map[string]*mlx.Array {
 		tensors[prefix+".ffn_norm.weight"] = denseVector(int(cfg.HiddenSize), 13+float32(i))
 		tensors[prefix+".router.weight"] = denseMatrix(int(cfg.NumLocalExperts), int(cfg.HiddenSize), 14+float32(i))
 		tensors[prefix+".router.bias"] = denseVector(int(cfg.NumLocalExperts), 15+float32(i))
-		tensors[prefix+".experts.gate_up_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.IntermediateSize)*2, int(cfg.HiddenSize), 16+float32(i)).AsType(mlx.DTypeBFloat16)
-		tensors[prefix+".experts.gate_up_proj.bias"] = expertBias(int(cfg.NumLocalExperts), int(cfg.IntermediateSize)*2, 0)
-		tensors[prefix+".experts.down_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.HiddenSize), int(cfg.IntermediateSize), 24+float32(i)).AsType(mlx.DTypeBFloat16)
+		tensors[prefix+".experts.gate_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.HiddenSize), int(cfg.IntermediateSize), 16+float32(i)).AsType(mlx.DTypeBFloat16)
+		tensors[prefix+".experts.gate_proj.bias"] = expertBias(int(cfg.NumLocalExperts), int(cfg.IntermediateSize), 0)
+		tensors[prefix+".experts.up_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.HiddenSize), int(cfg.IntermediateSize), 20+float32(i)).AsType(mlx.DTypeBFloat16)
+		tensors[prefix+".experts.up_proj.bias"] = expertBias(int(cfg.NumLocalExperts), int(cfg.IntermediateSize), 0.5)
+		tensors[prefix+".experts.down_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.IntermediateSize), int(cfg.HiddenSize), 24+float32(i)).AsType(mlx.DTypeBFloat16)
 		tensors[prefix+".experts.down_proj.bias"] = expertBias(int(cfg.NumLocalExperts), int(cfg.HiddenSize), 0)
 	}
 

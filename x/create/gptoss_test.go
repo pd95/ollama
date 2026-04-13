@@ -65,10 +65,12 @@ func TestGPTOSSImportTransformDequantizesExpertWeights(t *testing.T) {
 	raw := []byte{
 		0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
 		0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+		0x11, 0x33, 0x55, 0x77, 0x99, 0xbb, 0xdd, 0xff,
+		0x00, 0x22, 0x44, 0x66, 0x88, 0xaa, 0xcc, 0xee,
 	}
-	scales := []byte{0x00}
+	scales := []byte{0x00, 0x10}
 
-	out, err := transform.transformTensor(st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_blocks", "U8", []int32{1, 1, 1, 16}, raw))
+	out, err := transform.transformTensor(st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_blocks", "U8", []int32{1, 2, 1, 16}, raw))
 	if err != nil {
 		t.Fatalf("transformTensor() error = %v", err)
 	}
@@ -76,32 +78,37 @@ func TestGPTOSSImportTransformDequantizesExpertWeights(t *testing.T) {
 		t.Fatalf("blocks transform returned %d tensors, want 0 until scales arrive", len(out))
 	}
 
-	out, err = transform.transformTensor(st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_scales", "U8", []int32{1, 1, 1}, scales))
+	out, err = transform.transformTensor(st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_scales", "U8", []int32{1, 2, 1}, scales))
 	if err != nil {
 		t.Fatalf("transformTensor() error = %v", err)
 	}
-	if len(out) != 1 {
-		t.Fatalf("scales transform returned %d tensors, want 1", len(out))
+	if len(out) != 2 {
+		t.Fatalf("scales transform returned %d tensors, want 2", len(out))
 	}
-	if out[0].Name != "blocks.0.experts.gate_up_proj.weight" {
-		t.Fatalf("transformTensor() name = %q, want %q", out[0].Name, "blocks.0.experts.gate_up_proj.weight")
+	if out[0].Name != "blocks.0.experts.gate_proj.weight" {
+		t.Fatalf("transformTensor() gate name = %q, want %q", out[0].Name, "blocks.0.experts.gate_proj.weight")
 	}
-	if out[0].Dtype != "BF16" {
-		t.Fatalf("transformTensor() dtype = %q, want BF16", out[0].Dtype)
+	if out[1].Name != "blocks.0.experts.up_proj.weight" {
+		t.Fatalf("transformTensor() up name = %q, want %q", out[1].Name, "blocks.0.experts.up_proj.weight")
 	}
-	if !slices.Equal(out[0].Shape, []int32{1, 1, 32}) {
-		t.Fatalf("transformTensor() shape = %v, want [1 1 32]", out[0].Shape)
+	if out[0].Dtype != "BF16" || out[1].Dtype != "BF16" {
+		t.Fatalf("transformTensor() dtypes = %q/%q, want BF16/BF16", out[0].Dtype, out[1].Dtype)
 	}
-
+	if !slices.Equal(out[0].Shape, []int32{1, 32, 1}) {
+		t.Fatalf("transformTensor() gate shape = %v, want [1 32 1]", out[0].Shape)
+	}
+	if !slices.Equal(out[1].Shape, []int32{1, 32, 1}) {
+		t.Fatalf("transformTensor() up shape = %v, want [1 32 1]", out[1].Shape)
+	}
 	got, err := io.ReadAll(out[0].Reader())
 	if err != nil {
 		t.Fatalf("ReadAll() error = %v", err)
 	}
 	if len(got) != 32*2 {
-		t.Fatalf("dequantized byte length = %d, want %d", len(got), 32*2)
+		t.Fatalf("dequantized gate byte length = %d, want %d", len(got), 32*2)
 	}
 	if slices.Equal(got, make([]byte, len(got))) {
-		t.Fatal("dequantized bytes are all zero, want non-zero output for non-zero source blocks")
+		t.Fatal("dequantized gate bytes are all zero, want non-zero output for non-zero source blocks")
 	}
 }
 
@@ -264,8 +271,8 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 	if packedGroupName != "blocks.0.experts" {
 		t.Fatalf("packedGroupName = %q, want %q", packedGroupName, "blocks.0.experts")
 	}
-	if len(packedTensors) != 4 {
-		t.Fatalf("packed tensor count = %d, want 4", len(packedTensors))
+	if len(packedTensors) != 6 {
+		t.Fatalf("packed tensor count = %d, want 6", len(packedTensors))
 	}
 
 	gotPackedNames := make([]string, 0, len(packedTensors))
@@ -277,8 +284,10 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 	wantPackedNames := []string{
 		"blocks.0.experts.down_proj.bias",
 		"blocks.0.experts.down_proj.weight",
-		"blocks.0.experts.gate_up_proj.bias",
-		"blocks.0.experts.gate_up_proj.weight",
+		"blocks.0.experts.gate_proj.bias",
+		"blocks.0.experts.gate_proj.weight",
+		"blocks.0.experts.up_proj.bias",
+		"blocks.0.experts.up_proj.weight",
 	}
 	if !slices.Equal(gotPackedNames, wantPackedNames) {
 		t.Fatalf("packed names = %v, want %v", gotPackedNames, wantPackedNames)
