@@ -377,14 +377,6 @@ func (l *Layer) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg 
 	if l == nil || l.Attention == nil || l.AttentionNorm == nil || l.FFNNorm == nil || l.Router == nil || l.Experts == nil || x == nil || cfg == nil {
 		panic("gpt-oss layer is not fully loaded")
 	}
-	if c != nil && batchSize == 1 && seqLen > 1 {
-		steps := make([]*mlx.Array, 0, seqLen)
-		for pos := 0; pos < seqLen; pos++ {
-			steps = append(steps, l.Forward(sliceSequence(x, pos), c, 1, 1, cfg, layerIndex))
-		}
-		return mlx.Concatenate(steps, 1)
-	}
-
 	residual := x
 	x = l.AttentionNorm.Forward(x, cfg.RMSNormEps)
 	x = l.Attention.Forward(x, c, batchSize, seqLen, cfg, layerIndex)
@@ -573,7 +565,7 @@ func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *ml
 	xFlat := mlx.Reshape(xExpanded, B*L, 1, 1, cfg.HiddenSize)
 	idxFlat := mlx.Reshape(inds, B*L, topK)
 
-	doSort := B*L >= 64
+	doSort := B*L >= 16
 	var invOrder *mlx.Array
 	n := B * L * topK
 	if doSort {
