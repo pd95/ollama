@@ -42,11 +42,7 @@ func (t *gptossImportTransform) transformTensor(td *safetensors.TensorData) ([]*
 	name := t.canonicalTensorName(td.Name)
 	switch {
 	case strings.HasSuffix(td.Name, "_blocks"):
-		repacked, err := repackRawGPTOSSMXFP4Tensor(td, name)
-		if err != nil {
-			return nil, err
-		}
-		t.pendingBlocks[name] = repacked
+		t.pendingBlocks[name] = td.WithName(name)
 		return t.maybeEmitExpertWeight(name)
 	case strings.HasSuffix(td.Name, "_scales"):
 		t.pendingScales[name] = td.WithName(name)
@@ -161,10 +157,18 @@ func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.Tens
 	}
 
 	ggmlBlocks := make([]byte, groupCount*17)
+	var tmp [16]byte
 	for i := 0; i < groupCount; i++ {
+		src := blockBytes[i*16 : (i+1)*16]
+		for j := range 8 {
+			a, b := src[j], src[j+8]
+			tmp[2*j+0] = (a & 0x0F) | (b << 4)
+			tmp[2*j+1] = (a >> 4) | (b & 0xF0)
+		}
+
 		dst := ggmlBlocks[i*17 : (i+1)*17]
 		dst[0] = scaleBytes[i]
-		copy(dst[1:], blockBytes[i*16:(i+1)*16])
+		copy(dst[1:], tmp[:])
 	}
 
 	decodedElems := uint64(groupCount * 32)
