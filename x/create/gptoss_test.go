@@ -123,7 +123,7 @@ func TestGPTOSSDequantizeGateUpSplitParity(t *testing.T) {
 
 	whole, err := dequantizeGPTOSSMXFP4Tensor(
 		"blocks.0.experts.gate_up_proj.weight",
-		mustRepackGPTOSSTensor(t, "blocks.0.experts.gate_up_proj.weight", []int32{1, 4, 1, 16}, raw),
+		st.NewTensorDataFromBytes("blocks.0.experts.gate_up_proj.weight", "U8", []int32{1, 4, 1, 16}, raw),
 		st.NewTensorDataFromBytes("blocks.0.experts.gate_up_proj.weight", "U8", []int32{1, 4, 1}, scales),
 	)
 	if err != nil {
@@ -136,7 +136,7 @@ func TestGPTOSSDequantizeGateUpSplitParity(t *testing.T) {
 
 	even, err := dequantizeGPTOSSMXFP4Tensor(
 		"blocks.0.experts.gate_proj.weight",
-		mustRepackGPTOSSTensor(t, "blocks.0.experts.gate_proj.weight", []int32{1, 2, 1, 16}, append(append([]byte{}, raw[:16]...), raw[32:48]...)),
+		st.NewTensorDataFromBytes("blocks.0.experts.gate_proj.weight", "U8", []int32{1, 2, 1, 16}, append(append([]byte{}, raw[:16]...), raw[32:48]...)),
 		st.NewTensorDataFromBytes("blocks.0.experts.gate_proj.weight", "U8", []int32{1, 2, 1}, []byte{scales[0], scales[2]}),
 	)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestGPTOSSDequantizeGateUpSplitParity(t *testing.T) {
 	}
 	odd, err := dequantizeGPTOSSMXFP4Tensor(
 		"blocks.0.experts.up_proj.weight",
-		mustRepackGPTOSSTensor(t, "blocks.0.experts.up_proj.weight", []int32{1, 2, 1, 16}, append(append([]byte{}, raw[16:32]...), raw[48:64]...)),
+		st.NewTensorDataFromBytes("blocks.0.experts.up_proj.weight", "U8", []int32{1, 2, 1, 16}, append(append([]byte{}, raw[16:32]...), raw[48:64]...)),
 		st.NewTensorDataFromBytes("blocks.0.experts.up_proj.weight", "U8", []int32{1, 2, 1}, []byte{scales[1], scales[3]}),
 	)
 	if err != nil {
