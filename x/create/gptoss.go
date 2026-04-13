@@ -1,11 +1,13 @@
 package create
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
 	"strings"
 
+	"github.com/d4l3k/go-bfloat16"
 	fsggml "github.com/ollama/ollama/fs/ggml"
 	ggml "github.com/ollama/ollama/ml/backend/ggml"
 	"github.com/ollama/ollama/x/safetensors"
@@ -206,30 +208,22 @@ func dequantizeAndSplitGateUpTensor(name string, blocks, scales *safetensors.Ten
 	}
 	mid := outDim / 2
 
-	gateVals := make([]float32, experts*inDim*mid)
-	upVals := make([]float32, experts*inDim*mid)
+	gateRaw := make([]byte, experts*inDim*mid*2)
+	upRaw := make([]byte, experts*inDim*mid*2)
 	for e := 0; e < experts; e++ {
 		for row := 0; row < outDim; row++ {
 			dstRow := row / 2
 			for col := 0; col < inDim; col++ {
 				src := (e*outDim+row)*inDim + col
 				dst := (e*inDim+col)*mid + dstRow
+				bits := uint16(bfloat16.FromFloat32(values[src]))
 				if row%2 == 0 {
-					gateVals[dst] = values[src]
+					binary.LittleEndian.PutUint16(gateRaw[dst*2:], bits)
 				} else {
-					upVals[dst] = values[src]
+					binary.LittleEndian.PutUint16(upRaw[dst*2:], bits)
 				}
 			}
 		}
-	}
-
-	gateRaw, err := EncodeFloatTensor("BF16", gateVals)
-	if err != nil {
-		return nil, fmt.Errorf("encode gate expert tensor %q: %w", name, err)
-	}
-	upRaw, err := EncodeFloatTensor("BF16", upVals)
-	if err != nil {
-		return nil, fmt.Errorf("encode up expert tensor %q: %w", name, err)
 	}
 
 	gateName := strings.Replace(name, "gate_up_proj", "gate_proj", 1)
@@ -251,20 +245,15 @@ func dequantizeAndTransposeExpertWeight(name string, blocks, scales *safetensors
 	}
 
 	experts, outDim, inDim := int(shape[0]), int(shape[1]), int(shape[2])
-	transposed := make([]float32, experts*inDim*outDim)
+	raw := make([]byte, experts*inDim*outDim*2)
 	for e := 0; e < experts; e++ {
 		for out := 0; out < outDim; out++ {
 			for in := 0; in < inDim; in++ {
 				src := (e*outDim+out)*inDim + in
 				dst := (e*inDim+in)*outDim + out
-				transposed[dst] = values[src]
+				binary.LittleEndian.PutUint16(raw[dst*2:], uint16(bfloat16.FromFloat32(values[src])))
 			}
 		}
-	}
-
-	raw, err := EncodeFloatTensor("BF16", transposed)
-	if err != nil {
-		return nil, fmt.Errorf("encode transposed expert tensor %q: %w", name, err)
 	}
 	return safetensors.NewTensorDataFromBytes(name, "BF16", []int32{int32(experts), int32(inDim), int32(outDim)}, raw), nil
 }
