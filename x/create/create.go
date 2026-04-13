@@ -508,6 +508,7 @@ type PackedTensorInput struct {
 	Shape    []int32
 	Quantize string    // per-tensor quantization type (may differ within group)
 	Reader   io.Reader // safetensors-wrapped tensor data
+	Raw      *safetensors.TensorData
 }
 
 // PackedTensorLayerCreator creates a single blob layer containing multiple packed tensors.
@@ -1068,6 +1069,7 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 						Shape:    outTD.Shape,
 						Quantize: quantizeType,
 						Reader:   reader,
+						Raw:      outTD,
 					})
 				} else {
 					// Store as minimal safetensors format (88 bytes header overhead)
