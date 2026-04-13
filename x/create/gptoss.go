@@ -49,6 +49,8 @@ func (t *gptossImportTransform) transformTensor(td *safetensors.TensorData) ([]*
 	case strings.HasSuffix(td.Name, "_scales"):
 		t.pendingScales[name] = td.WithName(name)
 		return t.maybeEmitExpertWeight(name)
+	case strings.HasSuffix(td.Name, "gate_up_proj_bias"):
+		return splitGateUpBiasTensor(td.WithName(name))
 	default:
 		return []*safetensors.TensorData{td.WithName(name)}, nil
 	}
@@ -102,7 +104,14 @@ func (t *gptossImportTransform) maybeEmitExpertWeight(name string) ([]*safetenso
 	if err != nil {
 		return nil, err
 	}
-	return []*safetensors.TensorData{weight}, nil
+	switch {
+	case strings.Contains(name, ".experts.gate_up_proj.weight"):
+		return splitGateUpWeightTensor(weight)
+	case strings.Contains(name, ".experts.down_proj.weight"):
+		return []*safetensors.TensorData{transposeExpertWeightTensor(weight)}, nil
+	default:
+		return []*safetensors.TensorData{weight}, nil
+	}
 }
 
 func dequantizeGPTOSSMXFP4Tensor(name string, blocks, scales *safetensors.TensorData) (*safetensors.TensorData, error) {
@@ -167,6 +176,154 @@ func dequantizeGPTOSSMXFP4Tensor(name string, blocks, scales *safetensors.Tensor
 
 	shape := []int32{blocks.Shape[0], blocks.Shape[1], blocks.Shape[2] * 32}
 	return safetensors.NewTensorDataFromBytes(name, "BF16", shape, raw), nil
+}
+
+func splitGateUpWeightTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
+	if td == nil {
+		return nil, nil
+	}
+	if td.Dtype != "BF16" {
+		return nil, fmt.Errorf("gpt-oss expert tensor %q dtype = %q, want BF16", td.Name, td.Dtype)
+	}
+	if len(td.Shape) != 3 {
+		return nil, fmt.Errorf("gpt-oss expert tensor %q shape = %v, want [experts out in]", td.Name, td.Shape)
+	}
+	experts, outDim, inDim := int(td.Shape[0]), int(td.Shape[1]), int(td.Shape[2])
+	if outDim%2 != 0 {
+		return nil, fmt.Errorf("gpt-oss expert tensor %q output dim = %d, want even gate/up rows", td.Name, outDim)
+	}
+	mid := outDim / 2
+
+	raw, err := io.ReadAll(td.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("read gpt-oss expert tensor %q: %w", td.Name, err)
+	}
+	values, err := DecodeFloatTensor(td.Dtype, raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode gpt-oss expert tensor %q: %w", td.Name, err)
+	}
+
+	gateVals := make([]float32, experts*inDim*mid)
+	upVals := make([]float32, experts*inDim*mid)
+	for e := 0; e < experts; e++ {
+		for row := 0; row < outDim; row++ {
+			dstRow := row / 2
+			for col := 0; col < inDim; col++ {
+				src := (e*outDim+row)*inDim + col
+				dst := (e*inDim+col)*mid + dstRow
+				if row%2 == 0 {
+					gateVals[dst] = values[src]
+				} else {
+					upVals[dst] = values[src]
+				}
+			}
+		}
+	}
+
+	gateRaw, err := EncodeFloatTensor("BF16", gateVals)
+	if err != nil {
+		return nil, fmt.Errorf("encode gate expert tensor %q: %w", td.Name, err)
+	}
+	upRaw, err := EncodeFloatTensor("BF16", upVals)
+	if err != nil {
+		return nil, fmt.Errorf("encode up expert tensor %q: %w", td.Name, err)
+	}
+
+	gateName := strings.Replace(td.Name, "gate_up_proj", "gate_proj", 1)
+	upName := strings.Replace(td.Name, "gate_up_proj", "up_proj", 1)
+	shape := []int32{int32(experts), int32(inDim), int32(mid)}
+	return []*safetensors.TensorData{
+		safetensors.NewTensorDataFromBytes(gateName, "BF16", shape, gateRaw),
+		safetensors.NewTensorDataFromBytes(upName, "BF16", shape, upRaw),
+	}, nil
+}
+
+func splitGateUpBiasTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
+	if td == nil {
+		return nil, nil
+	}
+	if td.Dtype != "BF16" {
+		return nil, fmt.Errorf("gpt-oss expert tensor %q dtype = %q, want BF16", td.Name, td.Dtype)
+	}
+	if len(td.Shape) != 2 {
+		return nil, fmt.Errorf("gpt-oss expert tensor %q shape = %v, want [experts out]", td.Name, td.Shape)
+	}
+	experts, outDim := int(td.Shape[0]), int(td.Shape[1])
+	if outDim%2 != 0 {
+		return nil, fmt.Errorf("gpt-oss expert tensor %q output dim = %d, want even gate/up rows", td.Name, outDim)
+	}
+	mid := outDim / 2
+
+	raw, err := io.ReadAll(td.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("read gpt-oss expert tensor %q: %w", td.Name, err)
+	}
+	values, err := DecodeFloatTensor(td.Dtype, raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode gpt-oss expert tensor %q: %w", td.Name, err)
+	}
+
+	gateVals := make([]float32, experts*mid)
+	upVals := make([]float32, experts*mid)
+	for e := 0; e < experts; e++ {
+		for row := 0; row < outDim; row++ {
+			src := e*outDim + row
+			dst := e*mid + row/2
+			if row%2 == 0 {
+				gateVals[dst] = values[src]
+			} else {
+				upVals[dst] = values[src]
+			}
+		}
+	}
+
+	gateRaw, err := EncodeFloatTensor("BF16", gateVals)
+	if err != nil {
+		return nil, fmt.Errorf("encode gate expert bias %q: %w", td.Name, err)
+	}
+	upRaw, err := EncodeFloatTensor("BF16", upVals)
+	if err != nil {
+		return nil, fmt.Errorf("encode up expert bias %q: %w", td.Name, err)
+	}
+
+	gateName := strings.Replace(td.Name, "gate_up_proj", "gate_proj", 1)
+	upName := strings.Replace(td.Name, "gate_up_proj", "up_proj", 1)
+	shape := []int32{int32(experts), int32(mid)}
+	return []*safetensors.TensorData{
+		safetensors.NewTensorDataFromBytes(gateName, "BF16", shape, gateRaw),
+		safetensors.NewTensorDataFromBytes(upName, "BF16", shape, upRaw),
+	}, nil
+}
+
+func transposeExpertWeightTensor(td *safetensors.TensorData) *safetensors.TensorData {
+	if td == nil || td.Dtype != "BF16" || len(td.Shape) != 3 {
+		return td
+	}
+	experts, outDim, inDim := int(td.Shape[0]), int(td.Shape[1]), int(td.Shape[2])
+	raw, err := io.ReadAll(td.Reader())
+	if err != nil {
+		return td
+	}
+	values, err := DecodeFloatTensor(td.Dtype, raw)
+	if err != nil {
+		return td
+	}
+
+	transposed := make([]float32, experts*inDim*outDim)
+	for e := 0; e < experts; e++ {
+		for out := 0; out < outDim; out++ {
+			for in := 0; in < inDim; in++ {
+				src := (e*outDim+out)*inDim + in
+				dst := (e*inDim+in)*outDim + out
+				transposed[dst] = values[src]
+			}
+		}
+	}
+	enc, err := EncodeFloatTensor("BF16", transposed)
+	if err != nil {
+		return td
+	}
+	return safetensors.NewTensorDataFromBytes(td.Name, "BF16", []int32{int32(experts), int32(inDim), int32(outDim)}, enc)
 }
 
 func (t *gptossImportTransform) canonicalTensorName(name string) string {
