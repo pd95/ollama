@@ -557,16 +557,20 @@ func newPackedTensorLayerCreator() create.PackedTensorLayerCreator {
 			}
 			blobReader = bytes.NewReader(blobData)
 		} else {
-			// Build unquantized packed blob using streaming reader
-			// Extract raw tensor data from safetensors-wrapped readers
-			var tds []*safetensors.TensorData
+			// Build unquantized packed blob directly from the original tensor readers
+			// when available to avoid extracting raw bytes and re-wrapping them.
+			tds := make([]*safetensors.TensorData, 0, len(tensors))
 			for _, t := range tensors {
+				if t.Raw != nil {
+					tds = append(tds, t.Raw)
+					continue
+				}
+
 				rawData, err := safetensors.ExtractRawFromSafetensors(t.Reader)
 				if err != nil {
 					return create.LayerInfo{}, fmt.Errorf("failed to extract tensor %s: %w", t.Name, err)
 				}
-				td := safetensors.NewTensorDataFromBytes(t.Name, t.Dtype, t.Shape, rawData)
-				tds = append(tds, td)
+				tds = append(tds, safetensors.NewTensorDataFromBytes(t.Name, t.Dtype, t.Shape, rawData))
 			}
 			blobReader = safetensors.BuildPackedSafetensorsReader(tds)
 		}
