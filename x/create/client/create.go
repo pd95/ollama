@@ -363,6 +363,20 @@ func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 // newLayerCreator returns a LayerCreator callback for creating config/JSON layers.
 func newLayerCreator() create.LayerCreator {
 	return func(r io.Reader, mediaType, name string) (create.LayerInfo, error) {
+		if mediaType == "application/vnd.ollama.image.json" && (name == "config.json" || name == "generation_config.json") {
+			data, err := io.ReadAll(r)
+			if err != nil {
+				return create.LayerInfo{}, err
+			}
+			switch name {
+			case "config.json":
+				data = normalizeSourceConfigJSON(data)
+			case "generation_config.json":
+				data = normalizeSourceGenerationConfigJSON(data)
+			}
+			r = bytes.NewReader(data)
+		}
+
 		layer, err := manifest.NewLayer(r, mediaType)
 		if err != nil {
 			return create.LayerInfo{}, err
@@ -374,6 +388,91 @@ func newLayerCreator() create.LayerCreator {
 			MediaType: layer.MediaType,
 			Name:      name,
 		}, nil
+	}
+}
+
+func normalizeSourceConfigJSON(data []byte) []byte {
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return data
+	}
+
+	normalizeModelType := func(v any) (string, bool) {
+		s, ok := v.(string)
+		if !ok {
+			return "", false
+		}
+		switch strings.ToLower(s) {
+		case "gpt_oss", "gpt-oss":
+			return "gptoss", true
+		default:
+			return "", false
+		}
+	}
+
+	if normalized, ok := normalizeModelType(cfg["model_type"]); ok {
+		cfg["model_type"] = normalized
+	}
+	if textConfig, ok := cfg["text_config"].(map[string]any); ok {
+		if normalized, ok := normalizeModelType(textConfig["model_type"]); ok {
+			textConfig["model_type"] = normalized
+		}
+		if isGPTOSSModelType(textConfig["model_type"]) {
+			applyGPTOSSSpecialTokenDefaults(textConfig)
+		}
+		cfg["text_config"] = textConfig
+	}
+	if isGPTOSSModelType(cfg["model_type"]) {
+		applyGPTOSSSpecialTokenDefaults(cfg)
+	}
+
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return data
+	}
+	return out
+}
+
+func normalizeSourceGenerationConfigJSON(data []byte) []byte {
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return data
+	}
+
+	applyGPTOSSSpecialTokenDefaults(cfg)
+
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return data
+	}
+	return out
+}
+
+func applyGPTOSSSpecialTokenDefaults(cfg map[string]any) {
+	if cfg == nil {
+		return
+	}
+
+	cfg["bos_token_id"] = float64(199998)
+	cfg["eos_token_id"] = []any{
+		float64(199999),
+		float64(200002),
+		float64(200012),
+	}
+	cfg["add_bos_token"] = false
+	cfg["add_eos_token"] = false
+}
+
+func isGPTOSSModelType(v any) bool {
+	s, ok := v.(string)
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(s) {
+	case "gptoss", "gpt_oss", "gpt-oss":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -527,6 +626,12 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 			}
 			configData.Draft = draft
 		}
+		if configData.ModelFamily == "" {
+			configData.ModelFamily = inferModelFamily(opts.ModelDir)
+		}
+		if configData.ModelFamily != "" && len(configData.ModelFamilies) == 0 {
+			configData.ModelFamilies = []string{configData.ModelFamily}
+		}
 		configJSON, err := json.Marshal(configData)
 		if err != nil {
 			return fmt.Errorf("failed to marshal config: %w", err)
@@ -560,6 +665,35 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 
 		return manifest.WriteManifest(name, configLayer, manifestLayers)
 	}
+}
+
+func inferModelFamily(modelDir string) string {
+	var cfg struct {
+		Architectures []string `json:"architectures"`
+		ModelType     string   `json:"model_type"`
+	}
+
+	data, err := os.ReadFile(filepath.Join(modelDir, "config.json"))
+	if err != nil {
+		return ""
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+
+	for _, arch := range cfg.Architectures {
+		archLower := strings.ToLower(arch)
+		if strings.Contains(archLower, "gptoss") || strings.Contains(archLower, "gpt-oss") {
+			return "gptoss"
+		}
+	}
+
+	typeLower := strings.ToLower(cfg.ModelType)
+	if strings.Contains(typeLower, "gptoss") || strings.Contains(typeLower, "gpt_oss") || strings.Contains(typeLower, "gpt-oss") {
+		return "gptoss"
+	}
+
+	return ""
 }
 
 func resolveParserName(mf *ModelfileConfig, inferred string) string {
@@ -641,6 +775,8 @@ func supportsThinking(modelDir string) bool {
 
 	// Check architectures that support thinking
 	thinkingArchitectures := []string{
+		"gptoss",   // gpt-oss models
+		"gpt_oss",  // HF model_type spelling
 		"glm4moe",  // GLM-4 MoE models
 		"deepseek", // DeepSeek models
 		"qwen3",    // Qwen3 models
