@@ -1019,8 +1019,11 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 				case effectiveQuantize != "":
 					quantizeType = importTransform.quantizationType(outTD.Name, outTD.Shape, effectiveQuantize)
 				}
-				reader := outTD.SafetensorsReader()
+				// Only build a safetensors reader when this tensor will actually use it.
+				// Packed, unquantized expert groups can now reuse Raw directly.
+				var reader io.Reader
 				if hasSourceFP8Scale {
+					reader = outTD.SafetensorsReader()
 					if len(outputTensors) != 1 {
 						extractor.Close()
 						closeExtractors()
@@ -1063,6 +1066,9 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 						Raw:      outTD,
 					})
 				} else {
+					if reader == nil {
+						reader = outTD.SafetensorsReader()
+					}
 					// Store as minimal safetensors format (88 bytes header overhead)
 					// This enables native mmap loading via mlx_load_safetensors
 					// createTensorLayer returns multiple layers if quantizing (weight + scales)
