@@ -623,6 +623,9 @@ func getParserName(modelDir string) string {
 		if strings.Contains(archLower, "cohere2moe") || strings.Contains(archLower, "cohere2_moe") {
 			return "cohere"
 		}
+		if isGPTOSSName(archLower) {
+			return "harmony"
+		}
 		if strings.Contains(archLower, "glm4") || strings.Contains(archLower, "glm-4") {
 			return "glm-4.7"
 		}
@@ -648,6 +651,9 @@ func getParserName(modelDir string) string {
 		}
 		if strings.Contains(typeLower, "cohere2_moe") {
 			return "cohere"
+		}
+		if isGPTOSSName(typeLower) {
+			return "harmony"
 		}
 		if strings.Contains(typeLower, "glm4") || strings.Contains(typeLower, "glm-4") {
 			return "glm-4.7"
@@ -695,6 +701,9 @@ func getRendererName(modelDir string) string {
 		if strings.Contains(archLower, "cohere2moe") || strings.Contains(archLower, "cohere2_moe") {
 			return "cohere"
 		}
+		if isGPTOSSName(archLower) {
+			return ""
+		}
 		if strings.Contains(archLower, "gemma4") {
 			return "gemma4"
 		}
@@ -721,6 +730,9 @@ func getRendererName(modelDir string) string {
 		if strings.Contains(typeLower, "cohere2_moe") {
 			return "cohere"
 		}
+		if isGPTOSSName(typeLower) {
+			return ""
+		}
 		if strings.Contains(typeLower, "gemma4") {
 			return "gemma4"
 		}
@@ -739,4 +751,9 @@ func getRendererName(modelDir string) string {
 	}
 
 	return ""
+}
+
+func isGPTOSSName(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "gptoss") || strings.Contains(s, "gpt_oss") || strings.Contains(s, "gpt-oss")
 }
