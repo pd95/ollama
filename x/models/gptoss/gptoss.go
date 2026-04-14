@@ -561,8 +561,13 @@ func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *ml
 	scores := mlx.TakeAlongAxis(router, inds, -1)
 	scores = mlx.SoftmaxAxis(scores, -1, true)
 
-	xExpanded := mlx.ExpandDims(mlx.ExpandDims(x, -2), -2)
-	xFlat := mlx.Reshape(xExpanded, B*L, 1, 1, cfg.HiddenSize)
+	var xFlat *mlx.Array
+	if B == 1 && L == 1 {
+		xFlat = mlx.Reshape(x, 1, 1, 1, cfg.HiddenSize)
+	} else {
+		xExpanded := mlx.ExpandDims(mlx.ExpandDims(x, -2), -2)
+		xFlat = mlx.Reshape(xExpanded, B*L, 1, 1, cfg.HiddenSize)
+	}
 	idxFlat := mlx.Reshape(inds, B*L, topK)
 
 	doSort := B*L >= 16
@@ -1109,7 +1114,6 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		if err != nil {
 			return err
 		}
-
 		m.Layers[i] = &Layer{
 			AttentionNorm: attnNorm,
 			Attention: &Attention{
