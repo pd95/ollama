@@ -362,6 +362,8 @@ func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 
 // newLayerCreator returns a LayerCreator callback for creating config/JSON layers.
 func newLayerCreator() create.LayerCreator {
+	var generationConfigIsGPTOSS bool
+
 	return func(r io.Reader, mediaType, name string) (create.LayerInfo, error) {
 		if mediaType == "application/vnd.ollama.image.json" && (name == "config.json" || name == "generation_config.json") {
 			data, err := io.ReadAll(r)
@@ -371,8 +373,9 @@ func newLayerCreator() create.LayerCreator {
 			switch name {
 			case "config.json":
 				data = normalizeSourceConfigJSON(data)
+				generationConfigIsGPTOSS = configJSONIsGPTOSS(data)
 			case "generation_config.json":
-				data = normalizeSourceGenerationConfigJSON(data)
+				data = normalizeSourceGenerationConfigJSONIfGPTOSS(data, generationConfigIsGPTOSS)
 			}
 			r = bytes.NewReader(data)
 		}
@@ -434,6 +437,14 @@ func normalizeSourceConfigJSON(data []byte) []byte {
 }
 
 func normalizeSourceGenerationConfigJSON(data []byte) []byte {
+	return normalizeSourceGenerationConfigJSONIfGPTOSS(data, true)
+}
+
+func normalizeSourceGenerationConfigJSONIfGPTOSS(data []byte, isGPTOSS bool) []byte {
+	if !isGPTOSS {
+		return data
+	}
+
 	var cfg map[string]any
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return data
@@ -474,6 +485,35 @@ func isGPTOSSModelType(v any) bool {
 	default:
 		return false
 	}
+}
+
+func configJSONIsGPTOSS(data []byte) bool {
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false
+	}
+
+	if textConfig, ok := cfg["text_config"].(map[string]any); ok && isGPTOSSModelType(textConfig["model_type"]) {
+		return true
+	}
+
+	if isGPTOSSModelType(cfg["model_type"]) {
+		return true
+	}
+
+	architectures, ok := cfg["architectures"].([]any)
+	if !ok {
+		return false
+	}
+	for _, arch := range architectures {
+		if s, ok := arch.(string); ok {
+			if strings.EqualFold(s, "GptOssForCausalLM") {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // newTensorLayerCreator returns a QuantizingTensorLayerCreator callback for creating tensor layers.

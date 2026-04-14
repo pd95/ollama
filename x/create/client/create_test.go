@@ -822,6 +822,69 @@ func TestNormalizeSourceGenerationConfigJSON(t *testing.T) {
 	}
 }
 
+func TestNormalizeSourceGenerationConfigJSONIfGPTOSS_NonGPTOSSUnchanged(t *testing.T) {
+	input := []byte(`{
+		"bos_token_id": 123,
+		"eos_token_id": 456,
+		"add_bos_token": true,
+		"add_eos_token": true
+	}`)
+
+	data := normalizeSourceGenerationConfigJSONIfGPTOSS(input, false)
+
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	if got := int(got["bos_token_id"].(float64)); got != 123 {
+		t.Fatalf("bos_token_id = %d, want 123", got)
+	}
+	if got := int(got["eos_token_id"].(float64)); got != 456 {
+		t.Fatalf("eos_token_id = %d, want 456", got)
+	}
+	if got["add_bos_token"] != true || got["add_eos_token"] != true {
+		t.Fatalf("add bos/eos flags = %v/%v, want true/true", got["add_bos_token"], got["add_eos_token"])
+	}
+}
+
+func TestConfigJSONIsGPTOSS(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{
+			name: "architecture",
+			data: `{"architectures":["GptOssForCausalLM"]}`,
+			want: true,
+		},
+		{
+			name: "model_type",
+			data: `{"model_type":"gpt_oss"}`,
+			want: true,
+		},
+		{
+			name: "text_config model_type",
+			data: `{"text_config":{"model_type":"gpt-oss"}}`,
+			want: true,
+		},
+		{
+			name: "non gptoss",
+			data: `{"model_type":"qwen3"}`,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := configJSONIsGPTOSS([]byte(tt.data)); got != tt.want {
+				t.Fatalf("configJSONIsGPTOSS() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSupportsThinking_NoConfig(t *testing.T) {
 	if supportsThinking(t.TempDir()) {
 		t.Error("supportsThinking should return false for missing config.json")
