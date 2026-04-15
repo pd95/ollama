@@ -172,8 +172,8 @@ func TestGPTOSSDequantizeGateUpSplitParity(t *testing.T) {
 		t.Fatalf("split decode lengths = %d/%d, want %d/%d", len(evenVals), len(oddVals), 2*32, 2*32)
 	}
 
-	for i := 0; i < 2; i++ {
-		for j := 0; j < 32; j++ {
+	for i := range 2 {
+		for j := range 32 {
 			if wholeVals[(i*2)*32+j] != evenVals[i*32+j] {
 				t.Fatalf("even row %d col %d mismatch: whole=%v split=%v", i, j, wholeVals[(i*2)*32+j], evenVals[i*32+j])
 			}
@@ -182,15 +182,6 @@ func TestGPTOSSDequantizeGateUpSplitParity(t *testing.T) {
 			}
 		}
 	}
-}
-
-func mustRepackGPTOSSTensor(t *testing.T, name string, shape []int32, raw []byte) *st.TensorData {
-	t.Helper()
-	td, err := repackRawGPTOSSMXFP4Tensor(st.NewTensorDataFromBytes(name, "U8", shape, raw), name)
-	if err != nil {
-		t.Fatalf("repackRawGPTOSSMXFP4Tensor(%q): %v", name, err)
-	}
-	return td
 }
 
 func mustDecodeBF16Tensor(t *testing.T, td *st.TensorData) []float32 {
@@ -309,6 +300,9 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 	}
 
 	for _, tensor := range packedTensors {
+		if tensor.Reader == nil {
+			t.Fatalf("packed tensor %q reader = nil, want safetensors reader", tensor.Name)
+		}
 		if strings.HasSuffix(tensor.Name, ".weight") {
 			if tensor.Dtype != "BF16" {
 				t.Fatalf("packed tensor %q dtype = %q, want BF16", tensor.Name, tensor.Dtype)
