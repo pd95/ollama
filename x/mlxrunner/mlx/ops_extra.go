@@ -441,22 +441,6 @@ func RoPEWithFreqs(x *Array, dims int, traditional bool, base, scale float32, of
 	return out
 }
 
-func RoPEWithFreqs(x, freqs *Array, dims int, traditional bool, scale float32, offset int) *Array {
-	out := New("FAST_ROPE")
-	C.mlx_fast_rope(
-		&out.ctx,
-		x.ctx,
-		C.int(dims),
-		C.bool(traditional),
-		C.mlx_optional_float{has_value: C.bool(false)},
-		C.float(scale),
-		C.int(offset),
-		freqs.ctx,
-		DefaultStream().ctx,
-	)
-	return out
-}
-
 func Sigmoid(a *Array) *Array {
 	return a.Sigmoid()
 }

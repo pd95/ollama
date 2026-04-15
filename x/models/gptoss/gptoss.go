@@ -447,8 +447,8 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 	}
 	attentionScale := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
 	if a.RoPEFreqs != nil && a.RoPEFreqs.Valid() {
-		query = mlx.RoPEWithFreqs(query, a.RoPEFreqs, int(cfg.HeadDim), false, 1.0, offset)
-		key = mlx.RoPEWithFreqs(key, a.RoPEFreqs, int(cfg.HeadDim), false, 1.0, offset)
+		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, offset, a.RoPEFreqs)
+		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, offset, a.RoPEFreqs)
 		attentionScale *= yarnConcentration(cfg) * yarnConcentration(cfg)
 	} else {
 		ropeBase, ropeScale, _ := cfg.RopeParameters()
