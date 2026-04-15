@@ -402,9 +402,7 @@ func ExpertGroupPrefix(tensorName string) string {
 	for _, marker := range []string{
 		".experts.",
 		".mlp.experts.",
-		".shared_experts.",
 		".mlp.shared_experts.",
-		".switch_mlp.",
 		".mlp.switch_mlp.",
 		".moe.experts.",
 	} {
@@ -431,7 +429,6 @@ type PackedTensorInput struct {
 	Shape    []int32
 	Quantize string    // per-tensor quantization type (may differ within group)
 	Reader   io.Reader // safetensors-wrapped tensor data
-	Raw      *safetensors.TensorData
 }
 
 // PackedTensorLayerCreator creates a single blob layer containing multiple packed tensors.
@@ -775,11 +772,8 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 				case effectiveQuantize != "":
 					quantizeType = importTransform.quantizationType(outTD.Name, outTD.Shape, effectiveQuantize)
 				}
-				// Only build a safetensors reader when this tensor will actually use it.
-				// Packed, unquantized expert groups can now reuse Raw directly.
-				var reader io.Reader
+				reader := outTD.SafetensorsReader()
 				if hasSourceFP8Scale {
-					reader = outTD.SafetensorsReader()
 					if len(outputTensors) != 1 {
 						extractor.Close()
 						closeExtractors()
@@ -819,12 +813,8 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 						Shape:    outTD.Shape,
 						Quantize: quantizeType,
 						Reader:   reader,
-						Raw:      outTD,
 					})
 				} else {
-					if reader == nil {
-						reader = outTD.SafetensorsReader()
-					}
 					// Store as minimal safetensors format (88 bytes header overhead)
 					// This enables native mmap loading via mlx_load_safetensors
 					// createTensorLayer returns multiple layers if quantizing (weight + scales)

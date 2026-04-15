@@ -526,56 +526,6 @@ func TestNewManifestWriter_PopulatesFileTypeFromQuantize(t *testing.T) {
 	}
 }
 
-func TestNewManifestWriter_NormalizesGPTOSSFamily(t *testing.T) {
-	t.Setenv("OLLAMA_MODELS", t.TempDir())
-
-	modelDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(modelDir, "config.json"), []byte(`{
-		"architectures": ["GptOssForCausalLM"],
-		"model_type": "gpt_oss"
-	}`), 0o644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	opts := CreateOptions{
-		ModelName: "gptoss-family-test",
-		ModelDir:  modelDir,
-	}
-
-	writer := newManifestWriter(opts, []string{"completion", "thinking", "tools"}, "harmony", "")
-	if err := writer(opts.ModelName, create.LayerInfo{}, nil); err != nil {
-		t.Fatalf("newManifestWriter() error = %v", err)
-	}
-
-	name := model.ParseName(opts.ModelName)
-	mf, err := manifest.ParseNamedManifest(name)
-	if err != nil {
-		t.Fatalf("ParseNamedManifest() error = %v", err)
-	}
-
-	configPath, err := manifest.BlobsPath(mf.Config.Digest)
-	if err != nil {
-		t.Fatalf("BlobsPath() error = %v", err)
-	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-
-	var cfg model.ConfigV2
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-
-	if cfg.ModelFamily != "gptoss" {
-		t.Fatalf("ModelFamily = %q, want %q", cfg.ModelFamily, "gptoss")
-	}
-	if len(cfg.ModelFamilies) != 1 || cfg.ModelFamilies[0] != "gptoss" {
-		t.Fatalf("ModelFamilies = %v, want [gptoss]", cfg.ModelFamilies)
-	}
-}
-
 func TestSupportsThinking(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -641,172 +591,6 @@ func TestSupportsThinking(t *testing.T) {
 	}
 }
 
-func TestInferModelFamily(t *testing.T) {
-	tests := []struct {
-		name       string
-		configJSON string
-		want       string
-	}{
-		{
-			name:       "gpt-oss architecture",
-			configJSON: `{"architectures": ["GptOssForCausalLM"], "model_type": "gpt_oss"}`,
-			want:       "gptoss",
-		},
-		{
-			name:       "gpt-oss model_type",
-			configJSON: `{"model_type": "gpt_oss"}`,
-			want:       "gptoss",
-		},
-		{
-			name:       "other architecture",
-			configJSON: `{"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3"}`,
-			want:       "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(tt.configJSON), 0o644); err != nil {
-				t.Fatalf("WriteFile() error = %v", err)
-			}
-
-			if got := inferModelFamily(dir); got != tt.want {
-				t.Fatalf("inferModelFamily() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestNormalizeSourceConfigJSON(t *testing.T) {
-	data := normalizeSourceConfigJSON([]byte(`{
-		"architectures": ["GptOssForCausalLM"],
-		"model_type": "gpt_oss",
-		"text_config": {
-			"model_type": "gpt_oss"
-		}
-	}`))
-
-	var got map[string]any
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-
-	if got["model_type"] != "gptoss" {
-		t.Fatalf("model_type = %v, want gptoss", got["model_type"])
-	}
-
-	textConfig, ok := got["text_config"].(map[string]any)
-	if !ok {
-		t.Fatalf("text_config = %T, want object", got["text_config"])
-	}
-	if textConfig["model_type"] != "gptoss" {
-		t.Fatalf("text_config.model_type = %v, want gptoss", textConfig["model_type"])
-	}
-	if got := int(got["bos_token_id"].(float64)); got != 199998 {
-		t.Fatalf("bos_token_id = %d, want 199998", got)
-	}
-	eos, ok := got["eos_token_id"].([]any)
-	if !ok || len(eos) != 3 {
-		t.Fatalf("eos_token_id = %#v, want 3-token array", got["eos_token_id"])
-	}
-	if got := []int{int(eos[0].(float64)), int(eos[1].(float64)), int(eos[2].(float64))}; !slices.Equal(got, []int{199999, 200002, 200012}) {
-		t.Fatalf("eos_token_id = %v, want [199999 200002 200012]", got)
-	}
-	if got["add_bos_token"] != false || got["add_eos_token"] != false {
-		t.Fatalf("add bos/eos flags = %v/%v, want false/false", got["add_bos_token"], got["add_eos_token"])
-	}
-}
-
-func TestNormalizeSourceGenerationConfigJSON(t *testing.T) {
-	data := normalizeSourceGenerationConfigJSON([]byte(`{
-		"bos_token_id": 123,
-		"eos_token_id": 456
-	}`))
-
-	var got map[string]any
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-
-	if got := int(got["bos_token_id"].(float64)); got != 199998 {
-		t.Fatalf("bos_token_id = %d, want 199998", got)
-	}
-	eos, ok := got["eos_token_id"].([]any)
-	if !ok || len(eos) != 3 {
-		t.Fatalf("eos_token_id = %#v, want 3-token array", got["eos_token_id"])
-	}
-	if got := []int{int(eos[0].(float64)), int(eos[1].(float64)), int(eos[2].(float64))}; !slices.Equal(got, []int{199999, 200002, 200012}) {
-		t.Fatalf("eos_token_id = %v, want [199999 200002 200012]", got)
-	}
-	if got["add_bos_token"] != false || got["add_eos_token"] != false {
-		t.Fatalf("add bos/eos flags = %v/%v, want false/false", got["add_bos_token"], got["add_eos_token"])
-	}
-}
-
-func TestNormalizeSourceGenerationConfigJSONIfGPTOSS_NonGPTOSSUnchanged(t *testing.T) {
-	input := []byte(`{
-		"bos_token_id": 123,
-		"eos_token_id": 456,
-		"add_bos_token": true,
-		"add_eos_token": true
-	}`)
-
-	data := normalizeSourceGenerationConfigJSONIfGPTOSS(input, false)
-
-	var got map[string]any
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-
-	if got := int(got["bos_token_id"].(float64)); got != 123 {
-		t.Fatalf("bos_token_id = %d, want 123", got)
-	}
-	if got := int(got["eos_token_id"].(float64)); got != 456 {
-		t.Fatalf("eos_token_id = %d, want 456", got)
-	}
-	if got["add_bos_token"] != true || got["add_eos_token"] != true {
-		t.Fatalf("add bos/eos flags = %v/%v, want true/true", got["add_bos_token"], got["add_eos_token"])
-	}
-}
-
-func TestConfigJSONIsGPTOSS(t *testing.T) {
-	tests := []struct {
-		name string
-		data string
-		want bool
-	}{
-		{
-			name: "architecture",
-			data: `{"architectures":["GptOssForCausalLM"]}`,
-			want: true,
-		},
-		{
-			name: "model_type",
-			data: `{"model_type":"gpt_oss"}`,
-			want: true,
-		},
-		{
-			name: "text_config model_type",
-			data: `{"text_config":{"model_type":"gpt-oss"}}`,
-			want: true,
-		},
-		{
-			name: "non gptoss",
-			data: `{"model_type":"qwen3"}`,
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := configJSONIsGPTOSS([]byte(tt.data)); got != tt.want {
-				t.Fatalf("configJSONIsGPTOSS() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestSupportsThinking_NoConfig(t *testing.T) {
 	if supportsThinking(t.TempDir()) {
 		t.Error("supportsThinking should return false for missing config.json")
@@ -847,12 +631,12 @@ func TestGetParserName(t *testing.T) {
 		{
 			name:       "gpt-oss model",
 			configJSON: `{"architectures": ["GptOssForCausalLM"]}`,
-			want:       "",
+			want:       "harmony",
 		},
 		{
 			name:       "gpt-oss via model_type",
 			configJSON: `{"model_type": "gpt_oss"}`,
-			want:       "",
+			want:       "harmony",
 		},
 		{
 			name:       "no config",
