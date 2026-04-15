@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -209,27 +210,21 @@ func dequantizeAndSplitGateUpTensor(name string, blocks, scales *safetensors.Ten
 
 	gateRaw := make([]byte, experts*inDim*mid*2)
 	upRaw := make([]byte, experts*inDim*mid*2)
-	var wg sync.WaitGroup
-	wg.Add(experts)
-	for e := range experts {
-		go func(e int) {
-			defer wg.Done()
-			for row := range outDim {
-				dstRow := row / 2
-				for col := range inDim {
-					src := (e*outDim+row)*inDim + col
-					dst := (e*inDim+col)*mid + dstRow
-					bits := uint16(bfloat16.FromFloat32(values[src]))
-					if row%2 == 0 {
-						binary.LittleEndian.PutUint16(gateRaw[dst*2:], bits)
-					} else {
-						binary.LittleEndian.PutUint16(upRaw[dst*2:], bits)
-					}
+	parallelizeGPTOSSExperts(experts, func(e int) {
+		for row := range outDim {
+			dstRow := row / 2
+			for col := range inDim {
+				src := (e*outDim+row)*inDim + col
+				dst := (e*inDim+col)*mid + dstRow
+				bits := uint16(bfloat16.FromFloat32(values[src]))
+				if row%2 == 0 {
+					binary.LittleEndian.PutUint16(gateRaw[dst*2:], bits)
+				} else {
+					binary.LittleEndian.PutUint16(upRaw[dst*2:], bits)
 				}
 			}
-		}(e)
-	}
-	wg.Wait()
+		}
+	})
 
 	gateName := strings.Replace(name, "gate_up_proj", "gate_proj", 1)
 	upName := strings.Replace(name, "gate_up_proj", "up_proj", 1)
@@ -251,22 +246,56 @@ func dequantizeAndTransposeExpertWeight(name string, blocks, scales *safetensors
 
 	experts, outDim, inDim := int(shape[0]), int(shape[1]), int(shape[2])
 	raw := make([]byte, experts*inDim*outDim*2)
-	var wg sync.WaitGroup
-	wg.Add(experts)
-	for e := range experts {
-		go func(e int) {
-			defer wg.Done()
-			for out := range outDim {
-				for in := range inDim {
-					src := (e*outDim+out)*inDim + in
-					dst := (e*inDim+in)*outDim + out
-					binary.LittleEndian.PutUint16(raw[dst*2:], uint16(bfloat16.FromFloat32(values[src])))
-				}
+	parallelizeGPTOSSExperts(experts, func(e int) {
+		for out := range outDim {
+			for in := range inDim {
+				src := (e*outDim+out)*inDim + in
+				dst := (e*inDim+in)*outDim + out
+				binary.LittleEndian.PutUint16(raw[dst*2:], uint16(bfloat16.FromFloat32(values[src])))
 			}
-		}(e)
-	}
-	wg.Wait()
+		}
+	})
 	return safetensors.NewTensorDataFromBytes(name, "BF16", []int32{int32(experts), int32(inDim), int32(outDim)}, raw), nil
+}
+
+func parallelizeGPTOSSExperts(experts int, fn func(int)) {
+	if experts <= 1 {
+		for e := range experts {
+			fn(e)
+		}
+		return
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > experts {
+		workers = experts
+	}
+	if workers == 1 {
+		for e := range experts {
+			fn(e)
+		}
+		return
+	}
+
+	var wg sync.WaitGroup
+	work := make(chan int, experts)
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for e := range work {
+				fn(e)
+			}
+		}()
+	}
+	for e := range experts {
+		work <- e
+	}
+	close(work)
+	wg.Wait()
 }
 
 func splitGateUpBiasTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
