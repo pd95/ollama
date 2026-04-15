@@ -1150,7 +1150,7 @@ func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *ml
 	}
 	idxFlat := mlx.Reshape(inds, B*L, topK)
 
-	doSort := B*L >= 16
+	doSort := B*L >= 24
 	var invOrder *mlx.Array
 	n := B * L * topK
 	if doSort {
