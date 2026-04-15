@@ -245,6 +245,104 @@ func TestLoadWeightsDensePath(t *testing.T) {
 	}
 }
 
+func TestLoadWeightsAcceptsAffineQuantizedLinears(t *testing.T) {
+	skipIfNoMLX(t)
+
+	cfg := denseTestConfig(t)
+	cfg.HiddenSize = 64
+	cfg.IntermediateSize = 128
+	cfg.NumAttentionHeads = 1
+	cfg.NumKeyValueHeads = 1
+	cfg.HeadDim = 64
+	cfg.NumLocalExperts = 4
+	cfg.NumExpertsPerTok = 2
+	cfg.QuantGroupSize = 64
+	cfg.QuantBits = 8
+	cfg.QuantMode = "affine"
+
+	m := &Model{
+		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
+	}
+
+	tensors := denseTestTensors(t, cfg)
+	quantizeTensorForTest(t, tensors, "output.weight", 64, 8, "affine")
+	quantizeTensorForTest(t, tensors, "blocks.0.q_proj.weight", 64, 8, "affine")
+	quantizeTensorForTest(t, tensors, "blocks.0.k_proj.weight", 64, 8, "affine")
+	quantizeTensorForTest(t, tensors, "blocks.0.v_proj.weight", 64, 8, "affine")
+	quantizeTensorForTest(t, tensors, "blocks.0.attn_out.weight", 64, 8, "affine")
+	quantizeTensorForTest(t, tensors, "blocks.0.router.weight", 64, 8, "affine")
+
+	if err := m.LoadWeights(tensors); err != nil {
+		t.Fatalf("LoadWeights() error = %v", err)
+	}
+	if m.LMHead == nil {
+		t.Fatal("LMHead = nil")
+	}
+}
+
+func TestLoadWeightsSupportsQuantizedDirectExperts(t *testing.T) {
+	skipIfNoMLX(t)
+
+	cfg := denseTestConfig(t)
+	cfg.HiddenSize = 64
+	cfg.IntermediateSize = 128
+	cfg.NumAttentionHeads = 1
+	cfg.NumKeyValueHeads = 1
+	cfg.HeadDim = 64
+	cfg.NumLocalExperts = 4
+	cfg.NumExpertsPerTok = 2
+	cfg.QuantGroupSize = 64
+	cfg.QuantBits = 8
+	cfg.QuantMode = "affine"
+
+	denseModel := &Model{
+		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
+	}
+	denseTensors := denseTestTensors(t, cfg)
+	if err := denseModel.LoadWeights(denseTensors); err != nil {
+		t.Fatalf("dense LoadWeights() error = %v", err)
+	}
+
+	quantModel := &Model{
+		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
+	}
+	quantTensors := denseTestTensors(t, cfg)
+	quantizeTensorForTest(t, quantTensors, "blocks.0.experts.gate_proj.weight", 64, 8, "affine")
+	quantizeTensorForTest(t, quantTensors, "blocks.0.experts.up_proj.weight", 64, 8, "affine")
+	quantizeTensorForTest(t, quantTensors, "blocks.0.experts.down_proj.weight", 64, 8, "affine")
+	if err := quantModel.LoadWeights(quantTensors); err != nil {
+		t.Fatalf("quantized LoadWeights() error = %v", err)
+	}
+
+	xVals := make([]float32, 6*int(cfg.HiddenSize))
+	routerVals := make([]float32, 6*int(cfg.NumLocalExperts))
+	for i := range xVals {
+		xVals[i] = float32((i%17)-8) / 8
+	}
+	for i := range routerVals {
+		routerVals[i] = float32((i%11)-5) / 4
+	}
+
+	x := mlx.FromValues(xVals, 1, 6, int(cfg.HiddenSize)).AsType(mlx.DTypeBFloat16)
+	router := mlx.FromValues(routerVals, 1, 6, int(cfg.NumLocalExperts)).AsType(mlx.DTypeBFloat16)
+	denseOut := denseModel.Layers[0].Experts.Forward(x, router, &cfg, 0)
+	quantOut := quantModel.Layers[0].Experts.Forward(x, router, &cfg, 0)
+
+	denseVals := materializedFloats(denseOut.AsType(mlx.DTypeFloat32))
+	quantVals := materializedFloats(quantOut.AsType(mlx.DTypeFloat32))
+	if len(denseVals) != len(quantVals) {
+		t.Fatalf("expert output length mismatch: dense=%d quant=%d", len(denseVals), len(quantVals))
+	}
+	for i := range denseVals {
+		if diff := math.Abs(float64(denseVals[i] - quantVals[i])); diff > 7e-2 {
+			t.Fatalf("quantized expert output[%d] = %v, want %v (diff %v)", i, quantVals[i], denseVals[i], diff)
+		}
+	}
+}
+
 func TestLoadWeightsMissingTensorFails(t *testing.T) {
 	skipIfNoMLX(t)
 
@@ -2033,6 +2131,24 @@ func denseTestTensors(t *testing.T, cfg Config) map[string]*mlx.Array {
 	}
 
 	return tensors
+}
+
+func quantizeTensorForTest(t *testing.T, tensors map[string]*mlx.Array, name string, groupSize, bits int, mode string) {
+	t.Helper()
+
+	weight := tensors[name]
+	if weight == nil {
+		t.Fatalf("quantizeTensorForTest(%q): missing weight tensor", name)
+	}
+	qw, scales, qbiases := mlx.Quantize(weight, groupSize, bits, mode)
+	if qw == nil || scales == nil {
+		t.Fatalf("quantizeTensorForTest(%q): quantize returned invalid tensors", name)
+	}
+	tensors[name] = qw
+	tensors[name+"_scale"] = scales
+	if qbiases != nil {
+		tensors[name+"_qbias"] = qbiases
+	}
 }
 
 func loadRuntimeTensorsForTest(root *model.Root) (map[string]*mlx.Array, error) {

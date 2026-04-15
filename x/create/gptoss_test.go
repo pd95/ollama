@@ -57,6 +57,21 @@ func TestGPTOSSImportTransformRenamesTensors(t *testing.T) {
 	}
 }
 
+func TestGPTOSSImportTransformQuantizationType_ExpertsAffineOnly(t *testing.T) {
+	transform := &gptossImportTransform{}
+	shape := []int32{2, 64, 128}
+
+	if got := transform.quantizationType("blocks.0.experts.gate_proj.weight", shape, "int8"); got != "int8" {
+		t.Fatalf("quantizationType(int8) = %q, want %q", got, "int8")
+	}
+	if got := transform.quantizationType("blocks.0.experts.gate_proj.weight", shape, "int4"); got != "int4" {
+		t.Fatalf("quantizationType(int4) = %q, want %q", got, "int4")
+	}
+	if got := transform.quantizationType("blocks.0.experts.gate_proj.weight", shape, "mxfp4"); got != "" {
+		t.Fatalf("quantizationType(mxfp4) = %q, want empty", got)
+	}
+}
+
 func TestGPTOSSImportTransformDequantizesExpertWeights(t *testing.T) {
 	transform := &gptossImportTransform{
 		pendingBlocks: make(map[string]*st.TensorData),
