@@ -941,9 +941,9 @@ func TestQProjExplicitAffineMatchesCPUReference(t *testing.T) {
 	weightVals := materializedFloats(qproj.Weight.AsType(mlx.DTypeFloat32))
 	biasVals := materializedFloats(qproj.Bias.AsType(mlx.DTypeFloat32))
 	w := make([][]float32, 64)
-	for in := 0; in < 64; in++ {
+	for in := range 64 {
 		w[in] = make([]float32, 64)
-		for out := 0; out < 64; out++ {
+		for out := range 64 {
 			w[in][out] = weightVals[out*64+in]
 		}
 	}
@@ -998,9 +998,9 @@ func TestQProjExplicitAffineFloat32MatchesCPUReference(t *testing.T) {
 	weightVals := materializedFloats(qproj.Weight.AsType(mlx.DTypeFloat32))
 	biasVals := materializedFloats(qproj.Bias.AsType(mlx.DTypeFloat32))
 	w := make([][]float32, 64)
-	for in := 0; in < 64; in++ {
+	for in := range 64 {
 		w[in] = make([]float32, 64)
-		for out := 0; out < 64; out++ {
+		for out := range 64 {
 			w[in][out] = weightVals[out*64+in]
 		}
 	}
@@ -1057,9 +1057,9 @@ func TestQProjExplicitAffine2DAndContiguousMatchCPUReference(t *testing.T) {
 	weightVals := materializedFloats(qproj.Weight.AsType(mlx.DTypeFloat32))
 	biasVals := materializedFloats(qproj.Bias.AsType(mlx.DTypeFloat32))
 	w := make([][]float32, 64)
-	for in := 0; in < 64; in++ {
+	for in := range 64 {
 		w[in] = make([]float32, 64)
-		for out := 0; out < 64; out++ {
+		for out := range 64 {
 			w[in][out] = weightVals[out*64+in]
 		}
 	}
@@ -1138,7 +1138,7 @@ func TestQProjExplicitAffineBatch2DDiffersFromRowWise2D(t *testing.T) {
 	batchedVals := materializedFloats(batched)
 
 	rowWiseParts := make([]*mlx.Array, 0, 6)
-	for row := 0; row < 6; row++ {
+	for row := range 6 {
 		xRow := mlx.FromValues(xVals[row*64:(row+1)*64], 1, 64).AsType(mlx.DTypeFloat32)
 		rowWiseParts = append(rowWiseParts, xRow.Matmul(wT).Add(bias))
 	}
@@ -1387,7 +1387,7 @@ func TestExpertsForwardMatchesReferenceSortedPath(t *testing.T) {
 	const seqLen = 64
 	xVals := make([]float32, seqLen*int(cfg.HiddenSize))
 	routerVals := make([]float32, seqLen*int(cfg.NumLocalExperts))
-	for i := 0; i < seqLen; i++ {
+	for i := range seqLen {
 		xVals[i*2+0] = float32(i%7)/7 + 0.1
 		xVals[i*2+1] = float32((i*3)%11)/11 - 0.2
 
@@ -1462,7 +1462,7 @@ func TestExpertsForwardMatchesReferenceSortedPath(t *testing.T) {
 	gotVals := materializedFloats(got.AsType(mlx.DTypeFloat32))
 
 	wantVals := make([]float32, 0, len(gotVals))
-	for i := 0; i < seqLen; i++ {
+	for i := range seqLen {
 		wantVals = append(wantVals, referenceExpertsForward(
 			xVals[i*2:(i+1)*2],
 			routerVals[i*3:(i+1)*3],
@@ -1522,7 +1522,7 @@ func TestExpertsForwardMatchesReferencePromptLength63(t *testing.T) {
 	const seqLen = 63
 	xVals := make([]float32, seqLen*int(cfg.HiddenSize))
 	routerVals := make([]float32, seqLen*int(cfg.NumLocalExperts))
-	for i := 0; i < seqLen; i++ {
+	for i := range seqLen {
 		xVals[i*2+0] = float32(i%7)/7 + 0.1
 		xVals[i*2+1] = float32((i*3)%11)/11 - 0.2
 
@@ -1597,7 +1597,7 @@ func TestExpertsForwardMatchesReferencePromptLength63(t *testing.T) {
 	gotVals := materializedFloats(got.AsType(mlx.DTypeFloat32))
 
 	wantVals := make([]float32, 0, len(gotVals))
-	for i := 0; i < seqLen; i++ {
+	for i := range seqLen {
 		wantVals = append(wantVals, referenceExpertsForward(
 			xVals[i*2:(i+1)*2],
 			routerVals[i*3:(i+1)*3],
@@ -1950,7 +1950,7 @@ func TestAttentionForwardMatchesReferenceWithKVCache(t *testing.T) {
 
 	c := cache.NewKVCache()
 	gotVals := make([]float32, 0, len(xVals))
-	for pos := 0; pos < len(xVals)/2; pos++ {
+	for pos := range len(xVals) / 2 {
 		x := mlx.FromValues(xVals[pos*2:(pos+1)*2], 1, 1, 2)
 		got := attn.Forward(x, c, 1, 1, &cfg, 0)
 		if got == nil || !got.Valid() {
@@ -2024,7 +2024,7 @@ func TestAttentionForwardMatchesReferenceWithSlidingWindowCache(t *testing.T) {
 
 	c := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
 	gotVals := make([]float32, 0, len(xVals))
-	for pos := 0; pos < len(xVals)/2; pos++ {
+	for pos := range len(xVals) / 2 {
 		x := mlx.FromValues(xVals[pos*2:(pos+1)*2], 1, 1, 2)
 		got := attn.Forward(x, c, 1, 1, &cfg, 0)
 		if got == nil || !got.Valid() {
@@ -2107,7 +2107,7 @@ func denseTestTensors(t *testing.T, cfg Config) map[string]*mlx.Array {
 		"output.weight":      denseMatrix(int(cfg.VocabSize), int(cfg.HiddenSize), 2),
 	}
 
-	for i := int32(0); i < cfg.NumHiddenLayers; i++ {
+	for i := range cfg.NumHiddenLayers {
 		prefix := fmt.Sprintf("blocks.%d", i)
 		tensors[prefix+".attn_norm.weight"] = denseVector(int(cfg.HiddenSize), 3+float32(i))
 		tensors[prefix+".q_proj.weight"] = denseMatrix(int(cfg.NumAttentionHeads*cfg.HeadDim), int(cfg.HiddenSize), 4+float32(i))
@@ -2251,8 +2251,6 @@ func explicitExpertsForwardFromLoadedWeights(t *testing.T, experts *Experts, cfg
 		}
 	}
 
-	return out
-
 	for pos := range seqLen {
 		selected := make([]routedExpert, int(cfg.NumLocalExperts))
 		for expert := range int(cfg.NumLocalExperts) {
@@ -2346,28 +2344,28 @@ func explicitAttentionForwardFromLoadedWeights(t *testing.T, attn *Attention, cf
 	query := make([][][]float32, seqLen)
 	key := make([][][]float32, seqLen)
 	value := make([][][]float32, seqLen)
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		x := xVals[pos*hidden : (pos+1)*hidden]
 		qVec := affineFlatRef(x, qW, qB, qOut, hidden)
 		kVec := affineFlatRef(x, kW, kB, kvOut, hidden)
 		vVec := affineFlatRef(x, vW, vB, kvOut, hidden)
 
 		query[pos] = make([][]float32, numHeads)
-		for h := 0; h < numHeads; h++ {
+		for h := range numHeads {
 			query[pos][h] = applyRoPEGeneric(qVec[h*headDim:(h+1)*headDim], pos, denoms, concentration)
 		}
 		key[pos] = make([][]float32, numKVHeads)
 		value[pos] = make([][]float32, numKVHeads)
-		for h := 0; h < numKVHeads; h++ {
+		for h := range numKVHeads {
 			key[pos][h] = applyRoPEGeneric(kVec[h*headDim:(h+1)*headDim], pos, denoms, concentration)
 			value[pos][h] = append([]float32(nil), vVec[h*headDim:(h+1)*headDim]...)
 		}
 	}
 
 	out := make([]float32, seqLen*hidden)
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		attnHidden := make([]float32, numHeads*headDim)
-		for h := 0; h < numHeads; h++ {
+		for h := range numHeads {
 			kvHead := h / qMul
 			sink := sinks[h]
 			scores := make([]float32, pos+2)
@@ -2390,7 +2388,7 @@ func explicitAttentionForwardFromLoadedWeights(t *testing.T, attn *Attention, cf
 			}
 			for j := 0; j <= pos; j++ {
 				w := scores[j+1]
-				for d := 0; d < headDim; d++ {
+				for d := range headDim {
 					attnHidden[h*headDim+d] += w * value[j][kvHead][d]
 				}
 			}
@@ -2413,7 +2411,7 @@ func explicitLayerForwardFromLoadedWeights(t *testing.T, layer *Layer, cfg *Conf
 	routerB := materializedFloats(routerLinear.Bias.AsType(mlx.DTypeFloat32))
 
 	attnIn := make([]float32, len(xVals))
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		copy(attnIn[pos*hidden:(pos+1)*hidden], referenceRMSNorm(xVals[pos*hidden:(pos+1)*hidden], attnNormWeight, cfg.RMSNormEps))
 	}
 	attnOut := explicitAttentionForwardFromLoadedWeights(t, layer.Attention, cfg, attnIn)
@@ -2424,12 +2422,12 @@ func explicitLayerForwardFromLoadedWeights(t *testing.T, layer *Layer, cfg *Conf
 	}
 
 	ffnIn := make([]float32, len(postAttn))
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		copy(ffnIn[pos*hidden:(pos+1)*hidden], referenceRMSNorm(postAttn[pos*hidden:(pos+1)*hidden], ffnNormWeight, cfg.RMSNormEps))
 	}
 
 	routerVals := make([]float32, seqLen*int(cfg.NumLocalExperts))
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		row := affineFlatRef(
 			ffnIn[pos*hidden:(pos+1)*hidden],
 			routerW,
@@ -2465,10 +2463,10 @@ func referenceRMSNorm(x, weight []float32, eps float32) []float32 {
 
 func affineFlatRef(x, w, b []float32, outDim, inDim int) []float32 {
 	out := make([]float32, outDim)
-	for o := 0; o < outDim; o++ {
+	for o := range outDim {
 		sum := float32(0)
 		row := w[o*inDim : (o+1)*inDim]
-		for i := 0; i < inDim; i++ {
+		for i := range inDim {
 			sum += row[i] * x[i]
 		}
 		if len(b) > 0 {
@@ -2638,7 +2636,7 @@ func materializedFloats(a *mlx.Array) []float32 {
 
 func identityFlat(n int) []float32 {
 	out := make([]float32, n*n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[i*n+i] = 1
 	}
 	return out
@@ -2662,7 +2660,7 @@ func referenceGPTOSSRoPEDenominators(cfg *Config) []float32 {
 	low := math.Floor(dHalf * math.Log(origCtx/(betaFast*2*math.Pi)) / math.Log(base))
 	high := math.Ceil(dHalf * math.Log(origCtx/(betaSlow*2*math.Pi)) / math.Log(base))
 	out := make([]float32, 0, dims/2)
-	for j := 0; j < dims/2; j++ {
+	for j := range dims / 2 {
 		divisor := math.Pow(base, float64(2*j)/float64(dims))
 		ramp := (float64(j) - low) / (high - low)
 		if ramp < 0 {
@@ -2690,7 +2688,7 @@ func referenceAttentionForward(
 	query := make([][]float32, seqLen)
 	key := make([][]float32, seqLen)
 	value := make([][]float32, seqLen)
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		query[pos] = applyRoPE2D(affineRef(x[pos*2:(pos+1)*2], qW, qB), pos, ropeBase)
 		key[pos] = applyRoPE2D(affineRef(x[pos*2:(pos+1)*2], kW, kB), pos, ropeBase)
 		value[pos] = affineRef(x[pos*2:(pos+1)*2], vW, vB)
@@ -2698,7 +2696,7 @@ func referenceAttentionForward(
 
 	scale := float32(1 / math.Sqrt(2))
 	out := make([]float32, len(x))
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		scores := make([]float32, pos+1)
 		maxScore := float32(math.Inf(-1))
 		for j := 0; j <= pos; j++ {
@@ -2738,7 +2736,7 @@ func referenceAttentionForwardWithSinksScaledRoPE(x []float32, cfg *Config, sink
 	query := make([][]float32, seqLen)
 	key := make([][]float32, seqLen)
 	value := make([][]float32, seqLen)
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		base := append([]float32(nil), x[pos*headDim:(pos+1)*headDim]...)
 		query[pos] = applyRoPEGeneric(base, pos, denoms, concentration)
 		key[pos] = applyRoPEGeneric(base, pos, denoms, concentration)
@@ -2747,7 +2745,7 @@ func referenceAttentionForwardWithSinksScaledRoPE(x []float32, cfg *Config, sink
 
 	scale := float32(1 / math.Sqrt(float64(headDim)))
 	out := make([]float32, len(x))
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		scores := make([]float32, pos+2)
 		maxScore := sink
 		scores[0] = sink
@@ -2770,7 +2768,7 @@ func referenceAttentionForwardWithSinksScaledRoPE(x []float32, cfg *Config, sink
 		hidden := make([]float32, headDim)
 		for j := 0; j <= pos; j++ {
 			score := scores[j+1]
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				hidden[d] += score * value[j][d]
 			}
 		}
@@ -2792,7 +2790,7 @@ func referenceAttentionForwardWindowed(
 	query := make([][]float32, seqLen)
 	key := make([][]float32, seqLen)
 	value := make([][]float32, seqLen)
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		query[pos] = applyRoPE2D(affineRef(x[pos*2:(pos+1)*2], qW, qB), pos, ropeBase)
 		key[pos] = applyRoPE2D(affineRef(x[pos*2:(pos+1)*2], kW, kB), pos, ropeBase)
 		value[pos] = affineRef(x[pos*2:(pos+1)*2], vW, vB)
@@ -2800,7 +2798,7 @@ func referenceAttentionForwardWindowed(
 
 	scale := float32(1 / math.Sqrt(2))
 	out := make([]float32, len(x))
-	for pos := 0; pos < seqLen; pos++ {
+	for pos := range seqLen {
 		start := 0
 		if window > 0 && pos+1 > window {
 			start = pos + 1 - window
@@ -2836,14 +2834,11 @@ func referenceAttentionForwardWindowed(
 	return out
 }
 
-func applyRoPE2D(v []float32, position int, base float32) []float32 {
+func applyRoPE2D(v []float32, position int, _ float32) []float32 {
 	if len(v) != 2 {
 		panic("applyRoPE2D expects length-2 vector")
 	}
 	theta := float64(position)
-	if base <= 0 {
-		base = 10000
-	}
 	c, s := float32(math.Cos(theta)), float32(math.Sin(theta))
 	return []float32{
 		v[0]*c - v[1]*s,

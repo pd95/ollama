@@ -362,24 +362,7 @@ func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 
 // newLayerCreator returns a LayerCreator callback for creating config/JSON layers.
 func newLayerCreator() create.LayerCreator {
-	var generationConfigIsGPTOSS bool
-
 	return func(r io.Reader, mediaType, name string) (create.LayerInfo, error) {
-		if mediaType == "application/vnd.ollama.image.json" && (name == "config.json" || name == "generation_config.json") {
-			data, err := io.ReadAll(r)
-			if err != nil {
-				return create.LayerInfo{}, err
-			}
-			switch name {
-			case "config.json":
-				data = normalizeSourceConfigJSON(data)
-				generationConfigIsGPTOSS = configJSONIsGPTOSS(data)
-			case "generation_config.json":
-				data = normalizeSourceGenerationConfigJSONIfGPTOSS(data, generationConfigIsGPTOSS)
-			}
-			r = bytes.NewReader(data)
-		}
-
 		layer, err := manifest.NewLayer(r, mediaType)
 		if err != nil {
 			return create.LayerInfo{}, err
@@ -392,128 +375,6 @@ func newLayerCreator() create.LayerCreator {
 			Name:      name,
 		}, nil
 	}
-}
-
-func normalizeSourceConfigJSON(data []byte) []byte {
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return data
-	}
-
-	normalizeModelType := func(v any) (string, bool) {
-		s, ok := v.(string)
-		if !ok {
-			return "", false
-		}
-		switch strings.ToLower(s) {
-		case "gpt_oss", "gpt-oss":
-			return "gptoss", true
-		default:
-			return "", false
-		}
-	}
-
-	if normalized, ok := normalizeModelType(cfg["model_type"]); ok {
-		cfg["model_type"] = normalized
-	}
-	if textConfig, ok := cfg["text_config"].(map[string]any); ok {
-		if normalized, ok := normalizeModelType(textConfig["model_type"]); ok {
-			textConfig["model_type"] = normalized
-		}
-		if isGPTOSSModelType(textConfig["model_type"]) {
-			applyGPTOSSSpecialTokenDefaults(textConfig)
-		}
-		cfg["text_config"] = textConfig
-	}
-	if isGPTOSSModelType(cfg["model_type"]) {
-		applyGPTOSSSpecialTokenDefaults(cfg)
-	}
-
-	out, err := json.Marshal(cfg)
-	if err != nil {
-		return data
-	}
-	return out
-}
-
-func normalizeSourceGenerationConfigJSON(data []byte) []byte {
-	return normalizeSourceGenerationConfigJSONIfGPTOSS(data, true)
-}
-
-func normalizeSourceGenerationConfigJSONIfGPTOSS(data []byte, isGPTOSS bool) []byte {
-	if !isGPTOSS {
-		return data
-	}
-
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return data
-	}
-
-	applyGPTOSSSpecialTokenDefaults(cfg)
-
-	out, err := json.Marshal(cfg)
-	if err != nil {
-		return data
-	}
-	return out
-}
-
-func applyGPTOSSSpecialTokenDefaults(cfg map[string]any) {
-	if cfg == nil {
-		return
-	}
-
-	cfg["bos_token_id"] = float64(199998)
-	cfg["eos_token_id"] = []any{
-		float64(199999),
-		float64(200002),
-		float64(200012),
-	}
-	cfg["add_bos_token"] = false
-	cfg["add_eos_token"] = false
-}
-
-func isGPTOSSModelType(v any) bool {
-	s, ok := v.(string)
-	if !ok {
-		return false
-	}
-	switch strings.ToLower(s) {
-	case "gptoss", "gpt_oss", "gpt-oss":
-		return true
-	default:
-		return false
-	}
-}
-
-func configJSONIsGPTOSS(data []byte) bool {
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return false
-	}
-
-	if textConfig, ok := cfg["text_config"].(map[string]any); ok && isGPTOSSModelType(textConfig["model_type"]) {
-		return true
-	}
-
-	if isGPTOSSModelType(cfg["model_type"]) {
-		return true
-	}
-
-	architectures, ok := cfg["architectures"].([]any)
-	if !ok {
-		return false
-	}
-	for _, arch := range architectures {
-		if s, ok := arch.(string); ok {
-			if strings.EqualFold(s, "GptOssForCausalLM") {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 // newTensorLayerCreator returns a QuantizingTensorLayerCreator callback for creating tensor layers.
@@ -597,20 +458,16 @@ func newPackedTensorLayerCreator() create.PackedTensorLayerCreator {
 			}
 			blobReader = bytes.NewReader(blobData)
 		} else {
-			// Build unquantized packed blob directly from the original tensor readers
-			// when available to avoid extracting raw bytes and re-wrapping them.
-			tds := make([]*safetensors.TensorData, 0, len(tensors))
+			// Build unquantized packed blob using streaming reader
+			// Extract raw tensor data from safetensors-wrapped readers
+			var tds []*safetensors.TensorData
 			for _, t := range tensors {
-				if t.Raw != nil {
-					tds = append(tds, t.Raw)
-					continue
-				}
-
 				rawData, err := safetensors.ExtractRawFromSafetensors(t.Reader)
 				if err != nil {
 					return create.LayerInfo{}, fmt.Errorf("failed to extract tensor %s: %w", t.Name, err)
 				}
-				tds = append(tds, safetensors.NewTensorDataFromBytes(t.Name, t.Dtype, t.Shape, rawData))
+				td := safetensors.NewTensorDataFromBytes(t.Name, t.Dtype, t.Shape, rawData)
+				tds = append(tds, td)
 			}
 			blobReader = safetensors.BuildPackedSafetensorsReader(tds)
 		}
@@ -711,35 +568,6 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 	}
 }
 
-func inferModelFamily(modelDir string) string {
-	var cfg struct {
-		Architectures []string `json:"architectures"`
-		ModelType     string   `json:"model_type"`
-	}
-
-	data, err := os.ReadFile(filepath.Join(modelDir, "config.json"))
-	if err != nil {
-		return ""
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return ""
-	}
-
-	for _, arch := range cfg.Architectures {
-		archLower := strings.ToLower(arch)
-		if strings.Contains(archLower, "gptoss") || strings.Contains(archLower, "gpt-oss") {
-			return "gptoss"
-		}
-	}
-
-	typeLower := strings.ToLower(cfg.ModelType)
-	if strings.Contains(typeLower, "gptoss") || strings.Contains(typeLower, "gpt_oss") || strings.Contains(typeLower, "gpt-oss") {
-		return "gptoss"
-	}
-
-	return ""
-}
-
 func resolveParserName(mf *ModelfileConfig, inferred string) string {
 	if mf != nil && mf.Parser != "" {
 		return mf.Parser
@@ -754,6 +582,38 @@ func resolveRendererName(mf *ModelfileConfig, inferred string) string {
 	}
 
 	return inferred
+}
+
+func inferModelFamily(modelDir string) string {
+	configPath := filepath.Join(modelDir, "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+
+	var cfg struct {
+		Architectures []string `json:"architectures"`
+		ModelType     string   `json:"model_type"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+
+	for _, arch := range cfg.Architectures {
+		if isGPTOSSName(arch) {
+			return "gptoss"
+		}
+	}
+	if isGPTOSSName(cfg.ModelType) {
+		return "gptoss"
+	}
+
+	return ""
+}
+
+func isGPTOSSName(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "gptoss") || strings.Contains(s, "gpt_oss") || strings.Contains(s, "gpt-oss")
 }
 
 // createModelfileLayers creates layers for template, system, and license from Modelfile config.
@@ -906,6 +766,9 @@ func getParserName(modelDir string) string {
 		if strings.Contains(archLower, "laguna") {
 			return "laguna"
 		}
+		if strings.Contains(archLower, "gptoss") || strings.Contains(archLower, "gpt_oss") || strings.Contains(archLower, "gpt-oss") {
+			return "harmony"
+		}
 		if strings.Contains(archLower, "glm4") || strings.Contains(archLower, "glm-4") {
 			return "glm-4.7"
 		}
@@ -925,6 +788,9 @@ func getParserName(modelDir string) string {
 		typeLower := strings.ToLower(cfg.ModelType)
 		if strings.Contains(typeLower, "laguna") {
 			return "laguna"
+		}
+		if strings.Contains(typeLower, "gptoss") || strings.Contains(typeLower, "gpt_oss") || strings.Contains(typeLower, "gpt-oss") {
+			return "harmony"
 		}
 		if strings.Contains(typeLower, "glm4") || strings.Contains(typeLower, "glm-4") {
 			return "glm-4.7"
@@ -966,6 +832,9 @@ func getRendererName(modelDir string) string {
 		if strings.Contains(archLower, "laguna") {
 			return "laguna"
 		}
+		if strings.Contains(archLower, "gptoss") || strings.Contains(archLower, "gpt_oss") || strings.Contains(archLower, "gpt-oss") {
+			return ""
+		}
 		if strings.Contains(archLower, "gemma4") {
 			return "gemma4"
 		}
@@ -985,6 +854,9 @@ func getRendererName(modelDir string) string {
 		typeLower := strings.ToLower(cfg.ModelType)
 		if strings.Contains(typeLower, "laguna") {
 			return "laguna"
+		}
+		if strings.Contains(typeLower, "gptoss") || strings.Contains(typeLower, "gpt_oss") || strings.Contains(typeLower, "gpt-oss") {
+			return ""
 		}
 		if strings.Contains(typeLower, "gemma4") {
 			return "gemma4"

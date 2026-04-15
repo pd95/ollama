@@ -289,49 +289,6 @@ func parseConfig(configData []byte) (Config, error) {
 	return cfg, nil
 }
 
-func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
-	if m == nil || m.Config == nil || m.EmbedTokens == nil || m.Norm == nil || b == nil || b.InputIDs == nil {
-		return nil
-	}
-
-	dims := b.InputIDs.Dims()
-	if len(dims) != 2 {
-		panic(fmt.Sprintf("gpt-oss forward requires 2D token input, got %v", dims))
-	}
-
-	batchSize, seqLen := dims[0], dims[1]
-	return m.forwardDense(b.InputIDs, caches, batchSize, seqLen)
-}
-
-func (m *Model) forwardDense(tokens *mlx.Array, caches []cache.Cache, batchSize, seqLen int) *mlx.Array {
-	h := m.EmbedTokens.Forward(tokens)
-	for i, layer := range m.Layers {
-		var c cache.Cache
-		if caches != nil && i < len(caches) {
-			c = caches[i]
-		}
-		h = layer.Forward(h, c, batchSize, seqLen, m.Config, i)
-	}
-
-	return m.Norm.Forward(h, m.RMSNormEps)
-}
-
-// Unembed projects hidden states back into vocabulary space.
-func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
-	if m == nil || m.LMHead == nil || x == nil {
-		return nil
-	}
-	dims := x.Dims()
-	if len(dims) == 3 && dims[0] == 1 && dims[1] > 1 {
-		steps := make([]*mlx.Array, 0, dims[1])
-		for pos := 0; pos < dims[1]; pos++ {
-			steps = append(steps, m.LMHead.Forward(sliceSequence(x, pos)))
-		}
-		return mlx.Concatenate(steps, 1)
-	}
-	return m.LMHead.Forward(x)
-}
-
 // NumLayers returns the configured layer count.
 func (m *Model) NumLayers() int {
 	if m == nil || m.Config == nil {
@@ -373,241 +330,6 @@ func (m *Model) NewCaches() []cache.Cache {
 	return caches
 }
 
-func (l *Layer) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
-	if l == nil || l.Attention == nil || l.AttentionNorm == nil || l.FFNNorm == nil || l.Router == nil || l.Experts == nil || x == nil || cfg == nil {
-		panic("gpt-oss layer is not fully loaded")
-	}
-	residual := x
-	x = l.AttentionNorm.Forward(x, cfg.RMSNormEps)
-	x = l.Attention.Forward(x, c, batchSize, seqLen, cfg, layerIndex)
-	if x == nil || !x.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention output is invalid", layerIndex))
-	}
-
-	h := residual.Add(x)
-	if h == nil || !h.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d residual add output is invalid", layerIndex))
-	}
-
-	x = l.FFNNorm.Forward(h, cfg.RMSNormEps)
-	router := l.Router.Forward(x)
-	if router == nil || !router.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d router output is invalid", layerIndex))
-	}
-
-	x = l.Experts.Forward(x, router, cfg, layerIndex)
-	if x == nil || !x.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d expert output is invalid", layerIndex))
-	}
-
-	return h.Add(x)
-}
-
-func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
-	if a == nil || a.QProj == nil || a.KProj == nil || a.VProj == nil || a.OProj == nil || x == nil || cfg == nil {
-		return x
-	}
-	if c != nil && batchSize == 1 && seqLen > 1 {
-		steps := make([]*mlx.Array, 0, seqLen)
-		for pos := 0; pos < seqLen; pos++ {
-			steps = append(steps, a.Forward(sliceSequence(x, pos), c, 1, 1, cfg, layerIndex))
-		}
-		return mlx.Concatenate(steps, 1)
-	}
-
-	query := a.QProj.Forward(x)
-	key := a.KProj.Forward(x)
-	value := a.VProj.Forward(x)
-	if query == nil || key == nil || value == nil || !query.Valid() || !key.Valid() || !value.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention projections are invalid", layerIndex))
-	}
-
-	batchDim := int32(batchSize)
-	seq := int32(seqLen)
-	numHeads := int32(cfg.NumAttentionHeads)
-	numKVHeads := int32(cfg.NumKeyValueHeads)
-	headDim := int32(cfg.HeadDim)
-
-	query = mlx.Reshape(query, batchDim, seq, numHeads, headDim)
-	key = mlx.Reshape(key, batchDim, seq, numKVHeads, headDim)
-	value = mlx.Reshape(value, batchDim, seq, numKVHeads, headDim)
-	if query == nil || key == nil || value == nil || !query.Valid() || !key.Valid() || !value.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention reshape is invalid", layerIndex))
-	}
-
-	query = mlx.Transpose(query, 0, 2, 1, 3)
-	key = mlx.Transpose(key, 0, 2, 1, 3)
-	value = mlx.Transpose(value, 0, 2, 1, 3)
-	if query == nil || key == nil || value == nil || !query.Valid() || !key.Valid() || !value.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention transpose is invalid", layerIndex))
-	}
-
-	offset := 0
-	if c != nil {
-		offset = c.Offset()
-	}
-	positions := mlx.FromValues([]int32{int32(offset)}, 1)
-	attentionScale := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
-	if a.RoPEFreqs != nil && a.RoPEFreqs.Valid() {
-		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
-		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
-		attentionScale *= yarnConcentration(cfg) * yarnConcentration(cfg)
-	} else {
-		ropeBase, ropeScale, _ := cfg.RopeParameters()
-		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
-		key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
-	}
-	if query == nil || key == nil || !query.Valid() || !key.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention RoPE is invalid", layerIndex))
-	}
-
-	if c != nil {
-		attnCache, ok := c.(cache.Attention)
-		if !ok {
-			panic(fmt.Sprintf("gpt-oss layer %d cache does not support attention", layerIndex))
-		}
-		history := attnCache.Update(&batch.Batch{SeqOffsets: []int32{int32(offset)}}, key, value)
-		key, value = history.K(), history.V()
-	}
-	if key == nil || value == nil || !key.Valid() || !value.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention cache update is invalid", layerIndex))
-	}
-
-	attention := mlx.ScaledDotProductAttentionWithSinks(
-		query,
-		key,
-		value,
-		attentionScale,
-		"causal",
-		nil,
-		a.Sinks,
-	)
-	if attention == nil || !attention.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention sdpa is invalid", layerIndex))
-	}
-	attention = mlx.Transpose(attention, 0, 2, 1, 3)
-	attention = mlx.Reshape(attention, batchDim, seq, numHeads*headDim)
-	if attention == nil || !attention.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention output reshape is invalid", layerIndex))
-	}
-	attention = a.OProj.Forward(attention)
-	if attention == nil || !attention.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention output projection is invalid", layerIndex))
-	}
-	return attention
-}
-
-func (p *ExpertProjection) Forward(x, indices *mlx.Array, sorted bool) *mlx.Array {
-	if p == nil || p.Weight == nil || x == nil || indices == nil {
-		return nil
-	}
-
-	if x.DType() != p.Weight.DType() {
-		x = x.AsType(p.Weight.DType())
-	}
-	out := mlx.GatherMM(x, p.Weight, nil, indices, sorted)
-	if p.Bias == nil || !p.Bias.Valid() {
-		return out
-	}
-
-	bias := p.Bias.TakeAxis(indices, 0)
-	bias = mlx.ExpandDims(bias, 2)
-	return mlx.Add(out, bias)
-}
-
-func (p *ExpertProjection) ForwardExplicit(x *mlx.Array, experts []int, outDim int) *mlx.Array {
-	if p == nil || p.Weight == nil || x == nil || len(experts) == 0 {
-		return nil
-	}
-
-	x2d := mlx.Reshape(x.AsType(mlx.DTypeFloat32), 1, int32(x.Dim(x.NumDims()-1)))
-	parts := make([]*mlx.Array, 0, len(experts))
-	for _, expert := range experts {
-		w := mlx.SliceStartStop(p.Weight, []int32{int32(expert), 0, 0}, []int32{int32(expert + 1), int32(p.Weight.Dim(1)), int32(p.Weight.Dim(2))})
-		w = mlx.Squeeze(w, 0).AsType(mlx.DTypeFloat32)
-		out := mlx.Matmul(x2d, w)
-		if p.Bias != nil && p.Bias.Valid() {
-			bias := mlx.SliceStartStop(p.Bias, []int32{int32(expert), 0}, []int32{int32(expert + 1), int32(outDim)})
-			bias = mlx.Squeeze(bias, 0).AsType(mlx.DTypeFloat32)
-			out = mlx.Add(out, bias)
-		}
-		out = mlx.Reshape(out, 1, 1, 1, int32(outDim))
-		parts = append(parts, out)
-	}
-	return mlx.Concatenate(parts, 1)
-}
-
-func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *mlx.Array {
-	if e == nil || e.GateUp == nil || e.GateUp.Gate == nil || e.GateUp.Up == nil || e.Down == nil || x == nil || router == nil || cfg == nil {
-		panic("gpt-oss expert path is not fully loaded")
-	}
-	if !x.Valid() || !router.Valid() {
-		panic("gpt-oss expert path received invalid tensors")
-	}
-
-	dims := x.Dims()
-	if len(dims) != 3 {
-		panic(fmt.Sprintf("gpt-oss expert path expects 3D hidden states, got %v", dims))
-	}
-
-	B, L := int32(dims[0]), int32(dims[1])
-	topK := cfg.NumExpertsPerTok
-
-	neg := mlx.Neg(router)
-	inds := mlx.Argpartition(neg, int(topK)-1, -1)
-	shape := inds.Dims()
-	inds = mlx.SliceStartStop(inds, []int32{0, 0, 0}, []int32{int32(shape[0]), int32(shape[1]), topK})
-
-	scores := mlx.TakeAlongAxis(router, inds, -1)
-	scores = mlx.SoftmaxAxis(scores, -1, true)
-
-	var xFlat *mlx.Array
-	if B == 1 && L == 1 {
-		xFlat = mlx.Reshape(x, 1, 1, 1, cfg.HiddenSize)
-	} else {
-		xExpanded := mlx.ExpandDims(mlx.ExpandDims(x, -2), -2)
-		xFlat = mlx.Reshape(xExpanded, B*L, 1, 1, cfg.HiddenSize)
-	}
-	idxFlat := mlx.Reshape(inds, B*L, topK)
-
-	doSort := B*L >= 16
-	var invOrder *mlx.Array
-	n := B * L * topK
-	if doSort {
-		idxAll := mlx.Flatten(idxFlat)
-		order := mlx.Argsort(idxAll, 0)
-		invOrder = mlx.Argsort(order, 0)
-		xFlat = mlx.ExpandDims(mlx.Take(mlx.Squeeze(xFlat, 1), mlx.FloorDivideScalar(order, topK), 0), 1)
-		idxFlat = mlx.Reshape(mlx.Take(idxAll, order, 0), n, 1)
-	}
-
-	gate := e.GateUp.Gate.Forward(xFlat, idxFlat, doSort)
-	up := e.GateUp.Up.Forward(xFlat, idxFlat, doSort)
-	if gate == nil || !gate.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d expert gate projection is invalid", layerIndex))
-	}
-	if up == nil || !up.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d expert up projection is invalid", layerIndex))
-	}
-
-	hidden := swiGLUAlphaLimit(gate, up)
-	down := e.Down.Forward(hidden, idxFlat, doSort)
-	if down == nil || !down.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d expert down projection is invalid", layerIndex))
-	}
-
-	if doSort {
-		down = mlx.Reshape(
-			mlx.Take(mlx.Squeeze(mlx.Squeeze(down, 2), 1), invOrder, 0),
-			B*L, topK, cfg.HiddenSize,
-		)
-	} else {
-		down = mlx.Squeeze(down, 2)
-	}
-	down = mlx.Reshape(down, B, L, topK, cfg.HiddenSize)
-	return mlx.Sum(mlx.Mul(down, mlx.ExpandDims(scores, -1)), 2, false)
-}
-
 func swiGLUAlphaLimit(gate, up *mlx.Array) *mlx.Array {
 	if gate == nil || up == nil {
 		return nil
@@ -628,15 +350,6 @@ func swiGLUAlphaLimit(gate, up *mlx.Array) *mlx.Array {
 
 func sliceSequence(x *mlx.Array, pos int) *mlx.Array {
 	return mlx.SliceStartStop(x, []int32{0, int32(pos), 0}, []int32{1, int32(pos + 1), int32(x.Dim(2))})
-}
-
-func materializedInts(a *mlx.Array) []int {
-	if a == nil || !a.Valid() {
-		return nil
-	}
-	cloned := a.Clone()
-	mlx.Eval(cloned)
-	return cloned.Ints()
 }
 
 func expertSlice(t *mlx.Array, expert int32) *mlx.Array {
@@ -714,7 +427,7 @@ func buildGPTOSSRoPEFreqs(cfg *Config) *mlx.Array {
 	}
 
 	freqs := make([]float32, 0, dims/2)
-	for j := 0; j < dims/2; j++ {
+	for j := range dims / 2 {
 		ramp := (float64(j) - low) / (high - low)
 		if ramp < 0 {
 			ramp = 0
@@ -910,7 +623,7 @@ func loadExpertPair(tensors map[string]*mlx.Array, layer int, prefix string, wan
 	upWeights := make([]*mlx.Array, 0, cfg.NumLocalExperts)
 	gateBiases := make([]*mlx.Array, 0, cfg.NumLocalExperts)
 	upBiases := make([]*mlx.Array, 0, cfg.NumLocalExperts)
-	for e := int32(0); e < cfg.NumLocalExperts; e++ {
+	for e := range cfg.NumLocalExperts {
 		expertWeight := expertSlice(weight, e)
 		expertBias := expertSlice(bias, e)
 
@@ -993,7 +706,7 @@ func loadExpertProjection(tensors map[string]*mlx.Array, layer int, prefix strin
 
 	weights := make([]*mlx.Array, 0, cfg.NumLocalExperts)
 	biases := make([]*mlx.Array, 0, cfg.NumLocalExperts)
-	for e := int32(0); e < cfg.NumLocalExperts; e++ {
+	for e := range cfg.NumLocalExperts {
 		expertWeight := expertSlice(weight, e)
 		expertBias := expertSlice(bias, e)
 
@@ -1206,4 +919,282 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	}
 
 	return nil
+}
+
+func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
+	if m == nil || m.Config == nil || m.EmbedTokens == nil || m.Norm == nil || b == nil || b.InputIDs == nil {
+		return nil
+	}
+
+	dims := b.InputIDs.Dims()
+	if len(dims) != 2 {
+		panic(fmt.Sprintf("gpt-oss forward requires 2D token input, got %v", dims))
+	}
+
+	batchSize, seqLen := dims[0], dims[1]
+	return m.forwardDense(b.InputIDs, caches, batchSize, seqLen)
+}
+
+func (m *Model) forwardDense(tokens *mlx.Array, caches []cache.Cache, batchSize, seqLen int) *mlx.Array {
+	h := m.EmbedTokens.Forward(tokens)
+	for i, layer := range m.Layers {
+		var c cache.Cache
+		if caches != nil && i < len(caches) {
+			c = caches[i]
+		}
+		h = layer.Forward(h, c, batchSize, seqLen, m.Config, i)
+	}
+
+	return m.Norm.Forward(h, m.RMSNormEps)
+}
+
+// Unembed projects hidden states back into vocabulary space.
+func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
+	if m == nil || m.LMHead == nil || x == nil {
+		return nil
+	}
+	dims := x.Dims()
+	if len(dims) == 3 && dims[0] == 1 && dims[1] > 1 {
+		steps := make([]*mlx.Array, 0, dims[1])
+		for pos := range dims[1] {
+			steps = append(steps, m.LMHead.Forward(sliceSequence(x, pos)))
+		}
+		return mlx.Concatenate(steps, 1)
+	}
+	return m.LMHead.Forward(x)
+}
+
+func (l *Layer) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
+	if l == nil || l.Attention == nil || l.AttentionNorm == nil || l.FFNNorm == nil || l.Router == nil || l.Experts == nil || x == nil || cfg == nil {
+		panic("gpt-oss layer is not fully loaded")
+	}
+	residual := x
+	x = l.AttentionNorm.Forward(x, cfg.RMSNormEps)
+	x = l.Attention.Forward(x, c, batchSize, seqLen, cfg, layerIndex)
+	if x == nil || !x.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention output is invalid", layerIndex))
+	}
+
+	h := residual.Add(x)
+	if h == nil || !h.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d residual add output is invalid", layerIndex))
+	}
+
+	x = l.FFNNorm.Forward(h, cfg.RMSNormEps)
+	router := l.Router.Forward(x)
+	if router == nil || !router.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d router output is invalid", layerIndex))
+	}
+
+	x = l.Experts.Forward(x, router, cfg, layerIndex)
+	if x == nil || !x.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d expert output is invalid", layerIndex))
+	}
+
+	return h.Add(x)
+}
+
+func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
+	if a == nil || a.QProj == nil || a.KProj == nil || a.VProj == nil || a.OProj == nil || x == nil || cfg == nil {
+		return x
+	}
+	if c != nil && batchSize == 1 && seqLen > 1 {
+		steps := make([]*mlx.Array, 0, seqLen)
+		for pos := range seqLen {
+			steps = append(steps, a.Forward(sliceSequence(x, pos), c, 1, 1, cfg, layerIndex))
+		}
+		return mlx.Concatenate(steps, 1)
+	}
+
+	query := a.QProj.Forward(x)
+	key := a.KProj.Forward(x)
+	value := a.VProj.Forward(x)
+	if query == nil || key == nil || value == nil || !query.Valid() || !key.Valid() || !value.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention projections are invalid", layerIndex))
+	}
+
+	batchDim := int32(batchSize)
+	seq := int32(seqLen)
+	numHeads := cfg.NumAttentionHeads
+	numKVHeads := cfg.NumKeyValueHeads
+	headDim := cfg.HeadDim
+
+	query = mlx.Reshape(query, batchDim, seq, numHeads, headDim)
+	key = mlx.Reshape(key, batchDim, seq, numKVHeads, headDim)
+	value = mlx.Reshape(value, batchDim, seq, numKVHeads, headDim)
+	if query == nil || key == nil || value == nil || !query.Valid() || !key.Valid() || !value.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention reshape is invalid", layerIndex))
+	}
+
+	query = mlx.Transpose(query, 0, 2, 1, 3)
+	key = mlx.Transpose(key, 0, 2, 1, 3)
+	value = mlx.Transpose(value, 0, 2, 1, 3)
+	if query == nil || key == nil || value == nil || !query.Valid() || !key.Valid() || !value.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention transpose is invalid", layerIndex))
+	}
+
+	offset := 0
+	if c != nil {
+		offset = c.Offset()
+	}
+	positions := mlx.FromValues([]int32{int32(offset)}, 1)
+	attentionScale := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
+	if a.RoPEFreqs != nil && a.RoPEFreqs.Valid() {
+		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
+		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
+		attentionScale *= yarnConcentration(cfg) * yarnConcentration(cfg)
+	} else {
+		ropeBase, ropeScale, _ := cfg.RopeParameters()
+		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
+		key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
+	}
+	if query == nil || key == nil || !query.Valid() || !key.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention RoPE is invalid", layerIndex))
+	}
+
+	if c != nil {
+		attnCache, ok := c.(cache.Attention)
+		if !ok {
+			panic(fmt.Sprintf("gpt-oss layer %d cache does not support attention", layerIndex))
+		}
+		history := attnCache.Update(&batch.Batch{SeqOffsets: []int32{int32(offset)}}, key, value)
+		key, value = history.K(), history.V()
+	}
+	if key == nil || value == nil || !key.Valid() || !value.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention cache update is invalid", layerIndex))
+	}
+
+	attention := mlx.ScaledDotProductAttentionWithSinks(
+		query,
+		key,
+		value,
+		attentionScale,
+		"causal",
+		nil,
+		a.Sinks,
+	)
+	if attention == nil || !attention.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention sdpa is invalid", layerIndex))
+	}
+	attention = mlx.Transpose(attention, 0, 2, 1, 3)
+	attention = mlx.Reshape(attention, batchDim, seq, numHeads*headDim)
+	if attention == nil || !attention.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention output reshape is invalid", layerIndex))
+	}
+	attention = a.OProj.Forward(attention)
+	if attention == nil || !attention.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d attention output projection is invalid", layerIndex))
+	}
+	return attention
+}
+
+func (p *ExpertProjection) Forward(x, indices *mlx.Array, sorted bool) *mlx.Array {
+	if p == nil || p.Weight == nil || x == nil || indices == nil {
+		return nil
+	}
+
+	if x.DType() != p.Weight.DType() {
+		x = x.AsType(p.Weight.DType())
+	}
+	out := mlx.GatherMM(x, p.Weight, nil, indices, sorted)
+	if p.Bias == nil || !p.Bias.Valid() {
+		return out
+	}
+
+	bias := p.Bias.TakeAxis(indices, 0)
+	bias = mlx.ExpandDims(bias, 2)
+	return mlx.Add(out, bias)
+}
+
+func (p *ExpertProjection) ForwardExplicit(x *mlx.Array, experts []int, outDim int) *mlx.Array {
+	if p == nil || p.Weight == nil || x == nil || len(experts) == 0 {
+		return nil
+	}
+
+	x2d := mlx.Reshape(x.AsType(mlx.DTypeFloat32), 1, int32(x.Dim(x.NumDims()-1)))
+	parts := make([]*mlx.Array, 0, len(experts))
+	for _, expert := range experts {
+		w := mlx.SliceStartStop(p.Weight, []int32{int32(expert), 0, 0}, []int32{int32(expert + 1), int32(p.Weight.Dim(1)), int32(p.Weight.Dim(2))})
+		w = mlx.Squeeze(w, 0).AsType(mlx.DTypeFloat32)
+		out := mlx.Matmul(x2d, w)
+		if p.Bias != nil && p.Bias.Valid() {
+			bias := mlx.SliceStartStop(p.Bias, []int32{int32(expert), 0}, []int32{int32(expert + 1), int32(outDim)})
+			bias = mlx.Squeeze(bias, 0).AsType(mlx.DTypeFloat32)
+			out = mlx.Add(out, bias)
+		}
+		out = mlx.Reshape(out, 1, 1, 1, int32(outDim))
+		parts = append(parts, out)
+	}
+	return mlx.Concatenate(parts, 1)
+}
+
+func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *mlx.Array {
+	if e == nil || e.GateUp == nil || e.GateUp.Gate == nil || e.GateUp.Up == nil || e.Down == nil || x == nil || router == nil || cfg == nil {
+		panic("gpt-oss expert path is not fully loaded")
+	}
+	if !x.Valid() || !router.Valid() {
+		panic("gpt-oss expert path received invalid tensors")
+	}
+
+	dims := x.Dims()
+	if len(dims) != 3 {
+		panic(fmt.Sprintf("gpt-oss expert path expects 3D hidden states, got %v", dims))
+	}
+
+	B, L := int32(dims[0]), int32(dims[1])
+	topK := cfg.NumExpertsPerTok
+
+	neg := mlx.Neg(router)
+	inds := mlx.Argpartition(neg, int(topK)-1, -1)
+	shape := inds.Dims()
+	inds = mlx.SliceStartStop(inds, []int32{0, 0, 0}, []int32{int32(shape[0]), int32(shape[1]), topK})
+
+	scores := mlx.TakeAlongAxis(router, inds, -1)
+	scores = mlx.SoftmaxAxis(scores, -1, true)
+
+	var xFlat *mlx.Array
+	if B == 1 && L == 1 {
+		xFlat = mlx.Reshape(x, 1, 1, 1, cfg.HiddenSize)
+	} else {
+		xExpanded := mlx.ExpandDims(mlx.ExpandDims(x, -2), -2)
+		xFlat = mlx.Reshape(xExpanded, B*L, 1, 1, cfg.HiddenSize)
+	}
+	idxFlat := mlx.Reshape(inds, B*L, topK)
+
+	doSort := B*L >= 16
+	var invOrder *mlx.Array
+	n := B * L * topK
+	if doSort {
+		idxAll := mlx.Flatten(idxFlat)
+		order := mlx.Argsort(idxAll, 0)
+		invOrder = mlx.Argsort(order, 0)
+		xFlat = mlx.ExpandDims(mlx.Take(mlx.Squeeze(xFlat, 1), mlx.FloorDivideScalar(order, topK), 0), 1)
+		idxFlat = mlx.Reshape(mlx.Take(idxAll, order, 0), n, 1)
+	}
+
+	gate := e.GateUp.Gate.Forward(xFlat, idxFlat, doSort)
+	up := e.GateUp.Up.Forward(xFlat, idxFlat, doSort)
+	if gate == nil || !gate.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d expert gate projection is invalid", layerIndex))
+	}
+	if up == nil || !up.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d expert up projection is invalid", layerIndex))
+	}
+
+	hidden := swiGLUAlphaLimit(gate, up)
+	down := e.Down.Forward(hidden, idxFlat, doSort)
+	if down == nil || !down.Valid() {
+		panic(fmt.Sprintf("gpt-oss layer %d expert down projection is invalid", layerIndex))
+	}
+
+	if doSort {
+		down = mlx.Reshape(
+			mlx.Take(mlx.Squeeze(mlx.Squeeze(down, 2), 1), invOrder, 0),
+			B*L, topK, cfg.HiddenSize,
+		)
+	} else {
+		down = mlx.Squeeze(down, 2)
+	}
+	down = mlx.Reshape(down, B, L, topK, cfg.HiddenSize)
+	return mlx.Sum(mlx.Mul(down, mlx.ExpandDims(scores, -1)), 2, false)
 }
