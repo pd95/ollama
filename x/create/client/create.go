@@ -677,7 +677,10 @@ func supportsThinking(modelDir string) bool {
 		return false
 	}
 
-	// Check architectures that support thinking
+	// Keep these in the normalized identifier spellings we actually observe in
+	// config.json. The parser/renderer helpers also accept "gpt-oss" when they
+	// inspect free-form architecture strings, but supportsThinking only needs to
+	// match the persisted model_type / architecture identifiers.
 	thinkingArchitectures := []string{
 		"gptoss",   // gpt-oss models
 		"gpt_oss",  // HF model_type spelling
