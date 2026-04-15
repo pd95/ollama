@@ -780,13 +780,60 @@ func validateLayerTensorDType(layer int, name string, t *mlx.Array, want mlx.DTy
 	return nil
 }
 
-func loadLinearLayer(tensors map[string]*mlx.Array, linears model.LinearFactory, layer int, path string, wantOut, wantIn int, wantExpr string) (nn.LinearLayer, error) {
+func validateLinearLayerShape(
+	layer int,
+	tensors map[string]*mlx.Array,
+	path string,
+	wantOut, wantIn int,
+	wantExpr string,
+	cfg *Config,
+) error {
 	weightName := path + ".weight"
 	weight, err := requireTensor(tensors, weightName)
 	if err != nil {
-		return nil, fmt.Errorf("layer %d: %w", layer, err)
+		return fmt.Errorf("layer %d: %w", layer, err)
 	}
-	if err := validateLayerTensorShape(layer, weightName, weight, []int{wantOut, wantIn}, wantExpr); err != nil {
+
+	scales := tensors[weightName+"_scale"]
+	if scales == nil {
+		return validateLayerTensorShape(layer, weightName, weight, []int{wantOut, wantIn}, wantExpr)
+	}
+
+	if len(weight.Dims()) != 2 {
+		return fmt.Errorf("layer %d: tensor %q dims %v, want quantized matrix for %s", layer, weightName, weight.Dims(), wantExpr)
+	}
+	if weight.Dim(0) != wantOut {
+		return fmt.Errorf("layer %d: tensor %q output dim %d, want %d (%s)", layer, weightName, weight.Dim(0), wantOut, wantExpr)
+	}
+
+	_, bits, mode := model.ResolveLinearQuantParams(
+		cfg.QuantGroupSize,
+		cfg.QuantBits,
+		cfg.QuantMode,
+		cfg.TensorQuant,
+		weightName,
+		weight,
+		scales,
+	)
+	if mode == "affine" {
+		if _, inferredBits, ok := model.InferAffineQuantParamsFromShapes(weight, scales, bits); !ok || inferredBits != bits {
+			return fmt.Errorf("layer %d: tensor %q has unsupported affine quantized shapes %v / %v for %s", layer, weightName, weight.Dims(), scales.Dims(), wantExpr)
+		}
+	}
+
+	return nil
+}
+
+func loadLinearLayer(tensors map[string]*mlx.Array, linears model.LinearFactory, cfg *Config, layer int, path string, wantOut, wantIn int, wantExpr string) (nn.LinearLayer, error) {
+	if err := validateLinearLayerShape(
+		layer,
+		tensors,
+		path,
+		wantOut,
+		wantIn,
+		wantExpr,
+		cfg,
+	); err != nil {
 		return nil, err
 	}
 
@@ -801,7 +848,10 @@ func loadLinearLayer(tensors map[string]*mlx.Array, linears model.LinearFactory,
 
 	layerLinear := linears.Make(path)
 	if layerLinear == nil {
-		return nil, fmt.Errorf("layer %d: failed to construct linear layer from %q", layer, weightName)
+		return nil, fmt.Errorf("layer %d: failed to construct linear layer from %q", layer, path+".weight")
+	}
+	if got := layerLinear.OutputDim(); int(got) != wantOut {
+		return nil, fmt.Errorf("layer %d: linear %q output dim = %d, want %d (%s)", layer, path, got, wantOut, wantExpr)
 	}
 	return layerLinear, nil
 }
@@ -1000,16 +1050,39 @@ func loadDirectExpertProjection(tensors map[string]*mlx.Array, layer int, prefix
 		return nil, fmt.Errorf("layer %d: missing direct expert tensor %q or %q", layer, weightName, biasName)
 	}
 
-	if err := validateLayerTensorShape(layer, weightName, weight, []int{int(cfg.NumLocalExperts), wantIn, wantOut}, fmt.Sprintf("num_local_experts x in x out for %s", prefix)); err != nil {
-		return nil, err
-	}
 	if err := validateLayerTensorShape(layer, biasName, bias, []int{int(cfg.NumLocalExperts), wantOut}, fmt.Sprintf("num_local_experts x out bias for %s", prefix)); err != nil {
 		return nil, err
 	}
-	if err := validateLayerTensorDType(layer, weightName, weight, mlx.DTypeBFloat16, "runtime-ready offline expert weights"); err != nil {
+	if err := validateLayerTensorDType(layer, biasName, bias, mlx.DTypeBFloat16, "runtime-ready offline expert bias"); err != nil {
 		return nil, err
 	}
-	if err := validateLayerTensorDType(layer, biasName, bias, mlx.DTypeBFloat16, "runtime-ready offline expert bias"); err != nil {
+
+	scales := tensors[weightName+"_scale"]
+	if scales != nil {
+		if len(weight.Dims()) != 3 || weight.Dim(0) != int(cfg.NumLocalExperts) || weight.Dim(1) != wantIn {
+			return nil, fmt.Errorf("layer %d: tensor %q dims %v, want quantized expert layout [num_local_experts, %d, packed]", layer, weightName, weight.Dims(), wantIn)
+		}
+		if len(scales.Dims()) != 3 || scales.Dim(0) != int(cfg.NumLocalExperts) || scales.Dim(1) != wantIn {
+			return nil, fmt.Errorf("layer %d: tensor %q dims %v, want quantized expert scale layout [num_local_experts, %d, scale_groups]", layer, weightName+"_scale", scales.Dims(), wantIn)
+		}
+
+		qbiases := tensors[weightName+"_qbias"]
+		groupSize, bits, mode := model.ResolveLinearQuantParams(
+			cfg.QuantGroupSize,
+			cfg.QuantBits,
+			cfg.QuantMode,
+			cfg.TensorQuant,
+			weightName,
+			weight,
+			scales,
+		)
+		weight = mlx.Dequantize(weight, scales, qbiases, groupSize, bits, mode)
+	}
+
+	if err := validateLayerTensorShape(layer, weightName, weight, []int{int(cfg.NumLocalExperts), wantIn, wantOut}, fmt.Sprintf("num_local_experts x in x out for %s", prefix)); err != nil {
+		return nil, err
+	}
+	if err := validateLayerTensorDType(layer, weightName, weight, mlx.DTypeBFloat16, "runtime-ready offline expert weights"); err != nil {
 		return nil, err
 	}
 	return &ExpertProjection{Weight: weight, Bias: bias}, nil
@@ -1048,11 +1121,10 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	}
 	m.Norm = nn.NewRMSNorm(outputNormWeight, m.RMSNormEps)
 
-	outputWeight, err := requireTensor(tensors, "output.weight")
-	if err != nil {
+	if _, err := requireTensor(tensors, "output.weight"); err != nil {
 		return err
 	}
-	if err := validateTensorShape("output.weight", outputWeight, []int{int(m.VocabSize), int(m.HiddenSize)}, "vocab_size x hidden_size"); err != nil {
+	if err := validateLinearLayerShape(-1, tensors, "output", int(m.VocabSize), int(m.HiddenSize), "vocab_size x hidden_size", m.Config); err != nil {
 		return err
 	}
 	m.LMHead = linears.Make("output")
@@ -1071,19 +1143,19 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			return err
 		}
 
-		qProj, err := loadLinearLayer(tensors, linears, i, prefix+".q_proj", expectedQ, int(m.HiddenSize), "num_attention_heads * head_dim x hidden_size")
+		qProj, err := loadLinearLayer(tensors, linears, m.Config, i, prefix+".q_proj", expectedQ, int(m.HiddenSize), "num_attention_heads * head_dim x hidden_size")
 		if err != nil {
 			return err
 		}
-		kProj, err := loadLinearLayer(tensors, linears, i, prefix+".k_proj", expectedKV, int(m.HiddenSize), "num_key_value_heads * head_dim x hidden_size")
+		kProj, err := loadLinearLayer(tensors, linears, m.Config, i, prefix+".k_proj", expectedKV, int(m.HiddenSize), "num_key_value_heads * head_dim x hidden_size")
 		if err != nil {
 			return err
 		}
-		vProj, err := loadLinearLayer(tensors, linears, i, prefix+".v_proj", expectedKV, int(m.HiddenSize), "num_key_value_heads * head_dim x hidden_size")
+		vProj, err := loadLinearLayer(tensors, linears, m.Config, i, prefix+".v_proj", expectedKV, int(m.HiddenSize), "num_key_value_heads * head_dim x hidden_size")
 		if err != nil {
 			return err
 		}
-		oProj, err := loadLinearLayer(tensors, linears, i, prefix+".attn_out", int(m.HiddenSize), expectedQ, "hidden_size x num_attention_heads * head_dim")
+		oProj, err := loadLinearLayer(tensors, linears, m.Config, i, prefix+".attn_out", int(m.HiddenSize), expectedQ, "hidden_size x num_attention_heads * head_dim")
 		if err != nil {
 			return err
 		}
@@ -1101,7 +1173,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			return err
 		}
 
-		router, err := loadLinearLayer(tensors, linears, i, prefix+".router", int(m.NumLocalExperts), int(m.HiddenSize), "num_local_experts x hidden_size")
+		router, err := loadLinearLayer(tensors, linears, m.Config, i, prefix+".router", int(m.NumLocalExperts), int(m.HiddenSize), "num_local_experts x hidden_size")
 		if err != nil {
 			return err
 		}
