@@ -229,7 +229,14 @@ func quantizePackedGroup(groupName string, inputs []create.PackedTensorInput) ([
 	}
 
 	for _, input := range inputs {
-		tmpPath, toEval, st, err := loadAndQuantizeArray(input.Reader, input.Name, input.Quantize, allArrays)
+		reader := packedTensorReader(input)
+		if reader == nil {
+			mlx.Unpin(pinned...)
+			mlx.Sweep()
+			return nil, fmt.Errorf("missing reader for packed tensor %q", input.Name)
+		}
+
+		tmpPath, toEval, st, err := loadAndQuantizeArray(reader, input.Name, input.Quantize, allArrays)
 		if err != nil {
 			mlx.Unpin(pinned...)
 			mlx.Sweep()
@@ -296,6 +303,16 @@ func arraysForPackedInput(allArrays map[string]*mlx.Array, input create.PackedTe
 		}
 	}
 	return out
+}
+
+func packedTensorReader(input create.PackedTensorInput) io.Reader {
+	if input.Reader != nil {
+		return input.Reader
+	}
+	if input.Raw != nil {
+		return input.Raw.SafetensorsReader()
+	}
+	return nil
 }
 
 // perExpertSuffix matches ".{index}.{proj_and_suffix}" after the group prefix.
@@ -391,7 +408,12 @@ func stackAndQuantizeExpertGroup(groupName string, projGroups map[string][]exper
 		var decoded []*mlx.Array
 		for _, expert := range experts {
 			dummyArrays := make(map[string]*mlx.Array)
-			tmpPath, toEval, st, err := loadAndQuantizeArray(expert.input.Reader, expert.input.Name, "", dummyArrays)
+			reader := packedTensorReader(expert.input)
+			if reader == nil {
+				cleanup()
+				return nil, fmt.Errorf("missing reader for expert tensor %s", expert.input.Name)
+			}
+			tmpPath, toEval, st, err := loadAndQuantizeArray(reader, expert.input.Name, "", dummyArrays)
 			if err != nil {
 				cleanup()
 				return nil, fmt.Errorf("failed to decode expert tensor %s: %w", expert.input.Name, err)

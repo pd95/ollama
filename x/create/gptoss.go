@@ -29,7 +29,23 @@ func (t *gptossImportTransform) skipTensor(string) bool { return false }
 
 func (t *gptossImportTransform) quantizationType(name string, shape []int32, quantize string) string {
 	if strings.Contains(name, ".experts.") && strings.HasSuffix(name, ".weight") {
-		return ""
+		quantNorm := normalizeQuantType(quantize)
+		switch quantNorm {
+		case "int4", "int8":
+			if len(shape) != 3 {
+				return ""
+			}
+			var elems int64 = 1
+			for _, d := range shape {
+				elems *= int64(d)
+			}
+			if elems < 1024 || shape[len(shape)-1]%64 != 0 {
+				return ""
+			}
+			return quantNorm
+		default:
+			return ""
+		}
 	}
 	return GetTensorQuantization(name, shape, quantize)
 }
