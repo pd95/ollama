@@ -335,6 +335,8 @@ func swiGLUAlphaLimit(gate, up *mlx.Array) *mlx.Array {
 		return nil
 	}
 
+	// GPT-OSS uses the Harmony/OpenAI-style gated SiLU approximation with the
+	// standard 1.702 alpha and an additive +1 on the up branch.
 	alpha := mlx.FromValue[float32](1.702).AsType(gate.DType())
 	limit := mlx.FromValue[float32](7).AsType(gate.DType())
 	one := mlx.FromValue[float32](1).AsType(gate.DType())
@@ -349,6 +351,7 @@ func swiGLUAlphaLimit(gate, up *mlx.Array) *mlx.Array {
 }
 
 func sliceSequence(x *mlx.Array, pos int) *mlx.Array {
+	// Callers pass [batch, seq, hidden] tensors only.
 	return mlx.SliceStartStop(x, []int32{0, int32(pos), 0}, []int32{1, int32(pos + 1), int32(x.Dim(2))})
 }
 
@@ -745,8 +748,13 @@ func loadDirectExpertPair(tensors map[string]*mlx.Array, layer int, legacyPrefix
 	if err != nil {
 		return nil, err
 	}
-	if gate == nil || up == nil {
-		return nil, fmt.Errorf("layer %d: missing direct gate/up expert tensors for %q", layer, legacyPrefix)
+	switch {
+	case gate == nil && up == nil:
+		return nil, nil
+	case gate == nil:
+		return nil, fmt.Errorf("layer %d: missing direct gate expert tensors for %q", layer, legacyPrefix)
+	case up == nil:
+		return nil, fmt.Errorf("layer %d: missing direct up expert tensors for %q", layer, legacyPrefix)
 	}
 	return &ExpertPair{Gate: gate, Up: up}, nil
 }
@@ -999,6 +1007,9 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 		return x
 	}
 	if c != nil && batchSize == 1 && seqLen > 1 {
+		// GPT-OSS uses alternating rotating and full caches. On MLX/macOS the
+		// batched cached prefill path has not been parity-stable, so prefill is
+		// executed token-by-token here to preserve correctness.
 		steps := make([]*mlx.Array, 0, seqLen)
 		for pos := range seqLen {
 			steps = append(steps, a.Forward(sliceSequence(x, pos), c, 1, 1, cfg, layerIndex))
@@ -1104,28 +1115,6 @@ func (p *ExpertProjection) Forward(x, indices *mlx.Array, sorted bool) *mlx.Arra
 	bias := p.Bias.TakeAxis(indices, 0)
 	bias = mlx.ExpandDims(bias, 2)
 	return mlx.Add(out, bias)
-}
-
-func (p *ExpertProjection) ForwardExplicit(x *mlx.Array, experts []int, outDim int) *mlx.Array {
-	if p == nil || p.Weight == nil || x == nil || len(experts) == 0 {
-		return nil
-	}
-
-	x2d := mlx.Reshape(x.AsType(mlx.DTypeFloat32), 1, int32(x.Dim(x.NumDims()-1)))
-	parts := make([]*mlx.Array, 0, len(experts))
-	for _, expert := range experts {
-		w := mlx.SliceStartStop(p.Weight, []int32{int32(expert), 0, 0}, []int32{int32(expert + 1), int32(p.Weight.Dim(1)), int32(p.Weight.Dim(2))})
-		w = mlx.Squeeze(w, 0).AsType(mlx.DTypeFloat32)
-		out := mlx.Matmul(x2d, w)
-		if p.Bias != nil && p.Bias.Valid() {
-			bias := mlx.SliceStartStop(p.Bias, []int32{int32(expert), 0}, []int32{int32(expert + 1), int32(outDim)})
-			bias = mlx.Squeeze(bias, 0).AsType(mlx.DTypeFloat32)
-			out = mlx.Add(out, bias)
-		}
-		out = mlx.Reshape(out, 1, 1, 1, int32(outDim))
-		parts = append(parts, out)
-	}
-	return mlx.Concatenate(parts, 1)
 }
 
 func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *mlx.Array {
