@@ -155,6 +155,9 @@ func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.Tens
 
 	decodedElems := uint64(groupCount * 32)
 	values := ggml.ConvertToF32(ggmlBlocks, uint32(fsggml.TensorTypeMXFP4), decodedElems)
+	// Keep the full scan as a create-time guard: if MXFP4 decode or repacking is
+	// wrong, fail import immediately instead of baking invalid expert weights
+	// into the created model.
 	for i, v := range values {
 		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
 			return nil, nil, fmt.Errorf("gpt-oss expert tensor %q dequantized invalid value at %d", name, i)

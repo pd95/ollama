@@ -423,6 +423,30 @@ func TestLoadWeightsExpertMissingTensorFails(t *testing.T) {
 	}
 }
 
+func TestLoadWeightsMissingDirectUpExpertFailsClearly(t *testing.T) {
+	skipIfNoMLX(t)
+
+	cfg := denseTestConfig(t)
+	m := &Model{
+		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
+	}
+
+	tensors := denseTestTensors(t, cfg)
+	delete(tensors, "blocks.0.experts.up_proj.weight")
+	delete(tensors, "blocks.0.experts.up_proj.bias")
+	delete(tensors, "blocks.0.experts.gate_up_proj.weight")
+	delete(tensors, "blocks.0.experts.gate_up_proj.bias")
+
+	err := m.LoadWeights(tensors)
+	if err == nil {
+		t.Fatal("LoadWeights() error = nil, want direct up expert failure")
+	}
+	if !strings.Contains(err.Error(), "missing direct up expert tensors") || !strings.Contains(err.Error(), "blocks.0.experts.gate_up_proj") {
+		t.Fatalf("LoadWeights() error = %q, want direct up expert tensor failure", err)
+	}
+}
+
 func TestLoadWeightsExpertShapeValidationFails(t *testing.T) {
 	skipIfNoMLX(t)
 
