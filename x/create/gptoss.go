@@ -2,11 +2,14 @@ package create
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -16,9 +19,17 @@ import (
 	"github.com/ollama/ollama/x/safetensors"
 )
 
+type gptossPerTensorQuant struct {
+	mode      string
+	bits      int
+	groupSize int
+}
+
 type gptossImportTransform struct {
-	pendingBlocks map[string]*safetensors.TensorData
-	pendingScales map[string]*safetensors.TensorData
+	pendingBlocks  map[string]*safetensors.TensorData
+	pendingScales  map[string]*safetensors.TensorData
+	defaultQuant   gptossPerTensorQuant
+	perTensorQuant map[string]gptossPerTensorQuant
 }
 
 func validateGPTOSSDequant() bool {
@@ -31,10 +42,83 @@ func validateGPTOSSDequant() bool {
 }
 
 func newGPTOSSImportTransform(modelDir string, cfg sourceModelConfig) (tensorImportTransform, error) {
-	return &gptossImportTransform{
-		pendingBlocks: make(map[string]*safetensors.TensorData),
-		pendingScales: make(map[string]*safetensors.TensorData),
-	}, nil
+	t := &gptossImportTransform{
+		pendingBlocks:  make(map[string]*safetensors.TensorData),
+		pendingScales:  make(map[string]*safetensors.TensorData),
+		perTensorQuant: make(map[string]gptossPerTensorQuant),
+	}
+
+	defaultQuant, perTensor := parseGPTOSSPerTensorQuant(modelDir)
+	t.defaultQuant = defaultQuant
+	t.perTensorQuant = perTensor
+
+	return t, nil
+}
+
+func parseGPTOSSPerTensorQuant(modelDir string) (gptossPerTensorQuant, map[string]gptossPerTensorQuant) {
+	defaultQ := gptossPerTensorQuant{}
+	perTensor := make(map[string]gptossPerTensorQuant)
+
+	data, err := os.ReadFile(filepath.Join(modelDir, "config.json"))
+	if err != nil {
+		return defaultQ, perTensor
+	}
+
+	var raw struct {
+		Quantization json.RawMessage `json:"quantization"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil || raw.Quantization == nil {
+		return defaultQ, perTensor
+	}
+
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(raw.Quantization, &entries); err != nil {
+		return defaultQ, perTensor
+	}
+
+	type quantEntry struct {
+		Bits      int    `json:"bits"`
+		GroupSize int    `json:"group_size"`
+		Mode      string `json:"mode"`
+	}
+
+	if v, ok := entries["bits"]; ok {
+		json.Unmarshal(v, &defaultQ.bits)
+	}
+	if v, ok := entries["group_size"]; ok {
+		json.Unmarshal(v, &defaultQ.groupSize)
+	}
+	if v, ok := entries["mode"]; ok {
+		json.Unmarshal(v, &defaultQ.mode)
+	}
+
+	for key, val := range entries {
+		if key == "bits" || key == "group_size" || key == "mode" || key == "quant_method" {
+			continue
+		}
+		var entry quantEntry
+		if err := json.Unmarshal(val, &entry); err != nil {
+			continue
+		}
+		if entry.Bits > 0 {
+			mode := entry.Mode
+			// Infer mode when not specified: if the tensor has biases
+			// (affine pattern) or uses group_size=64 (affine default),
+			// it's affine quantization. The MLX checkpoint omits mode
+			// for some tensors like the router.
+			if mode == "" && entry.GroupSize == 64 {
+				mode = "affine"
+			}
+			q := gptossPerTensorQuant{
+				mode:      mode,
+				bits:      entry.Bits,
+				groupSize: entry.GroupSize,
+			}
+			perTensor[key] = q
+		}
+	}
+
+	return defaultQ, perTensor
 }
 
 func (t *gptossImportTransform) skipTensor(string) bool { return false }
@@ -60,6 +144,33 @@ func (t *gptossImportTransform) quantizationType(name string, shape []int32, qua
 		}
 	}
 	return GetTensorQuantization(name, shape, quantize)
+}
+
+func (t *gptossImportTransform) prequantizedMetadata(sourceName string, global map[string]string) map[string]string {
+	prefix := strings.TrimSuffix(sourceName, ".weight")
+	if prefix == sourceName {
+		return global
+	}
+
+	q, ok := t.perTensorQuant[prefix]
+	if !ok {
+		return global
+	}
+
+	qt := sourceQuantType(q.mode, q.bits)
+	if qt == "" {
+		return global
+	}
+
+	override := make(map[string]string, len(global)+2)
+	for k, v := range global {
+		override[k] = v
+	}
+	override["quant_type"] = qt
+	if q.groupSize > 0 {
+		override["group_size"] = strconv.Itoa(q.groupSize)
+	}
+	return override
 }
 
 func (t *gptossImportTransform) transformTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
@@ -415,6 +526,24 @@ func (t *gptossImportTransform) canonicalTensorName(name string) string {
 	case "mlp.experts.down_proj_scales":
 		return prefix + "experts.down_proj.weight"
 	case "mlp.experts.down_proj_bias":
+		return prefix + "experts.down_proj.bias"
+	case "mlp.experts.gate_proj.weight",
+		"mlp.experts.gate_proj.scales",
+		"mlp.experts.gate_proj.biases":
+		return prefix + "experts.gate_proj.weight"
+	case "mlp.experts.gate_proj.bias":
+		return prefix + "experts.gate_proj.bias"
+	case "mlp.experts.up_proj.weight",
+		"mlp.experts.up_proj.scales",
+		"mlp.experts.up_proj.biases":
+		return prefix + "experts.up_proj.weight"
+	case "mlp.experts.up_proj.bias":
+		return prefix + "experts.up_proj.bias"
+	case "mlp.experts.down_proj.weight",
+		"mlp.experts.down_proj.scales",
+		"mlp.experts.down_proj.biases":
+		return prefix + "experts.down_proj.weight"
+	case "mlp.experts.down_proj.bias":
 		return prefix + "experts.down_proj.bias"
 	default:
 		return name

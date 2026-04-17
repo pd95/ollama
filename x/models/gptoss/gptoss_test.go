@@ -311,9 +311,11 @@ func TestLoadWeightsSupportsQuantizedDirectExperts(t *testing.T) {
 		Layers: make([]*Layer, cfg.NumHiddenLayers),
 	}
 	quantTensors := denseTestTensors(t, cfg)
-	quantizeTensorForTest(t, quantTensors, "blocks.0.experts.gate_proj.weight", 64, 8, "affine")
-	quantizeTensorForTest(t, quantTensors, "blocks.0.experts.up_proj.weight", 64, 8, "affine")
-	quantizeTensorForTest(t, quantTensors, "blocks.0.experts.down_proj.weight", 64, 8, "affine")
+	// Transpose expert weights before quantizing to simulate MLX-native
+	// [experts, out, packed_in] layout (vs HF-raw [experts, in, packed_out]).
+	quantizeTensorForTestTranspose(t, quantTensors, "blocks.0.experts.gate_proj.weight", 64, 8, "affine", true)
+	quantizeTensorForTestTranspose(t, quantTensors, "blocks.0.experts.up_proj.weight", 64, 8, "affine", true)
+	quantizeTensorForTestTranspose(t, quantTensors, "blocks.0.experts.down_proj.weight", 64, 8, "affine", true)
 	if err := quantModel.LoadWeights(quantTensors); err != nil {
 		t.Fatalf("quantized LoadWeights() error = %v", err)
 	}
@@ -338,8 +340,12 @@ func TestLoadWeightsSupportsQuantizedDirectExperts(t *testing.T) {
 		t.Fatalf("expert output length mismatch: dense=%d quant=%d", len(denseVals), len(quantVals))
 	}
 	for i := range denseVals {
-		if diff := math.Abs(float64(denseVals[i] - quantVals[i])); diff > 7e-2 {
-			t.Fatalf("quantized expert output[%d] = %v, want %v (diff %v)", i, quantVals[i], denseVals[i], diff)
+		diff := math.Abs(float64(denseVals[i] - quantVals[i]))
+		mag := math.Max(math.Abs(float64(denseVals[i])), 1e-6)
+		// Use relative tolerance: int8 quantization on BF16 values can introduce
+		// errors up to 1 ULP at BF16 precision (e.g. 8192 at magnitude ~1.3M).
+		if diff/mag > 2e-2 {
+			t.Fatalf("quantized expert output[%d] = %v, want %v (diff %v, rel %v)", i, quantVals[i], denseVals[i], diff, diff/mag)
 		}
 	}
 }
@@ -2165,10 +2171,24 @@ func denseTestTensors(t *testing.T, cfg Config) map[string]*mlx.Array {
 
 func quantizeTensorForTest(t *testing.T, tensors map[string]*mlx.Array, name string, groupSize, bits int, mode string) {
 	t.Helper()
+	quantizeTensorForTestTranspose(t, tensors, name, groupSize, bits, mode, false)
+}
+
+// quantizeTensorForTestTranspose quantizes a tensor in-place. When transpose
+// is true and the tensor is 3-D (expert weights), it transposes dims 1↔2
+// before quantizing to produce MLX-native [experts, out, packed_in] layout
+// instead of the HF-raw [experts, in, packed_out] layout.
+func quantizeTensorForTestTranspose(t *testing.T, tensors map[string]*mlx.Array, name string, groupSize, bits int, mode string, transpose bool) {
+	t.Helper()
 
 	weight := tensors[name]
 	if weight == nil {
 		t.Fatalf("quantizeTensorForTest(%q): missing weight tensor", name)
+	}
+	if transpose && len(weight.Dims()) == 3 {
+		weight = mlx.Transpose(weight, 0, 2, 1)
+		weight = mlx.Contiguous(weight, false)
+		mlx.Eval(weight)
 	}
 	qw, scales, qbiases := mlx.Quantize(weight, groupSize, bits, mode)
 	if qw == nil || scales == nil {

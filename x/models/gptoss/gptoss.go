@@ -126,10 +126,17 @@ type ExpertPair struct {
 	Up   *ExpertProjection
 }
 
-// ExpertProjection wraps a dense per-expert weight matrix used by GatherMM.
+// ExpertProjection wraps a per-expert weight matrix.
+// When Scales is non-nil, the weight is quantized and Forward uses GatherQMM.
 type ExpertProjection struct {
-	Weight *mlx.Array
-	Bias   *mlx.Array
+	Weight    *mlx.Array
+	Bias      *mlx.Array
+	Scales    *mlx.Array
+	QBiases   *mlx.Array
+	GroupSize int
+	Bits      int
+	Mode      string
+	Transpose bool // true for MLX-native [experts, out, packed_in] layout
 }
 
 // NewModel creates a gpt-oss model from a manifest root.
@@ -780,11 +787,11 @@ func loadDirectExpertProjection(tensors map[string]*mlx.Array, layer int, prefix
 
 	scales := tensors[weightName+"_scale"]
 	if scales != nil {
-		if len(weight.Dims()) != 3 || weight.Dim(0) != int(cfg.NumLocalExperts) || weight.Dim(1) != wantIn {
-			return nil, fmt.Errorf("layer %d: tensor %q dims %v, want quantized expert layout [num_local_experts, %d, packed]", layer, weightName, weight.Dims(), wantIn)
+		if len(weight.Dims()) != 3 || weight.Dim(0) != int(cfg.NumLocalExperts) {
+			return nil, fmt.Errorf("layer %d: tensor %q dims %v, want quantized expert layout [num_local_experts, ?, packed]", layer, weightName, weight.Dims())
 		}
-		if len(scales.Dims()) != 3 || scales.Dim(0) != int(cfg.NumLocalExperts) || scales.Dim(1) != wantIn {
-			return nil, fmt.Errorf("layer %d: tensor %q dims %v, want quantized expert scale layout [num_local_experts, %d, scale_groups]", layer, weightName+"_scale", scales.Dims(), wantIn)
+		if len(scales.Dims()) != 3 || scales.Dim(0) != int(cfg.NumLocalExperts) {
+			return nil, fmt.Errorf("layer %d: tensor %q dims %v, want quantized expert scale layout [num_local_experts, ?, scale_groups]", layer, weightName+"_scale", scales.Dims())
 		}
 
 		qbiases := tensors[weightName+"_qbias"]
@@ -797,7 +804,17 @@ func loadDirectExpertProjection(tensors map[string]*mlx.Array, layer int, prefix
 			weight,
 			scales,
 		)
-		weight = mlx.Dequantize(weight, scales, qbiases, groupSize, bits, mode)
+
+		return &ExpertProjection{
+			Weight:    weight,
+			Bias:      bias,
+			Scales:    scales,
+			QBiases:   qbiases,
+			GroupSize: groupSize,
+			Bits:      bits,
+			Mode:      mode,
+			Transpose: true, // MLX-native quantized layout: [experts, out, packed_in]
+		}, nil
 	}
 
 	if err := validateLayerTensorShape(layer, weightName, weight, []int{int(cfg.NumLocalExperts), wantIn, wantOut}, fmt.Sprintf("num_local_experts x in x out for %s", prefix)); err != nil {
@@ -824,8 +841,10 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	if err != nil {
 		return err
 	}
-	if err := validateTensorShape("embedding.weight", embeddingWeight, []int{int(m.VocabSize), int(m.HiddenSize)}, "vocab_size x hidden_size"); err != nil {
-		return err
+	if tensors["embedding.weight_scale"] == nil {
+		if err := validateTensorShape("embedding.weight", embeddingWeight, []int{int(m.VocabSize), int(m.HiddenSize)}, "vocab_size x hidden_size"); err != nil {
+			return err
+		}
 	}
 	embedTokens := model.MakeEmbeddingLayer(tensors, "embedding", m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 	if embedTokens == nil {
@@ -1104,10 +1123,16 @@ func (p *ExpertProjection) Forward(x, indices *mlx.Array, sorted bool) *mlx.Arra
 		return nil
 	}
 
-	if x.DType() != p.Weight.DType() {
-		x = x.AsType(p.Weight.DType())
+	var out *mlx.Array
+	if p.Scales != nil {
+		out = mlx.GatherQMM(x, p.Weight, p.Scales, p.QBiases, nil, indices, p.Transpose, p.GroupSize, p.Bits, p.Mode, sorted)
+	} else {
+		if x.DType() != p.Weight.DType() {
+			x = x.AsType(p.Weight.DType())
+		}
+		out = mlx.GatherMM(x, p.Weight, nil, indices, sorted)
 	}
-	out := mlx.GatherMM(x, p.Weight, nil, indices, sorted)
+
 	if p.Bias == nil || !p.Bias.Valid() {
 		return out
 	}
