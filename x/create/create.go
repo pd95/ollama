@@ -778,6 +778,8 @@ type tensorImportTransform interface {
 	skipTensor(name string) bool
 	transformTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error)
 	quantizationType(name string, shape []int32, quantize string) string
+	canonicalTensorName(name string) string
+	prequantizedMetadata(sourceName string, globalMetadata map[string]string) map[string]string
 }
 
 type sourceFP8TensorImportTransform interface {
@@ -798,6 +800,12 @@ func (noopImportTransform) transformTensor(td *safetensors.TensorData) ([]*safet
 
 func (noopImportTransform) quantizationType(name string, shape []int32, quantize string) string {
 	return GetTensorQuantization(name, shape, quantize)
+}
+
+func (noopImportTransform) canonicalTensorName(name string) string { return name }
+
+func (noopImportTransform) prequantizedMetadata(_ string, global map[string]string) map[string]string {
+	return global
 }
 
 type tensorImportTransformFactory func(modelDir string, cfg sourceModelConfig) (tensorImportTransform, error)
@@ -952,7 +960,7 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 			}
 
 			if effectiveQuantize == "" {
-				layer, ok, err := createPrequantizedLayer(extractor, td, tensorName, tensorSet, sourceQuantMetadata, createLayer)
+				layer, ok, err := createPrequantizedLayer(extractor, td, tensorName, tensorSet, sourceQuantMetadata, createLayer, importTransform)
 				if err != nil {
 					extractor.Close()
 					closeExtractors()
@@ -1387,32 +1395,36 @@ func createPrequantizedLayer(
 	tensorSet map[string]struct{},
 	metadata map[string]string,
 	createLayer LayerCreator,
+	transform tensorImportTransform,
 ) (LayerInfo, bool, error) {
 	scaleName, biasName, ok := prequantizedCompanions(tensorName, tensorSet)
 	if !ok {
 		return LayerInfo{}, false, nil
 	}
 
-	tensors := []*safetensors.TensorData{td.WithName(tensorName)}
+	canonical := transform.canonicalTensorName(tensorName)
+	blobMetadata := transform.prequantizedMetadata(tensorName, metadata)
+
+	tensors := []*safetensors.TensorData{td.WithName(canonical)}
 
 	scaleTD, err := extractor.GetTensor(scaleName)
 	if err != nil {
 		return LayerInfo{}, false, fmt.Errorf("failed to get tensor %s: %w", scaleName, err)
 	}
-	tensors = append(tensors, scaleTD.WithName(tensorName+".scale"))
+	tensors = append(tensors, scaleTD.WithName(canonical+".scale"))
 
 	if biasName != "" {
 		biasTD, err := extractor.GetTensor(biasName)
 		if err != nil {
 			return LayerInfo{}, false, fmt.Errorf("failed to get tensor %s: %w", biasName, err)
 		}
-		tensors = append(tensors, biasTD.WithName(tensorName+".bias"))
+		tensors = append(tensors, biasTD.WithName(canonical+".bias"))
 	}
 
 	layer, err := createLayer(
-		safetensors.BuildPackedSafetensorsReaderWithMetadata(tensors, metadata),
+		safetensors.BuildPackedSafetensorsReaderWithMetadata(tensors, blobMetadata),
 		"application/vnd.ollama.image.tensor",
-		tensorName,
+		canonical,
 	)
 	if err != nil {
 		return LayerInfo{}, false, fmt.Errorf("failed to create prequantized layer for %s: %w", tensorName, err)

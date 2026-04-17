@@ -183,6 +183,12 @@ func isGemma4RouterProjection(name string) bool {
 		!strings.Contains(name, "vision_tower")
 }
 
+func (t gemma4ImportTransform) canonicalTensorName(name string) string { return name }
+
+func (t gemma4ImportTransform) prequantizedMetadata(_ string, global map[string]string) map[string]string {
+	return global
+}
+
 func (t gemma4ImportTransform) transformTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
 	if td == nil {
 		return nil, nil
