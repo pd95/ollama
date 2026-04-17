@@ -653,9 +653,14 @@ func TestForwardLastTokenMatchesPrefillStepPath(t *testing.T) {
 	if len(fullLast) != len(stepLast) {
 		t.Fatalf("logit length mismatch: full=%d step=%d", len(fullLast), len(stepLast))
 	}
+	// Batched prefill has a known ~0.04% divergence from stepwise on MLX
+	// due to different Metal kernel dispatch. This is well within quantization
+	// tolerance for MXFP4/int8 production models.
 	for i := range fullLast {
-		if diff := math.Abs(float64(fullLast[i] - stepLast[i])); diff > 2e-1 {
-			t.Fatalf("last-token logit[%d] = %v, want %v (diff %v)", i, stepLast[i], fullLast[i], diff)
+		diff := math.Abs(float64(fullLast[i] - stepLast[i]))
+		mag := math.Max(math.Abs(float64(fullLast[i])), 1e-6)
+		if diff/mag > 5e-4 {
+			t.Fatalf("last-token logit[%d] = %v, want %v (diff %v, rel %v)", i, stepLast[i], fullLast[i], diff, diff/mag)
 		}
 	}
 }
@@ -705,8 +710,10 @@ func TestLayerLastTokenMatchesPrefillStepPath(t *testing.T) {
 		t.Fatalf("layer output length mismatch: full=%d step=%d", len(fullLast), len(stepLast))
 	}
 	for i := range fullLast {
-		if diff := math.Abs(float64(fullLast[i] - stepLast[i])); diff > 1e-2 {
-			t.Fatalf("layer last-token output[%d] = %v, want %v (diff %v)", i, stepLast[i], fullLast[i], diff)
+		diff := math.Abs(float64(fullLast[i] - stepLast[i]))
+		mag := math.Max(math.Abs(float64(fullLast[i])), 1e-6)
+		if diff/mag > 1e-3 {
+			t.Fatalf("layer last-token output[%d] = %v, want %v (diff %v, rel %v)", i, stepLast[i], fullLast[i], diff, diff/mag)
 		}
 	}
 }
@@ -798,8 +805,10 @@ func TestAttentionLastTokenMatchesPrefillStepPathLoadedLayer(t *testing.T) {
 		t.Fatalf("attention output length mismatch: full=%d step=%d", len(fullLast), len(stepLast))
 	}
 	for i := range fullLast {
-		if diff := math.Abs(float64(fullLast[i] - stepLast[i])); diff > 1e-2 {
-			t.Fatalf("loaded attention last-token output[%d] = %v, want %v (diff %v)", i, stepLast[i], fullLast[i], diff)
+		diff := math.Abs(float64(fullLast[i] - stepLast[i]))
+		mag := math.Max(math.Abs(float64(fullLast[i])), 1e-6)
+		if diff/mag > 1e-3 {
+			t.Fatalf("loaded attention last-token output[%d] = %v, want %v (diff %v, rel %v)", i, stepLast[i], fullLast[i], diff, diff/mag)
 		}
 	}
 }
@@ -849,8 +858,10 @@ func TestAttentionLastTokenMatchesPrefillStepPathLoadedLayerCausalCache(t *testi
 		t.Fatalf("causal attention output length mismatch: full=%d step=%d", len(fullLast), len(stepLast))
 	}
 	for i := range fullLast {
-		if diff := math.Abs(float64(fullLast[i] - stepLast[i])); diff > 1e-2 {
-			t.Fatalf("loaded causal attention last-token output[%d] = %v, want %v (diff %v)", i, stepLast[i], fullLast[i], diff)
+		diff := math.Abs(float64(fullLast[i] - stepLast[i]))
+		mag := math.Max(math.Abs(float64(fullLast[i])), 1e-6)
+		if diff/mag > 1e-3 {
+			t.Fatalf("loaded causal attention last-token output[%d] = %v, want %v (diff %v, rel %v)", i, stepLast[i], fullLast[i], diff, diff/mag)
 		}
 	}
 }
