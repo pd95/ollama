@@ -28,8 +28,10 @@ var (
 //
 // Template args: NumColVecs (int), NumRows (int), NumTopK (int)
 // Inputs (named): input(float), gate_w(uint), gate_s(bfloat), gate_b(bfloat),
-//                 up_w(uint), up_s(bfloat), up_b(bfloat),
-//                 expert_ids(uint), swiglu_params(float)
+//
+//	up_w(uint), up_s(bfloat), up_b(bfloat),
+//	expert_ids(uint), swiglu_params(float)
+//
 // Output (named): output(float)
 const moeSwiGLUSource = `
 uint3 gid = threadgroup_position_in_grid;
@@ -327,7 +329,9 @@ func MoEFusedGateUpSwiGLU(
 //
 // Template args: NumColVecs (int), NumRows (int), NumTopK (int)
 // Inputs (named): input(float), down_w(uint), down_s(bfloat), down_b(bfloat),
-//                 expert_ids(uint)
+//
+//	expert_ids(uint)
+//
 // Output (named): output(float)
 const moeDownSource = `
 uint3 gid = threadgroup_position_in_grid;
