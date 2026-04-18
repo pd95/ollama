@@ -1190,16 +1190,49 @@ func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *ml
 		idxFlat = mlx.Reshape(mlx.Take(idxAll, order, 0), n, 1)
 	}
 
-	gate := e.GateUp.Gate.Forward(xFlat, idxFlat, doSort)
-	up := e.GateUp.Up.Forward(xFlat, idxFlat, doSort)
-	if gate == nil || !gate.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d expert gate projection is invalid", layerIndex))
-	}
-	if up == nil || !up.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d expert up projection is invalid", layerIndex))
+	// Try fused gate+up+SwiGLU kernel for single-token MXFP4 MoE (decode path).
+	var hidden *mlx.Array
+	if !doSort && B*L == 1 &&
+		e.GateUp.Gate.Scales != nil && e.GateUp.Up.Scales != nil &&
+		e.GateUp.Gate.Bias != nil && e.GateUp.Up.Bias != nil &&
+		e.GateUp.Gate.Mode == "mxfp4" && e.GateUp.Gate.GroupSize == 32 {
+
+		gateW := e.GateUp.Gate
+		upW := e.GateUp.Up
+		wDims := gateW.Weight.Dims()
+		if len(wDims) == 3 {
+			numRows := wDims[1]
+			numColVecs := int(cfg.HiddenSize) / 32
+			inputFlat := mlx.Reshape(x, B*L, cfg.HiddenSize).AsType(mlx.DTypeFloat32)
+
+			out, ok := mlx.MoEFusedGateUpSwiGLU(
+				inputFlat,
+				gateW.Weight, gateW.Scales, gateW.Bias,
+				upW.Weight, upW.Scales, upW.Bias,
+				idxFlat,
+				numRows, numColVecs, int(topK),
+				-7.0, 7.0, // swiglu clamp limits
+			)
+			if ok && out != nil {
+				// Reshape fused output [batch, topK, numRows] to match unfused shape [batch, topK, 1, numRows]
+				hidden = mlx.Reshape(out, B*L, topK, 1, int32(numRows)).AsType(mlx.DTypeBFloat16)
+			}
+		}
 	}
 
-	hidden := swiGLUAlphaLimit(gate, up)
+	// Fallback to unfused path if fused kernel is unavailable or failed.
+	if hidden == nil {
+		gate := e.GateUp.Gate.Forward(xFlat, idxFlat, doSort)
+		up := e.GateUp.Up.Forward(xFlat, idxFlat, doSort)
+		if gate == nil || !gate.Valid() {
+			panic(fmt.Sprintf("gpt-oss layer %d expert gate projection is invalid", layerIndex))
+		}
+		if up == nil || !up.Valid() {
+			panic(fmt.Sprintf("gpt-oss layer %d expert up projection is invalid", layerIndex))
+		}
+		hidden = swiGLUAlphaLimit(gate, up)
+	}
+
 	down := e.Down.Forward(hidden, idxFlat, doSort)
 	if down == nil || !down.Valid() {
 		panic(fmt.Sprintf("gpt-oss layer %d expert down projection is invalid", layerIndex))
