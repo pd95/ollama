@@ -338,25 +338,30 @@ func (m *Model) NewCaches() []cache.Cache {
 	return caches
 }
 
-func swiGLUAlphaLimit(gate, up *mlx.Array) *mlx.Array {
-	if gate == nil || up == nil {
-		return nil
-	}
+// swiGLUAlphaLimit is a compiled kernel implementing the gpt-oss MoE activation:
+//
+//	swish = min(gate, 7) * sigmoid(1.702 * min(gate, 7))
+//	result = swish * (clamp(up, -7, 7) + 1)
+//
+// The Compile2 wrapper traces the elementwise chain once and fuses it into a
+// single Metal kernel, eliminating ~10 per-op dispatches per MoE block.
+var swiGLUAlphaLimit = mlx.Compile2(
+	"gptoss_swiglu_alpha_limit",
+	func(gate, up *mlx.Array) *mlx.Array {
+		dt := gate.DType()
+		alpha := mlx.FromValue[float32](1.702).AsType(dt)
+		limit := mlx.FromValue[float32](7).AsType(dt)
+		negLimit := mlx.Neg(limit)
+		one := mlx.FromValue[float32](1).AsType(dt)
 
-	// GPT-OSS uses the Harmony/OpenAI-style gated SiLU approximation with the
-	// standard 1.702 alpha and an additive +1 on the up branch.
-	alpha := mlx.FromValue[float32](1.702).AsType(gate.DType())
-	limit := mlx.FromValue[float32](7).AsType(gate.DType())
-	one := mlx.FromValue[float32](1).AsType(gate.DType())
+		clippedGate := mlx.Minimum(gate, limit)
+		clippedUp := mlx.Clip(up, negLimit, limit)
 
-	clippedGate := mlx.Where(limit.Less(gate), limit, gate)
-	negLimit := mlx.Neg(limit)
-	clippedUpLow := mlx.Where(up.Less(negLimit), negLimit, up)
-	clippedUp := mlx.Where(limit.Less(clippedUpLow), limit, clippedUpLow)
-
-	gated := mlx.Div(clippedGate, mlx.Add(one, mlx.Exp(mlx.Mul(mlx.Neg(clippedGate), alpha))))
-	return mlx.Mul(gated, mlx.Add(clippedUp, one))
-}
+		swish := clippedGate.Multiply(mlx.Mul(clippedGate, alpha).Sigmoid())
+		return swish.Multiply(clippedUp.Add(one))
+	},
+	mlx.Shapeless(),
+)
 
 func sliceSequence(x *mlx.Array, pos int) *mlx.Array {
 	// Callers pass [batch, seq, hidden] tensors only.
