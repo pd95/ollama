@@ -1190,13 +1190,14 @@ func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *ml
 		idxFlat = mlx.Reshape(mlx.Take(idxAll, order, 0), n, 1)
 	}
 
-	// Try fused gate+up+SwiGLU kernel for single-token MXFP4 MoE (decode path).
-	var hidden *mlx.Array
-	if !doSort && B*L == 1 &&
+	// Try fully fused gate+up+SwiGLU+down kernel path for single-token MXFP4 MoE (decode).
+	canFuse := !doSort && B*L == 1 &&
 		e.GateUp.Gate.Scales != nil && e.GateUp.Up.Scales != nil &&
 		e.GateUp.Gate.Bias != nil && e.GateUp.Up.Bias != nil &&
-		e.GateUp.Gate.Mode == "mxfp4" && e.GateUp.Gate.GroupSize == 32 {
+		e.GateUp.Gate.Mode == "mxfp4" && e.GateUp.Gate.GroupSize == 32
 
+	var down *mlx.Array
+	if canFuse {
 		gateW := e.GateUp.Gate
 		upW := e.GateUp.Up
 		wDims := gateW.Weight.Dims()
@@ -1205,7 +1206,7 @@ func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *ml
 			numColVecs := int(cfg.HiddenSize) / 32
 			inputFlat := mlx.Reshape(x, B*L, cfg.HiddenSize).AsType(mlx.DTypeFloat32)
 
-			out, ok := mlx.MoEFusedGateUpSwiGLU(
+			swiGLUOut, ok := mlx.MoEFusedGateUpSwiGLU(
 				inputFlat,
 				gateW.Weight, gateW.Scales, gateW.Bias,
 				upW.Weight, upW.Scales, upW.Bias,
@@ -1213,15 +1214,42 @@ func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *ml
 				numRows, numColVecs, int(topK),
 				-7.0, 7.0, // swiglu clamp limits
 			)
-			if ok && out != nil {
-				// Reshape fused output [batch, topK, numRows] to match unfused shape [batch, topK, 1, numRows]
-				hidden = mlx.Reshape(out, B*L, topK, 1, int32(numRows)).AsType(mlx.DTypeBFloat16)
+			if ok && swiGLUOut != nil {
+				// Try fused down projection on the float32 SwiGLU output.
+				if e.Down.Scales != nil && e.Down.Bias != nil &&
+					e.Down.Mode == "mxfp4" && e.Down.GroupSize == 32 {
+					downDims := e.Down.Weight.Dims()
+					if len(downDims) == 3 {
+						downNumRows := int(cfg.HiddenSize)
+						downNumColVecs := numRows / 32 // intermediateSize / 32
+
+						downOut, dok := mlx.MoEFusedDown(
+							swiGLUOut,
+							e.Down.Weight, e.Down.Scales, e.Down.Bias,
+							idxFlat,
+							downNumRows, downNumColVecs, int(topK),
+						)
+						if dok && downOut != nil {
+							// downOut is [batch, topK, hiddenSize] in float32
+							down = downOut.AsType(mlx.DTypeBFloat16)
+						}
+					}
+				}
+				// If fused down failed, fall back to GatherQMM for just the down proj
+				if down == nil {
+					hidden := mlx.Reshape(swiGLUOut, B*L, topK, 1, int32(numRows)).AsType(mlx.DTypeBFloat16)
+					down = e.Down.Forward(hidden, idxFlat, doSort)
+					if down == nil || !down.Valid() {
+						panic(fmt.Sprintf("gpt-oss layer %d expert down projection is invalid", layerIndex))
+					}
+					down = mlx.Squeeze(down, 2)
+				}
 			}
 		}
 	}
 
-	// Fallback to unfused path if fused kernel is unavailable or failed.
-	if hidden == nil {
+	// Fully unfused fallback path.
+	if down == nil {
 		gate := e.GateUp.Gate.Forward(xFlat, idxFlat, doSort)
 		up := e.GateUp.Up.Forward(xFlat, idxFlat, doSort)
 		if gate == nil || !gate.Valid() {
@@ -1230,22 +1258,23 @@ func (e *Experts) Forward(x, router *mlx.Array, cfg *Config, layerIndex int) *ml
 		if up == nil || !up.Valid() {
 			panic(fmt.Sprintf("gpt-oss layer %d expert up projection is invalid", layerIndex))
 		}
-		hidden = swiGLUAlphaLimit(gate, up)
+		hidden := swiGLUAlphaLimit(gate, up)
+
+		downResult := e.Down.Forward(hidden, idxFlat, doSort)
+		if downResult == nil || !downResult.Valid() {
+			panic(fmt.Sprintf("gpt-oss layer %d expert down projection is invalid", layerIndex))
+		}
+
+		if doSort {
+			down = mlx.Reshape(
+				mlx.Take(mlx.Squeeze(mlx.Squeeze(downResult, 2), 1), invOrder, 0),
+				B*L, topK, cfg.HiddenSize,
+			)
+		} else {
+			down = mlx.Squeeze(downResult, 2)
+		}
 	}
 
-	down := e.Down.Forward(hidden, idxFlat, doSort)
-	if down == nil || !down.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d expert down projection is invalid", layerIndex))
-	}
-
-	if doSort {
-		down = mlx.Reshape(
-			mlx.Take(mlx.Squeeze(mlx.Squeeze(down, 2), 1), invOrder, 0),
-			B*L, topK, cfg.HiddenSize,
-		)
-	} else {
-		down = mlx.Squeeze(down, 2)
-	}
 	down = mlx.Reshape(down, B, L, topK, cfg.HiddenSize)
 	return mlx.Sum(mlx.Mul(down, mlx.ExpandDims(scores, -1)), 2, false)
 }
