@@ -470,10 +470,18 @@ func (t *gptossImportTransform) canonicalTensorName(name string) string {
 	switch name {
 	case "model.embed_tokens.weight":
 		return "embedding.weight"
+	case "model.embed_tokens.scales":
+		return "embedding.weight_scale"
+	case "model.embed_tokens.biases":
+		return "embedding.weight_qbias"
 	case "model.norm.weight":
 		return "output_norm.weight"
 	case "lm_head.weight":
 		return "output.weight"
+	case "lm_head.scales":
+		return "output.weight_scale"
+	case "lm_head.biases":
+		return "output.weight_qbias"
 	}
 
 	const layerPrefix = "model.layers."
@@ -495,18 +503,34 @@ func (t *gptossImportTransform) canonicalTensorName(name string) string {
 		return prefix + "q_proj.weight"
 	case "self_attn.q_proj.bias":
 		return prefix + "q_proj.bias"
+	case "self_attn.q_proj.scales":
+		return prefix + "q_proj.weight_scale"
+	case "self_attn.q_proj.biases":
+		return prefix + "q_proj.weight_qbias"
 	case "self_attn.k_proj.weight":
 		return prefix + "k_proj.weight"
 	case "self_attn.k_proj.bias":
 		return prefix + "k_proj.bias"
+	case "self_attn.k_proj.scales":
+		return prefix + "k_proj.weight_scale"
+	case "self_attn.k_proj.biases":
+		return prefix + "k_proj.weight_qbias"
 	case "self_attn.v_proj.weight":
 		return prefix + "v_proj.weight"
 	case "self_attn.v_proj.bias":
 		return prefix + "v_proj.bias"
+	case "self_attn.v_proj.scales":
+		return prefix + "v_proj.weight_scale"
+	case "self_attn.v_proj.biases":
+		return prefix + "v_proj.weight_qbias"
 	case "self_attn.o_proj.weight":
 		return prefix + "attn_out.weight"
 	case "self_attn.o_proj.bias":
 		return prefix + "attn_out.bias"
+	case "self_attn.o_proj.scales":
+		return prefix + "attn_out.weight_scale"
+	case "self_attn.o_proj.biases":
+		return prefix + "attn_out.weight_qbias"
 	case "self_attn.sinks":
 		return prefix + "attn_sinks"
 	case "post_attention_layernorm.weight":
@@ -515,6 +539,10 @@ func (t *gptossImportTransform) canonicalTensorName(name string) string {
 		return prefix + "router.weight"
 	case "mlp.router.bias":
 		return prefix + "router.bias"
+	case "mlp.router.scales":
+		return prefix + "router.weight_scale"
+	case "mlp.router.biases":
+		return prefix + "router.weight_qbias"
 	case "mlp.experts.gate_up_proj_blocks":
 		return prefix + "experts.gate_up_proj.weight"
 	case "mlp.experts.gate_up_proj_scales":
