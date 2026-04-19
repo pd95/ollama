@@ -72,6 +72,17 @@ func TestGPTOSSImportTransformQuantizationType_ExpertsAffineOnly(t *testing.T) {
 	}
 }
 
+func TestGPTOSSImportTransformQuantizationType_RouterKeptSourcePrecision(t *testing.T) {
+	transform := &gptossImportTransform{}
+	shape := []int32{64, 128}
+
+	for _, quantize := range []string{"int4", "int8", "nvfp4", "mxfp4"} {
+		if got := transform.quantizationType("blocks.0.router.weight", shape, quantize); got != "" {
+			t.Fatalf("quantizationType(%q) = %q for router weight, want empty (source precision)", quantize, got)
+		}
+	}
+}
+
 func TestGPTOSSImportTransformDequantizesExpertWeights(t *testing.T) {
 	transform := &gptossImportTransform{
 		pendingBlocks: make(map[string]*st.TensorData),
