@@ -123,7 +123,18 @@ func parseGPTOSSPerTensorQuant(modelDir string) (gptossPerTensorQuant, map[strin
 
 func (t *gptossImportTransform) skipTensor(string) bool { return false }
 
+func isGptossRouterWeight(name string) bool {
+	return strings.HasSuffix(name, ".router.weight")
+}
+
 func (t *gptossImportTransform) quantizationType(name string, shape []int32, quantize string) string {
+	// MoE router weights choose the top-k expert set. Quantization noise can
+	// flip expert selection, causing downstream activations to diverge sharply.
+	// The tensor is small, so leave it in source precision.
+	if isGptossRouterWeight(name) {
+		return ""
+	}
+
 	if strings.Contains(name, ".experts.") && strings.HasSuffix(name, ".weight") {
 		quantNorm := normalizeQuantType(quantize)
 		switch quantNorm {
