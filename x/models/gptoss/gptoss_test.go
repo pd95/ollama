@@ -144,6 +144,62 @@ func TestNewModelRegistersGptOss(t *testing.T) {
 	}
 }
 
+func TestNewModelRestoresHarmonyStopTokens(t *testing.T) {
+	root := testRootWithExtraConfigs(t, []byte(`{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gpt_oss",
+		"num_hidden_layers": 1,
+		"hidden_size": 64,
+		"intermediate_size": 128,
+		"num_attention_heads": 1,
+		"num_key_value_heads": 1,
+		"head_dim": 64,
+		"num_local_experts": 4,
+		"num_experts_per_tok": 2,
+		"sliding_window": 128,
+		"rope_theta": 150000,
+		"rope_scaling": {
+			"factor": 32.0,
+			"original_max_position_embeddings": 4096
+		},
+		"rms_norm_eps": 0.00001,
+		"vocab_size": 201088,
+		"tie_word_embeddings": false
+	}`), []byte(`{
+		"model": {
+			"type": "BPE",
+			"vocab": {"a": 0},
+			"merges": []
+		},
+		"added_tokens": [
+			{"id": 199998, "content": "<|startoftext|>", "special": true},
+			{"id": 199999, "content": "<|endoftext|>", "special": true},
+			{"id": 200002, "content": "<|return|>", "special": true},
+			{"id": 200012, "content": "<|call|>", "special": true}
+		]
+	}`), map[string][]byte{
+		"tokenizer_config.json": []byte(`{
+			"bos_token": "<|startoftext|>",
+			"eos_token": "<|return|>"
+		}`),
+	})
+
+	m, err := base.New(root)
+	if err != nil {
+		t.Fatalf("base.New() error = %v", err)
+	}
+
+	got := m.(*Model).Tokenizer()
+	want := []int32{199999, 200002, 200012}
+	if !slices.Equal(got.EOSTokens(), want) {
+		t.Fatalf("Tokenizer().EOSTokens() = %v, want %v", got.EOSTokens(), want)
+	}
+
+	if !got.IsEOS(200012) {
+		t.Fatal("Tokenizer().IsEOS(<|call|>) = false, want true")
+	}
+}
+
 func TestLoadWeightsDensePath(t *testing.T) {
 	skipIfNoMLX(t)
 
@@ -2991,6 +3047,57 @@ func testRoot(t *testing.T, configJSON, tokenizerJSON []byte) *model.Root {
 			{MediaType: "application/vnd.ollama.image.json", Digest: "sha256:config", Name: "config.json"},
 			{MediaType: "application/vnd.ollama.image.json", Digest: "sha256:tokenizer", Name: "tokenizer.json"},
 		},
+	}
+
+	return &model.Root{
+		Manifest: &manifest.ModelManifest{
+			Manifest: mf,
+			BlobDir:  blobDir,
+		},
+	}
+}
+
+func testRootWithExtraConfigs(t *testing.T, configJSON, tokenizerJSON []byte, extraConfigs map[string][]byte) *model.Root {
+	t.Helper()
+
+	dir := t.TempDir()
+	blobDir := filepath.Join(dir, "blobs")
+	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	writeBlob := func(digest string, content []byte) {
+		t.Helper()
+		path := filepath.Join(blobDir, strings.Replace(digest, ":", "-", 1))
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, err)
+		}
+	}
+
+	writeBlob("sha256:config", configJSON)
+	writeBlob("sha256:tokenizer", tokenizerJSON)
+
+	layers := []manifest.ManifestLayer{
+		{MediaType: "application/vnd.ollama.image.json", Digest: "sha256:config", Name: "config.json"},
+		{MediaType: "application/vnd.ollama.image.json", Digest: "sha256:tokenizer", Name: "tokenizer.json"},
+	}
+
+	extraIndex := 0
+	for name, content := range extraConfigs {
+		digest := fmt.Sprintf("sha256:extra-%d", extraIndex)
+		extraIndex++
+		writeBlob(digest, content)
+		layers = append(layers, manifest.ManifestLayer{
+			MediaType: "application/vnd.ollama.image.json",
+			Digest:    digest,
+			Name:      name,
+		})
+	}
+
+	mf := &manifest.Manifest{
+		SchemaVersion: 2,
+		MediaType:     "application/vnd.ollama.image.model",
+		Layers:        layers,
 	}
 
 	return &model.Root{

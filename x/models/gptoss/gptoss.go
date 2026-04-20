@@ -21,6 +21,8 @@ func init() {
 	base.Register("GptOssForCausalLM", NewModel)
 }
 
+var harmonyEOSTokens = []string{"<|endoftext|>", "<|return|>", "<|call|>"}
+
 // RopeScaling carries the gpt-oss rope scaling block.
 type RopeScaling struct {
 	Factor                        float32 `json:"factor"`
@@ -194,12 +196,29 @@ func NewModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse tokenizer: %w", err)
 	}
+	ensureHarmonyEOSTokens(tok)
 
 	return &Model{
 		Config: &cfg,
 		Layers: make([]*Layer, cfg.NumHiddenLayers),
 		tok:    tok,
 	}, nil
+}
+
+func ensureHarmonyEOSTokens(tok *tokenizer.Tokenizer) {
+	if tok == nil {
+		return
+	}
+
+	ids := make([]int32, 0, len(harmonyEOSTokens))
+	for _, name := range harmonyEOSTokens {
+		if id, ok := tok.GetSpecialToken(name); ok {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) > 0 {
+		tok.SetEOSTokens(ids...)
+	}
 }
 
 func parseConfig(configData []byte) (Config, error) {
