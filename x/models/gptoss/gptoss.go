@@ -210,7 +210,7 @@ func ensureHarmonyEOSTokens(tok *tokenizer.Tokenizer) {
 		return
 	}
 
-	ids := make([]int32, 0, len(harmonyEOSTokens))
+	ids := append([]int32(nil), tok.EOSTokens()...)
 	for _, name := range harmonyEOSTokens {
 		if id, ok := tok.GetSpecialToken(name); ok {
 			ids = append(ids, id)

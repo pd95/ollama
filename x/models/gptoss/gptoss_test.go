@@ -165,23 +165,26 @@ func TestNewModelRestoresHarmonyStopTokens(t *testing.T) {
 		"rms_norm_eps": 0.00001,
 		"vocab_size": 201088,
 		"tie_word_embeddings": false
-	}`), []byte(`{
-		"model": {
-			"type": "BPE",
+		}`), []byte(`{
+			"model": {
+				"type": "BPE",
 			"vocab": {"a": 0},
 			"merges": []
 		},
-		"added_tokens": [
-			{"id": 199998, "content": "<|startoftext|>", "special": true},
-			{"id": 199999, "content": "<|endoftext|>", "special": true},
-			{"id": 200002, "content": "<|return|>", "special": true},
-			{"id": 200012, "content": "<|call|>", "special": true}
-		]
-	}`), map[string][]byte{
+			"added_tokens": [
+				{"id": 199998, "content": "<|startoftext|>", "special": true},
+				{"id": 199999, "content": "<|endoftext|>", "special": true},
+				{"id": 200002, "content": "<|return|>", "special": true},
+				{"id": 200012, "content": "<|call|>", "special": true}
+			]
+		}`), map[string][]byte{
+		"generation_config.json": []byte(`{
+				"eos_token_id": [200002, 199999]
+			}`),
 		"tokenizer_config.json": []byte(`{
-			"bos_token": "<|startoftext|>",
-			"eos_token": "<|return|>"
-		}`),
+				"bos_token": "<|startoftext|>",
+				"eos_token": "<|return|>"
+			}`),
 	})
 
 	m, err := base.New(root)
@@ -190,9 +193,12 @@ func TestNewModelRestoresHarmonyStopTokens(t *testing.T) {
 	}
 
 	got := m.(*Model).Tokenizer()
-	want := []int32{199999, 200002, 200012}
+	want := []int32{200002, 199999, 200012}
 	if !slices.Equal(got.EOSTokens(), want) {
 		t.Fatalf("Tokenizer().EOSTokens() = %v, want %v", got.EOSTokens(), want)
+	}
+	if got.EOS() != 200002 {
+		t.Fatalf("Tokenizer().EOS() = %d, want %d", got.EOS(), 200002)
 	}
 
 	if !got.IsEOS(200012) {
