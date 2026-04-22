@@ -206,6 +206,61 @@ func TestNewModelRestoresHarmonyStopTokens(t *testing.T) {
 	}
 }
 
+func TestLinearNeedsStepwisePrefill(t *testing.T) {
+	if !linearNeedsStepwisePrefill(nn.NewLinear(nil, nil)) {
+		t.Fatal("linearNeedsStepwisePrefill(nn.Linear) = false, want true")
+	}
+	if linearNeedsStepwisePrefill(&nn.QuantizedLinear{}) {
+		t.Fatal("linearNeedsStepwisePrefill(nn.QuantizedLinear) = true, want false")
+	}
+}
+
+func TestModelShouldUseStepwiseUnembedPrefill(t *testing.T) {
+	m := &Model{LMHead: &nn.QuantizedLinear{}}
+	if m.shouldUseStepwiseUnembedPrefill() {
+		t.Fatal("quantized LMHead shouldUseStepwiseUnembedPrefill() = true, want false")
+	}
+
+	m.LMHead = nn.NewLinear(nil, nil)
+	if !m.shouldUseStepwiseUnembedPrefill() {
+		t.Fatal("dense LMHead shouldUseStepwiseUnembedPrefill() = false, want true")
+	}
+
+	t.Setenv("GPTOSS_PREFILL_STEPWISE", "1")
+	m.LMHead = &nn.QuantizedLinear{}
+	if !m.shouldUseStepwiseUnembedPrefill() {
+		t.Fatal("forced quantized LMHead shouldUseStepwiseUnembedPrefill() = false, want true")
+	}
+}
+
+func TestAttentionShouldUseStepwisePrefill(t *testing.T) {
+	a := &Attention{
+		QProj: &nn.QuantizedLinear{},
+		KProj: &nn.QuantizedLinear{},
+		VProj: &nn.QuantizedLinear{},
+		OProj: &nn.QuantizedLinear{},
+	}
+	if a.shouldUseStepwisePrefill() {
+		t.Fatal("all-quantized attention shouldUseStepwisePrefill() = true, want false")
+	}
+
+	a.OProj = nn.NewLinear(nil, nil)
+	if !a.shouldUseStepwisePrefill() {
+		t.Fatal("dense attention projection shouldUseStepwisePrefill() = false, want true")
+	}
+
+	t.Setenv("GPTOSS_PREFILL_STEPWISE", "1")
+	a = &Attention{
+		QProj: &nn.QuantizedLinear{},
+		KProj: &nn.QuantizedLinear{},
+		VProj: &nn.QuantizedLinear{},
+		OProj: &nn.QuantizedLinear{},
+	}
+	if !a.shouldUseStepwisePrefill() {
+		t.Fatal("forced all-quantized attention shouldUseStepwisePrefill() = false, want true")
+	}
+}
+
 func TestLoadWeightsDensePath(t *testing.T) {
 	skipIfNoMLX(t)
 
