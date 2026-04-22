@@ -57,7 +57,7 @@ func TestGPTOSSImportTransformRenamesTensors(t *testing.T) {
 	}
 }
 
-func TestGPTOSSImportTransformQuantizationType_ExpertsAffineOnly(t *testing.T) {
+func TestGPTOSSImportTransformQuantizationType_ExpertsAllowNVFP4(t *testing.T) {
 	transform := &gptossImportTransform{}
 	shape := []int32{2, 64, 128}
 
@@ -66,6 +66,9 @@ func TestGPTOSSImportTransformQuantizationType_ExpertsAffineOnly(t *testing.T) {
 	}
 	if got := transform.quantizationType("blocks.0.experts.gate_proj.weight", shape, "int4"); got != "int4" {
 		t.Fatalf("quantizationType(int4) = %q, want %q", got, "int4")
+	}
+	if got := transform.quantizationType("blocks.0.experts.gate_proj.weight", shape, "nvfp4"); got != "nvfp4" {
+		t.Fatalf("quantizationType(nvfp4) = %q, want %q", got, "nvfp4")
 	}
 	if got := transform.quantizationType("blocks.0.experts.gate_proj.weight", shape, "mxfp4"); got != "" {
 		t.Fatalf("quantizationType(mxfp4) = %q, want empty", got)
@@ -120,11 +123,11 @@ func TestGPTOSSImportTransformDequantizesExpertWeights(t *testing.T) {
 	if out[0].Dtype != "BF16" || out[1].Dtype != "BF16" {
 		t.Fatalf("transformTensor() dtypes = %q/%q, want BF16/BF16", out[0].Dtype, out[1].Dtype)
 	}
-	if !slices.Equal(out[0].Shape, []int32{1, 32, 1}) {
-		t.Fatalf("transformTensor() gate shape = %v, want [1 32 1]", out[0].Shape)
+	if !slices.Equal(out[0].Shape, []int32{1, 1, 32}) {
+		t.Fatalf("transformTensor() gate shape = %v, want [1 1 32]", out[0].Shape)
 	}
-	if !slices.Equal(out[1].Shape, []int32{1, 32, 1}) {
-		t.Fatalf("transformTensor() up shape = %v, want [1 32 1]", out[1].Shape)
+	if !slices.Equal(out[1].Shape, []int32{1, 1, 32}) {
+		t.Fatalf("transformTensor() up shape = %v, want [1 1 32]", out[1].Shape)
 	}
 	got, err := io.ReadAll(out[0].Reader())
 	if err != nil {
@@ -250,12 +253,12 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 		st.NewTensorDataFromBytes("model.layers.0.self_attn.q_proj.weight", "BF16", []int32{2, 2}, make([]byte, 8)),
 		st.NewTensorDataFromBytes("model.layers.0.self_attn.sinks", "BF16", []int32{2}, make([]byte, 4)),
 		st.NewTensorDataFromBytes("model.layers.0.mlp.router.weight", "BF16", []int32{2, 2}, make([]byte, 8)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_blocks", "U8", []int32{1, 2, 1, 16}, make([]byte, 32)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_scales", "U8", []int32{1, 2, 1}, make([]byte, 2)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_bias", "BF16", []int32{1, 2}, make([]byte, 4)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_blocks", "U8", []int32{1, 2, 1, 16}, make([]byte, 32)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_scales", "U8", []int32{1, 2, 1}, make([]byte, 2)),
-		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_bias", "BF16", []int32{1, 2}, make([]byte, 4)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_blocks", "U8", []int32{2, 32, 1, 16}, make([]byte, 2*32*16)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_scales", "U8", []int32{2, 32, 1}, make([]byte, 2*32)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_bias", "BF16", []int32{2, 32}, make([]byte, 2*32*2)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_blocks", "U8", []int32{2, 16, 1, 16}, make([]byte, 2*16*16)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_scales", "U8", []int32{2, 16, 1}, make([]byte, 2*16)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_bias", "BF16", []int32{2, 16}, make([]byte, 2*16*2)),
 	})
 
 	var denseNames []string
@@ -311,6 +314,7 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 	}
 
 	for _, tensor := range packedTensors {
+		t.Logf("packed tensor %s shape=%v dtype=%s quantize=%q", tensor.Name, tensor.Shape, tensor.Dtype, tensor.Quantize)
 		if tensor.Reader == nil {
 			t.Fatalf("packed tensor %q reader = nil, want safetensors reader", tensor.Name)
 		}
@@ -320,6 +324,9 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 			}
 			if tensor.Quantize != "" {
 				t.Fatalf("packed tensor %q quantize = %q, want empty", tensor.Name, tensor.Quantize)
+			}
+			if !slices.Equal(tensor.Shape, []int32{2, 16, 32}) {
+				t.Fatalf("packed tensor %q shape = %v, want [2 16 32]", tensor.Name, tensor.Shape)
 			}
 		}
 	}
@@ -342,6 +349,86 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 	for _, name := range wantDenseNames {
 		if !slices.Contains(denseNames, name) {
 			t.Fatalf("dense tensor %q not seen in createTensorLayer; got %v", name, denseNames)
+		}
+	}
+}
+
+func TestCreateSafetensorsModel_GptOSSPacksExpertsNVFP4(t *testing.T) {
+	dir := t.TempDir()
+
+	configJSON := `{
+		"model_type": "test",
+		"architectures": ["GptOssForCausalLM"],
+		"quantization_config": {"quant_method": "mxfp4"}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatalf("failed to write config.json: %v", err)
+	}
+
+	createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
+		st.NewTensorDataFromBytes("model.embed_tokens.weight", "BF16", []int32{2, 2}, make([]byte, 8)),
+		st.NewTensorDataFromBytes("model.norm.weight", "BF16", []int32{2}, make([]byte, 4)),
+		st.NewTensorDataFromBytes("lm_head.weight", "BF16", []int32{2, 2}, make([]byte, 8)),
+		st.NewTensorDataFromBytes("model.layers.0.input_layernorm.weight", "BF16", []int32{2}, make([]byte, 4)),
+		st.NewTensorDataFromBytes("model.layers.0.self_attn.q_proj.weight", "BF16", []int32{2, 2}, make([]byte, 8)),
+		st.NewTensorDataFromBytes("model.layers.0.self_attn.sinks", "BF16", []int32{2}, make([]byte, 4)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.router.weight", "BF16", []int32{2, 2}, make([]byte, 8)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_blocks", "U8", []int32{2, 32, 1, 16}, make([]byte, 2*32*16)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_scales", "U8", []int32{2, 32, 1}, make([]byte, 2*32)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_bias", "BF16", []int32{2, 32}, make([]byte, 2*32*2)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_blocks", "U8", []int32{2, 16, 1, 16}, make([]byte, 2*16*16)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_scales", "U8", []int32{2, 16, 1}, make([]byte, 2*16)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_bias", "BF16", []int32{2, 16}, make([]byte, 2*16*2)),
+	})
+
+	var packedTensors []PackedTensorInput
+
+	createLayer := func(r io.Reader, mediaType, name string) (LayerInfo, error) {
+		_, _ = io.ReadAll(r)
+		return LayerInfo{Name: name, Digest: "sha256:" + name, MediaType: mediaType}, nil
+	}
+
+	createTensorLayer := func(r io.Reader, name, dtype string, shape []int32, quantize string) ([]LayerInfo, error) {
+		_, _ = io.ReadAll(r)
+		return []LayerInfo{{Name: name, Digest: "sha256:" + name, MediaType: "application/vnd.ollama.image.tensor"}}, nil
+	}
+
+	createPackedLayer := func(groupName string, tensors []PackedTensorInput) (LayerInfo, error) {
+		if groupName != "blocks.0.experts" {
+			t.Fatalf("packed group = %q, want %q", groupName, "blocks.0.experts")
+		}
+		packedTensors = append([]PackedTensorInput(nil), tensors...)
+		return LayerInfo{Name: groupName, Digest: "sha256:" + groupName, MediaType: "application/vnd.ollama.image.tensor"}, nil
+	}
+
+	writeManifest := func(modelName string, config LayerInfo, layers []LayerInfo) error { return nil }
+
+	if err := CreateSafetensorsModel("test-model", dir, "nvfp4", createLayer, createTensorLayer, writeManifest, func(string) {}, createPackedLayer); err != nil {
+		t.Fatalf("CreateSafetensorsModel() error = %v", err)
+	}
+
+	if len(packedTensors) != 6 {
+		t.Fatalf("packed tensor count = %d, want 6", len(packedTensors))
+	}
+
+	for _, tensor := range packedTensors {
+		if tensor.Reader == nil {
+			t.Fatalf("packed tensor %q reader = nil, want safetensors reader", tensor.Name)
+		}
+		if strings.HasSuffix(tensor.Name, ".weight") {
+			if tensor.Dtype != "BF16" {
+				t.Fatalf("packed tensor %q dtype = %q, want BF16 before quantization", tensor.Name, tensor.Dtype)
+			}
+			if tensor.Quantize != "nvfp4" {
+				t.Fatalf("packed tensor %q quantize = %q, want %q", tensor.Name, tensor.Quantize, "nvfp4")
+			}
+			if !slices.Equal(tensor.Shape, []int32{2, 16, 32}) {
+				t.Fatalf("packed tensor %q shape = %v, want [2 16 32]", tensor.Name, tensor.Shape)
+			}
+			continue
+		}
+		if tensor.Quantize != "" {
+			t.Fatalf("packed tensor %q quantize = %q, want empty for bias", tensor.Name, tensor.Quantize)
 		}
 	}
 }
