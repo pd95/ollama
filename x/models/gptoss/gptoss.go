@@ -357,6 +357,37 @@ func (m *Model) NewCaches() []cache.Cache {
 	return caches
 }
 
+func stepwisePrefillForced() bool {
+	return os.Getenv("GPTOSS_PREFILL_STEPWISE") == "1"
+}
+
+func linearNeedsStepwisePrefill(linear nn.LinearLayer) bool {
+	if linear == nil {
+		return false
+	}
+
+	_, quantized := linear.(*nn.QuantizedLinear)
+	return !quantized
+}
+
+func (m *Model) shouldUseStepwiseUnembedPrefill() bool {
+	if stepwisePrefillForced() {
+		return true
+	}
+	return linearNeedsStepwisePrefill(m.LMHead)
+}
+
+func (a *Attention) shouldUseStepwisePrefill() bool {
+	if stepwisePrefillForced() {
+		return true
+	}
+
+	return linearNeedsStepwisePrefill(a.QProj) ||
+		linearNeedsStepwisePrefill(a.KProj) ||
+		linearNeedsStepwisePrefill(a.VProj) ||
+		linearNeedsStepwisePrefill(a.OProj)
+}
+
 // swiGLUAlphaLimit is a compiled kernel implementing the gpt-oss MoE activation:
 //
 //	swish = min(gate, 7) * sigmoid(1.702 * min(gate, 7))
@@ -1005,7 +1036,7 @@ func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
 	if m == nil || m.LMHead == nil || x == nil {
 		return nil
 	}
-	if os.Getenv("GPTOSS_PREFILL_STEPWISE") == "1" {
+	if m.shouldUseStepwiseUnembedPrefill() {
 		dims := x.Dims()
 		if len(dims) == 3 && dims[0] == 1 && dims[1] > 1 {
 			steps := make([]*mlx.Array, 0, dims[1])
@@ -1052,11 +1083,10 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 	if a == nil || a.QProj == nil || a.KProj == nil || a.VProj == nil || a.OProj == nil || x == nil || cfg == nil {
 		return x
 	}
-	if c != nil && batchSize == 1 && seqLen > 1 && os.Getenv("GPTOSS_PREFILL_STEPWISE") == "1" {
-		// Stepwise fallback for debugging: token-by-token cached prefill.
-		// The batched path has a small numeric divergence on macOS MLX
-		// (~0.03% relative per layer) that is well within quantization
-		// tolerance for MXFP4/int8 models.
+	if c != nil && batchSize == 1 && seqLen > 1 && a.shouldUseStepwisePrefill() {
+		// GPT-OSS uses alternating rotating and full caches. On MLX/macOS the
+		// dense cached prefill path has not been parity-stable, so prefill is
+		// executed token-by-token there to preserve correctness.
 		steps := make([]*mlx.Array, 0, seqLen)
 		for pos := range seqLen {
 			steps = append(steps, a.Forward(sliceSequence(x, pos), c, 1, 1, cfg, layerIndex))
