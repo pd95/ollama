@@ -136,9 +136,13 @@ func (t *gptossImportTransform) quantizationType(name string, shape []int32, qua
 	}
 
 	if strings.Contains(name, ".experts.") && strings.HasSuffix(name, ".weight") {
+		// HF gpt-oss expert tensors are dequantized and reshaped into dense 3-D
+		// expert stacks during import. For the initial "rebuild" path we allow
+		// create-time requantization into formats the existing GPT-OSS runtime can
+		// already consume via GatherQMM, starting with nvfp4.
 		quantNorm := normalizeQuantType(quantize)
 		switch quantNorm {
-		case "int4", "int8":
+		case "int4", "int8", "nvfp4":
 			if len(shape) != 3 {
 				return ""
 			}
@@ -146,7 +150,7 @@ func (t *gptossImportTransform) quantizationType(name string, shape []int32, qua
 			for _, d := range shape {
 				elems *= int64(d)
 			}
-			if elems < 1024 || shape[len(shape)-1]%64 != 0 {
+			if elems < 1024 || !isAligned(shape, quantNorm) {
 				return ""
 			}
 			return quantNorm
@@ -217,12 +221,6 @@ func (t *gptossImportTransform) maybeEmitExpertWeight(name string) ([]*safetenso
 	switch {
 	case strings.Contains(name, ".experts.gate_up_proj.weight"):
 		return dequantizeAndSplitGateUpTensor(name, blocks, scales)
-	case strings.Contains(name, ".experts.down_proj.weight"):
-		weight, err := dequantizeAndTransposeExpertWeight(name, blocks, scales)
-		if err != nil {
-			return nil, err
-		}
-		return []*safetensors.TensorData{weight}, nil
 	default:
 		weight, err := dequantizeGPTOSSMXFP4Tensor(name, blocks, scales)
 		if err != nil {
@@ -330,14 +328,14 @@ func dequantizeAndSplitGateUpTensor(name string, blocks, scales *safetensors.Ten
 	}
 	mid := outDim / 2
 
-	gateRaw := make([]byte, experts*inDim*mid*2)
-	upRaw := make([]byte, experts*inDim*mid*2)
+	gateRaw := make([]byte, experts*mid*inDim*2)
+	upRaw := make([]byte, experts*mid*inDim*2)
 	parallelizeGPTOSSExperts(experts, func(e int) {
 		for row := range outDim {
 			dstRow := row / 2
 			for col := range inDim {
 				src := (e*outDim+row)*inDim + col
-				dst := (e*inDim+col)*mid + dstRow
+				dst := (e*mid+dstRow)*inDim + col
 				bits := uint16(bfloat16.FromFloat32(values[src]))
 				if row%2 == 0 {
 					binary.LittleEndian.PutUint16(gateRaw[dst*2:], bits)
@@ -350,34 +348,11 @@ func dequantizeAndSplitGateUpTensor(name string, blocks, scales *safetensors.Ten
 
 	gateName := strings.Replace(name, "gate_up_proj", "gate_proj", 1)
 	upName := strings.Replace(name, "gate_up_proj", "up_proj", 1)
-	outShape := []int32{int32(experts), int32(inDim), int32(mid)}
+	outShape := []int32{int32(experts), int32(mid), int32(inDim)}
 	return []*safetensors.TensorData{
 		safetensors.NewTensorDataFromBytes(gateName, "BF16", outShape, gateRaw),
 		safetensors.NewTensorDataFromBytes(upName, "BF16", outShape, upRaw),
 	}, nil
-}
-
-func dequantizeAndTransposeExpertWeight(name string, blocks, scales *safetensors.TensorData) (*safetensors.TensorData, error) {
-	values, shape, err := decodeGPTOSSMXFP4TensorValues(name, blocks, scales)
-	if err != nil {
-		return nil, err
-	}
-	if len(shape) != 3 {
-		return nil, fmt.Errorf("gpt-oss expert tensor %q shape = %v, want [experts out in]", name, shape)
-	}
-
-	experts, outDim, inDim := int(shape[0]), int(shape[1]), int(shape[2])
-	raw := make([]byte, experts*inDim*outDim*2)
-	parallelizeGPTOSSExperts(experts, func(e int) {
-		for out := range outDim {
-			for in := range inDim {
-				src := (e*outDim+out)*inDim + in
-				dst := (e*inDim+in)*outDim + out
-				binary.LittleEndian.PutUint16(raw[dst*2:], uint16(bfloat16.FromFloat32(values[src])))
-			}
-		}
-	})
-	return safetensors.NewTensorDataFromBytes(name, "BF16", []int32{int32(experts), int32(inDim), int32(outDim)}, raw), nil
 }
 
 func parallelizeGPTOSSExperts(experts int, fn func(int)) {
