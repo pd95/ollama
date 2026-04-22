@@ -361,7 +361,7 @@ func stepwisePrefillForced() bool {
 	return os.Getenv("GPTOSS_PREFILL_STEPWISE") == "1"
 }
 
-func linearNeedsStepwisePrefill(linear nn.LinearLayer) bool {
+func linearRequiresStepwiseCachedPrefill(linear nn.LinearLayer) bool {
 	if linear == nil {
 		return false
 	}
@@ -370,22 +370,34 @@ func linearNeedsStepwisePrefill(linear nn.LinearLayer) bool {
 	return !quantized
 }
 
+func isQuantizedLinear(linear nn.LinearLayer) bool {
+	if linear == nil {
+		return false
+	}
+
+	_, quantized := linear.(*nn.QuantizedLinear)
+	return quantized
+}
+
 func (m *Model) shouldUseStepwiseUnembedPrefill() bool {
 	if stepwisePrefillForced() {
 		return true
 	}
-	return linearNeedsStepwisePrefill(m.LMHead)
+	return linearRequiresStepwiseCachedPrefill(m.LMHead)
 }
 
-func (a *Attention) shouldUseStepwisePrefill() bool {
+func (a *Attention) shouldUseStepwiseCachedPrefill() bool {
 	if stepwisePrefillForced() {
 		return true
 	}
 
-	return linearNeedsStepwisePrefill(a.QProj) ||
-		linearNeedsStepwisePrefill(a.KProj) ||
-		linearNeedsStepwisePrefill(a.VProj) ||
-		linearNeedsStepwisePrefill(a.OProj)
+	return linearRequiresStepwiseCachedPrefill(a.QProj) ||
+		linearRequiresStepwiseCachedPrefill(a.KProj) ||
+		linearRequiresStepwiseCachedPrefill(a.VProj) ||
+		linearRequiresStepwiseCachedPrefill(a.OProj) ||
+		isQuantizedLinear(a.QProj) ||
+		isQuantizedLinear(a.KProj) ||
+		isQuantizedLinear(a.VProj)
 }
 
 // swiGLUAlphaLimit is a compiled kernel implementing the gpt-oss MoE activation:
@@ -1122,10 +1134,12 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 	if a == nil || a.QProj == nil || a.KProj == nil || a.VProj == nil || a.OProj == nil || x == nil || cfg == nil {
 		return x
 	}
-	if c != nil && batchSize == 1 && seqLen > 1 && a.shouldUseStepwisePrefill() {
-		// GPT-OSS uses alternating rotating and full caches. On MLX/macOS the
-		// dense cached prefill path has not been parity-stable, so prefill is
-		// executed token-by-token there to preserve correctness.
+	if c != nil && batchSize == 1 && seqLen > 1 && a.shouldUseStepwiseCachedPrefill() {
+		// FIXME: Keep GPT-OSS cached prefill stepwise on MLX for correctness.
+		// Batched cached-prefill matmul parity is still not stable enough for the
+		// affected projection path yet, especially on quantized GPT-OSS imports.
+		// Scope the fallback to cached prefill so decode and uncached batch work
+		// stay on their normal paths until the underlying MLX behavior is stable.
 		steps := make([]*mlx.Array, 0, seqLen)
 		for pos := range seqLen {
 			steps = append(steps, a.Forward(sliceSequence(x, pos), c, 1, 1, cfg, layerIndex))
