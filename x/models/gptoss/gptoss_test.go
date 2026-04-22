@@ -400,6 +400,15 @@ func TestLoadWeightsAcceptsAffineQuantizedLinears(t *testing.T) {
 }
 
 func TestLoadWeightsSupportsQuantizedDirectExperts(t *testing.T) {
+	t.Run("affine-int8", func(t *testing.T) {
+		testLoadWeightsSupportsQuantizedDirectExperts(t, 64, 8, "affine", 2e-2)
+	})
+	t.Run("nvfp4", func(t *testing.T) {
+		testLoadWeightsSupportsQuantizedDirectExperts(t, 16, 4, "nvfp4", 4e-1)
+	})
+}
+
+func testLoadWeightsSupportsQuantizedDirectExperts(t *testing.T, groupSize, bits int, mode string, relTolerance float64) {
 	skipIfNoMLX(t)
 
 	cfg := denseTestConfig(t)
@@ -410,9 +419,9 @@ func TestLoadWeightsSupportsQuantizedDirectExperts(t *testing.T) {
 	cfg.HeadDim = 64
 	cfg.NumLocalExperts = 4
 	cfg.NumExpertsPerTok = 2
-	cfg.QuantGroupSize = 64
-	cfg.QuantBits = 8
-	cfg.QuantMode = "affine"
+	cfg.QuantGroupSize = groupSize
+	cfg.QuantBits = bits
+	cfg.QuantMode = mode
 
 	denseModel := &Model{
 		Config: &cfg,
@@ -428,11 +437,9 @@ func TestLoadWeightsSupportsQuantizedDirectExperts(t *testing.T) {
 		Layers: make([]*Layer, cfg.NumHiddenLayers),
 	}
 	quantTensors := denseTestTensors(t, cfg)
-	// Transpose expert weights before quantizing to simulate MLX-native
-	// [experts, out, packed_in] layout (vs HF-raw [experts, in, packed_out]).
-	quantizeTensorForTestTranspose(t, quantTensors, "blocks.0.experts.gate_proj.weight", 64, 8, "affine", true)
-	quantizeTensorForTestTranspose(t, quantTensors, "blocks.0.experts.up_proj.weight", 64, 8, "affine", true)
-	quantizeTensorForTestTranspose(t, quantTensors, "blocks.0.experts.down_proj.weight", 64, 8, "affine", true)
+	quantizeTensorForTest(t, quantTensors, "blocks.0.experts.gate_proj.weight", groupSize, bits, mode)
+	quantizeTensorForTest(t, quantTensors, "blocks.0.experts.up_proj.weight", groupSize, bits, mode)
+	quantizeTensorForTest(t, quantTensors, "blocks.0.experts.down_proj.weight", groupSize, bits, mode)
 	if err := quantModel.LoadWeights(quantTensors); err != nil {
 		t.Fatalf("quantized LoadWeights() error = %v", err)
 	}
@@ -459,10 +466,11 @@ func TestLoadWeightsSupportsQuantizedDirectExperts(t *testing.T) {
 	for i := range denseVals {
 		diff := math.Abs(float64(denseVals[i] - quantVals[i]))
 		mag := math.Max(math.Abs(float64(denseVals[i])), 1e-6)
-		// Use relative tolerance: int8 quantization on BF16 values can introduce
-		// errors up to 1 ULP at BF16 precision (e.g. 8192 at magnitude ~1.3M).
-		if diff/mag > 2e-2 {
-			t.Fatalf("quantized expert output[%d] = %v, want %v (diff %v, rel %v)", i, quantVals[i], denseVals[i], diff, diff/mag)
+		// Non-affine 4-bit modes are much noisier than affine int8 on the tiny
+		// synthetic expert fixture used here, so the tolerance is supplied by the
+		// caller for each quantization regime.
+		if diff/mag > relTolerance {
+			t.Fatalf("quantized expert output[%d] = %v, want %v (diff %v, rel %v, tol %v)", i, quantVals[i], denseVals[i], diff, diff/mag, relTolerance)
 		}
 	}
 }
@@ -589,13 +597,13 @@ func TestLoadWeightsExpertShapeValidationFails(t *testing.T) {
 	}
 
 	tensors := denseTestTensors(t, cfg)
-	tensors["blocks.0.experts.down_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.HiddenSize), int(cfg.IntermediateSize)-1, 99)
+	tensors["blocks.0.experts.down_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.HiddenSize), int(cfg.IntermediateSize)-1, 99).AsType(mlx.DTypeBFloat16)
 
 	err := m.LoadWeights(tensors)
 	if err == nil {
 		t.Fatal("LoadWeights() error = nil, want expert shape validation failure")
 	}
-	if !strings.Contains(err.Error(), "blocks.0.experts.down_proj.weight") || !strings.Contains(err.Error(), "shape [2 4 7]") {
+	if !strings.Contains(err.Error(), "blocks.0.experts.down_proj.weight") || !strings.Contains(err.Error(), "[2 4 7]") {
 		t.Fatalf("LoadWeights() error = %q, want expert shape mismatch", err)
 	}
 }
@@ -2286,11 +2294,11 @@ func denseTestTensors(t *testing.T, cfg Config) map[string]*mlx.Array {
 		tensors[prefix+".ffn_norm.weight"] = denseVector(int(cfg.HiddenSize), 13+float32(i))
 		tensors[prefix+".router.weight"] = denseMatrix(int(cfg.NumLocalExperts), int(cfg.HiddenSize), 14+float32(i))
 		tensors[prefix+".router.bias"] = denseVector(int(cfg.NumLocalExperts), 15+float32(i))
-		tensors[prefix+".experts.gate_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.HiddenSize), int(cfg.IntermediateSize), 16+float32(i)).AsType(mlx.DTypeBFloat16)
+		tensors[prefix+".experts.gate_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.IntermediateSize), int(cfg.HiddenSize), 16+float32(i)).AsType(mlx.DTypeBFloat16)
 		tensors[prefix+".experts.gate_proj.bias"] = expertBias(int(cfg.NumLocalExperts), int(cfg.IntermediateSize), 0)
-		tensors[prefix+".experts.up_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.HiddenSize), int(cfg.IntermediateSize), 20+float32(i)).AsType(mlx.DTypeBFloat16)
+		tensors[prefix+".experts.up_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.IntermediateSize), int(cfg.HiddenSize), 20+float32(i)).AsType(mlx.DTypeBFloat16)
 		tensors[prefix+".experts.up_proj.bias"] = expertBias(int(cfg.NumLocalExperts), int(cfg.IntermediateSize), 0.5)
-		tensors[prefix+".experts.down_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.IntermediateSize), int(cfg.HiddenSize), 24+float32(i)).AsType(mlx.DTypeBFloat16)
+		tensors[prefix+".experts.down_proj.weight"] = denseExpertWeight(int(cfg.NumLocalExperts), int(cfg.HiddenSize), int(cfg.IntermediateSize), 24+float32(i)).AsType(mlx.DTypeBFloat16)
 		tensors[prefix+".experts.down_proj.bias"] = expertBias(int(cfg.NumLocalExperts), int(cfg.HiddenSize), 0)
 	}
 
@@ -2299,24 +2307,9 @@ func denseTestTensors(t *testing.T, cfg Config) map[string]*mlx.Array {
 
 func quantizeTensorForTest(t *testing.T, tensors map[string]*mlx.Array, name string, groupSize, bits int, mode string) {
 	t.Helper()
-	quantizeTensorForTestTranspose(t, tensors, name, groupSize, bits, mode, false)
-}
-
-// quantizeTensorForTestTranspose quantizes a tensor in-place. When transpose
-// is true and the tensor is 3-D (expert weights), it transposes dims 1↔2
-// before quantizing to produce MLX-native [experts, out, packed_in] layout
-// instead of the HF-raw [experts, in, packed_out] layout.
-func quantizeTensorForTestTranspose(t *testing.T, tensors map[string]*mlx.Array, name string, groupSize, bits int, mode string, transpose bool) {
-	t.Helper()
-
 	weight := tensors[name]
 	if weight == nil {
 		t.Fatalf("quantizeTensorForTest(%q): missing weight tensor", name)
-	}
-	if transpose && len(weight.Dims()) == 3 {
-		weight = mlx.Transpose(weight, 0, 2, 1)
-		weight = mlx.Contiguous(weight, false)
-		mlx.Eval(weight)
 	}
 	qw, scales, qbiases := mlx.Quantize(weight, groupSize, bits, mode)
 	if qw == nil || scales == nil {
