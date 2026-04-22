@@ -991,6 +991,119 @@ func TestAttentionLastTokenMatchesPrefillStepPathLoadedLayerCausalCache(t *testi
 	}
 }
 
+func TestQuantizedAttentionCachedPrefillParity(t *testing.T) {
+	skipIfNoMLX(t)
+
+	m, cfg := quantizedAttentionTestModel(t)
+	attn := m.Layers[0].Attention
+	seqLen := 48
+	xVals := patternedHiddenValues(seqLen, int(cfg.HiddenSize))
+	x := mlx.FromValues(xVals, 1, seqLen, int(cfg.HiddenSize)).AsType(mlx.DTypeBFloat16)
+
+	t.Run("rotating-cache", func(t *testing.T) {
+		fullCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
+		_, fullTrace := attentionForwardTraceForTest(t, attn, x, fullCache, 1, seqLen, &cfg, 0)
+
+		stepCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
+		var stepTrace attentionPrefillTrace
+		for pos := range seqLen {
+			_, stepTrace = attentionForwardTraceForTest(t, attn, sliceSequence(x, pos), stepCache, 1, 1, &cfg, 0)
+		}
+
+		assertFloatSliceClose(t, "rotating q_proj last-token", fullTrace.qProjLast, stepTrace.qProjLast, 1e-2, 1e-2)
+		assertFloatSliceClose(t, "rotating k_proj last-token", fullTrace.kProjLast, stepTrace.kProjLast, 1e-2, 1e-2)
+		assertFloatSliceClose(t, "rotating v_proj last-token", fullTrace.vProjLast, stepTrace.vProjLast, 1e-2, 1e-2)
+		if fullTrace.visibleKeyLen != stepTrace.visibleKeyLen || fullTrace.visibleValueLen != stepTrace.visibleValueLen {
+			t.Fatalf(
+				"rotating visible cache lens = (%d, %d), want (%d, %d)",
+				fullTrace.visibleKeyLen,
+				fullTrace.visibleValueLen,
+				stepTrace.visibleKeyLen,
+				stepTrace.visibleValueLen,
+			)
+		}
+		assertFloatSliceClose(t, "rotating visible cache last-key", fullTrace.visibleKeyLast, stepTrace.visibleKeyLast, 1e-2, 1e-2)
+		assertFloatSliceClose(t, "rotating visible cache last-value", fullTrace.visibleValueLast, stepTrace.visibleValueLast, 1e-2, 1e-2)
+		assertFloatSliceClose(t, "rotating pre-o-proj attention", fullTrace.preOProjLast, stepTrace.preOProjLast, 5e-2, 5e-2)
+		assertFloatSliceClose(t, "rotating attention output", fullTrace.outputLast, stepTrace.outputLast, 5e-2, 5e-2)
+	})
+
+	t.Run("causal-cache", func(t *testing.T) {
+		fullCache := cache.NewKVCache()
+		_, fullTrace := attentionForwardTraceForTest(t, attn, x, fullCache, 1, seqLen, &cfg, 0)
+
+		stepCache := cache.NewKVCache()
+		var stepTrace attentionPrefillTrace
+		for pos := range seqLen {
+			_, stepTrace = attentionForwardTraceForTest(t, attn, sliceSequence(x, pos), stepCache, 1, 1, &cfg, 0)
+		}
+
+		assertFloatSliceClose(t, "causal q_proj last-token", fullTrace.qProjLast, stepTrace.qProjLast, 1e-2, 1e-2)
+		assertFloatSliceClose(t, "causal k_proj last-token", fullTrace.kProjLast, stepTrace.kProjLast, 1e-2, 1e-2)
+		assertFloatSliceClose(t, "causal v_proj last-token", fullTrace.vProjLast, stepTrace.vProjLast, 1e-2, 1e-2)
+		if fullTrace.visibleKeyLen != stepTrace.visibleKeyLen || fullTrace.visibleValueLen != stepTrace.visibleValueLen {
+			t.Fatalf(
+				"causal visible cache lens = (%d, %d), want (%d, %d)",
+				fullTrace.visibleKeyLen,
+				fullTrace.visibleValueLen,
+				stepTrace.visibleKeyLen,
+				stepTrace.visibleValueLen,
+			)
+		}
+		assertFloatSliceClose(t, "causal visible cache last-key", fullTrace.visibleKeyLast, stepTrace.visibleKeyLast, 1e-2, 1e-2)
+		assertFloatSliceClose(t, "causal visible cache last-value", fullTrace.visibleValueLast, stepTrace.visibleValueLast, 1e-2, 1e-2)
+		assertFloatSliceClose(t, "causal pre-o-proj attention", fullTrace.preOProjLast, stepTrace.preOProjLast, 5e-2, 5e-2)
+		assertFloatSliceClose(t, "causal attention output", fullTrace.outputLast, stepTrace.outputLast, 5e-2, 5e-2)
+	})
+}
+
+func TestQuantizedLayerLastTokenMatchesCachedPrefillStepPath(t *testing.T) {
+	skipIfNoMLX(t)
+
+	m, cfg := quantizedAttentionTestModel(t)
+	layer := m.Layers[0]
+	seqLen := 48
+	xVals := patternedHiddenValues(seqLen, int(cfg.HiddenSize))
+	x := mlx.FromValues(xVals, 1, seqLen, int(cfg.HiddenSize)).AsType(mlx.DTypeBFloat16)
+
+	fullCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
+	full := layer.Forward(x, fullCache, 1, seqLen, &cfg, 0)
+	fullLast := lastTokenFloats(full.AsType(mlx.DTypeFloat32))
+
+	stepCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
+	var step *mlx.Array
+	for pos := range seqLen {
+		step = layer.Forward(sliceSequence(x, pos), stepCache, 1, 1, &cfg, 0)
+	}
+	stepLast := lastTokenFloats(step.AsType(mlx.DTypeFloat32))
+
+	assertFloatSliceClose(t, "quantized layer output", fullLast, stepLast, 5e-2, 5e-2)
+}
+
+func TestQuantizedModelLastTokenLogitsMatchCachedPrefillStepPath(t *testing.T) {
+	skipIfNoMLX(t)
+
+	m, cfg := quantizedAttentionTestModel(t)
+	seqLen := 48
+	tokenVals := patternedTokenValues(seqLen, int(cfg.VocabSize))
+	tokens := mlx.FromValues(tokenVals, 1, seqLen)
+
+	fullCaches := m.NewCaches()
+	fullHidden := m.Forward(tokens, fullCaches)
+	fullLogits := m.Unembed(fullHidden)
+	fullLast := lastTokenFloats(fullLogits.AsType(mlx.DTypeFloat32))
+
+	stepCaches := m.NewCaches()
+	var stepHidden *mlx.Array
+	for pos := range seqLen {
+		stepHidden = m.Forward(mlx.FromValues(tokenVals[pos:pos+1], 1, 1), stepCaches)
+	}
+	stepLogits := m.Unembed(stepHidden)
+	stepLast := lastTokenFloats(stepLogits.AsType(mlx.DTypeFloat32))
+
+	assertFloatSliceClose(t, "quantized model logits", fullLast, stepLast, 5e-2, 5e-2)
+}
+
 func TestQProjLastTokenMatchesBatchPathLoadedLayer(t *testing.T) {
 	skipIfNoMLX(t)
 	t.Skip("diagnostic only: MLX batched affine path diverges on macOS; gpt-oss runtime avoids this path")
@@ -2646,6 +2759,214 @@ func affineFlatRef(x, w, b []float32, outDim, inDim int) []float32 {
 		out[o] = sum
 	}
 	return out
+}
+
+type attentionPrefillTrace struct {
+	qProjLast        []float32
+	kProjLast        []float32
+	vProjLast        []float32
+	visibleKeyLen    int
+	visibleValueLen  int
+	visibleKeyLast   []float32
+	visibleValueLast []float32
+	preOProjLast     []float32
+	outputLast       []float32
+}
+
+func quantizedAttentionTestModel(t *testing.T) (*Model, Config) {
+	t.Helper()
+
+	cfg := denseTestConfig(t)
+	cfg.HiddenSize = 64
+	cfg.IntermediateSize = 128
+	cfg.NumAttentionHeads = 1
+	cfg.NumKeyValueHeads = 1
+	cfg.HeadDim = 64
+	cfg.NumLocalExperts = 4
+	cfg.NumExpertsPerTok = 2
+	cfg.SlidingWindow = 16
+	cfg.RopeTheta = 150000
+	cfg.RopeScaling.Factor = 32
+	cfg.RopeScaling.OriginalMaxPositionEmbeddings = 4096
+	cfg.RopeScaling.BetaFast = 32
+	cfg.RopeScaling.BetaSlow = 1
+	cfg.QuantGroupSize = 64
+	cfg.QuantBits = 8
+	cfg.QuantMode = "affine"
+
+	m := &Model{
+		Config: &cfg,
+		Layers: make([]*Layer, cfg.NumHiddenLayers),
+	}
+
+	tensors := denseTestTensors(t, cfg)
+	for i := range int(cfg.NumHiddenLayers) {
+		prefix := fmt.Sprintf("blocks.%d", i)
+		quantizeTensorForTest(t, tensors, prefix+".q_proj.weight", 64, 8, "affine")
+		quantizeTensorForTest(t, tensors, prefix+".k_proj.weight", 64, 8, "affine")
+		quantizeTensorForTest(t, tensors, prefix+".v_proj.weight", 64, 8, "affine")
+		quantizeTensorForTest(t, tensors, prefix+".attn_out.weight", 64, 8, "affine")
+	}
+
+	if err := m.LoadWeights(tensors); err != nil {
+		t.Fatalf("LoadWeights() error = %v", err)
+	}
+
+	return m, cfg
+}
+
+func patternedHiddenValues(seqLen, hidden int) []float32 {
+	values := make([]float32, seqLen*hidden)
+	for i := range values {
+		values[i] = float32((i%29)-14) / 11
+	}
+	return values
+}
+
+func patternedTokenValues(seqLen, vocab int) []int32 {
+	values := make([]int32, seqLen)
+	for i := range values {
+		values[i] = int32((i*3 + 1) % vocab)
+	}
+	return values
+}
+
+func attentionForwardTraceForTest(
+	t *testing.T,
+	a *Attention,
+	x *mlx.Array,
+	c cache.Cache,
+	batchSize, seqLen int,
+	cfg *Config,
+	layerIndex int,
+) (*mlx.Array, attentionPrefillTrace) {
+	t.Helper()
+
+	var trace attentionPrefillTrace
+
+	query := a.QProj.Forward(x)
+	key := a.KProj.Forward(x)
+	value := a.VProj.Forward(x)
+	trace.qProjLast = lastTokenFloats(query.AsType(mlx.DTypeFloat32))
+	trace.kProjLast = lastTokenFloats(key.AsType(mlx.DTypeFloat32))
+	trace.vProjLast = lastTokenFloats(value.AsType(mlx.DTypeFloat32))
+
+	batch := int32(batchSize)
+	seq := int32(seqLen)
+	numHeads := cfg.NumAttentionHeads
+	numKVHeads := cfg.NumKeyValueHeads
+	headDim := cfg.HeadDim
+
+	query = mlx.Reshape(query, batch, seq, numHeads, headDim)
+	key = mlx.Reshape(key, batch, seq, numKVHeads, headDim)
+	value = mlx.Reshape(value, batch, seq, numKVHeads, headDim)
+	query = mlx.Transpose(query, 0, 2, 1, 3)
+	key = mlx.Transpose(key, 0, 2, 1, 3)
+	value = mlx.Transpose(value, 0, 2, 1, 3)
+
+	offset := 0
+	if c != nil {
+		offset = c.Offset()
+	}
+	attentionScale := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
+	if a.RoPEFreqs != nil && a.RoPEFreqs.Valid() {
+		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, offset, a.RoPEFreqs)
+		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, offset, a.RoPEFreqs)
+		attentionScale *= yarnConcentration(cfg) * yarnConcentration(cfg)
+	} else {
+		ropeBase, ropeScale, _ := cfg.RopeParameters()
+		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
+		key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
+	}
+
+	if c != nil {
+		key, value = c.Update(key, value)
+	}
+
+	visibleKey, visibleValue := visibleKVForLastQueryForTest(key, value, c, cfg)
+	trace.visibleKeyLen = visibleKey.Dim(2)
+	trace.visibleValueLen = visibleValue.Dim(2)
+	trace.visibleKeyLast = lastCacheTokenFloats(visibleKey.AsType(mlx.DTypeFloat32))
+	trace.visibleValueLast = lastCacheTokenFloats(visibleValue.AsType(mlx.DTypeFloat32))
+
+	maskMode := "causal"
+	var mask *mlx.Array
+	if seqLen > 1 && cfg.SlidingWindow > 0 {
+		if _, ok := c.(*cache.RotatingKVCache); ok {
+			maskMode = "array"
+			mask = buildCausalMaskWindow(seq, int32(key.Dim(2)), cfg.SlidingWindow).AsType(query.DType())
+		}
+	}
+
+	attention := mlx.ScaledDotProductAttentionWithSinks(
+		query,
+		key,
+		value,
+		attentionScale,
+		maskMode,
+		mask,
+		a.Sinks,
+	)
+	if attention == nil || !attention.Valid() {
+		t.Fatalf("layer %d trace attention is invalid", layerIndex)
+	}
+	attention = mlx.Transpose(attention, 0, 2, 1, 3)
+	attention = mlx.Reshape(attention, batch, seq, numHeads*headDim)
+	trace.preOProjLast = lastTokenFloats(attention.AsType(mlx.DTypeFloat32))
+
+	out := a.OProj.Forward(attention)
+	trace.outputLast = lastTokenFloats(out.AsType(mlx.DTypeFloat32))
+	return out, trace
+}
+
+func visibleKVForLastQueryForTest(key, value *mlx.Array, c cache.Cache, cfg *Config) (*mlx.Array, *mlx.Array) {
+	if _, ok := c.(*cache.RotatingKVCache); ok && cfg != nil && cfg.SlidingWindow > 0 {
+		start := max(key.Dim(2)-int(cfg.SlidingWindow), 0)
+		return key.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(start, key.Dim(2)), mlx.Slice()),
+			value.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(start, value.Dim(2)), mlx.Slice())
+	}
+	return key, value
+}
+
+func lastTokenFloats(a *mlx.Array) []float32 {
+	if a == nil {
+		return nil
+	}
+
+	switch dims := a.Dims(); len(dims) {
+	case 2:
+		return materializedFloats(a.Slice(mlx.Slice(dims[0]-1), mlx.Slice()).Squeeze(0))
+	case 3:
+		return materializedFloats(a.Slice(mlx.Slice(), mlx.Slice(dims[1]-1), mlx.Slice()).Squeeze(1))
+	default:
+		return materializedFloats(a)
+	}
+}
+
+func lastCacheTokenFloats(a *mlx.Array) []float32 {
+	if a == nil {
+		return nil
+	}
+	if dims := a.Dims(); len(dims) == 4 {
+		return materializedFloats(a.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(dims[2]-1), mlx.Slice()).Squeeze(2))
+	}
+	return materializedFloats(a)
+}
+
+func assertFloatSliceClose(t *testing.T, label string, got, want []float32, relTolerance, absTolerance float64) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("%s length mismatch: got=%d want=%d", label, len(got), len(want))
+	}
+
+	for i := range got {
+		diff := math.Abs(float64(got[i] - want[i]))
+		mag := math.Max(math.Abs(float64(want[i])), 1e-6)
+		if diff > absTolerance && diff/mag > relTolerance {
+			t.Fatalf("%s[%d] = %v, want %v (diff %v, rel %v)", label, i, got[i], want[i], diff, diff/mag)
+		}
+	}
 }
 
 func denseMatrix(rows, cols int, start float32) *mlx.Array {
