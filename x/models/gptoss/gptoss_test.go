@@ -206,12 +206,21 @@ func TestNewModelRestoresHarmonyStopTokens(t *testing.T) {
 	}
 }
 
-func TestLinearNeedsStepwisePrefill(t *testing.T) {
-	if !linearNeedsStepwisePrefill(nn.NewLinear(nil, nil)) {
-		t.Fatal("linearNeedsStepwisePrefill(nn.Linear) = false, want true")
+func TestLinearRequiresStepwiseCachedPrefill(t *testing.T) {
+	if !linearRequiresStepwiseCachedPrefill(nn.NewLinear(nil, nil)) {
+		t.Fatal("linearRequiresStepwiseCachedPrefill(nn.Linear) = false, want true")
 	}
-	if linearNeedsStepwisePrefill(&nn.QuantizedLinear{}) {
-		t.Fatal("linearNeedsStepwisePrefill(nn.QuantizedLinear) = true, want false")
+	if linearRequiresStepwiseCachedPrefill(&nn.QuantizedLinear{}) {
+		t.Fatal("linearRequiresStepwiseCachedPrefill(nn.QuantizedLinear) = true, want false")
+	}
+}
+
+func TestIsQuantizedLinear(t *testing.T) {
+	if isQuantizedLinear(nn.NewLinear(nil, nil)) {
+		t.Fatal("isQuantizedLinear(nn.Linear) = true, want false")
+	}
+	if !isQuantizedLinear(&nn.QuantizedLinear{}) {
+		t.Fatal("isQuantizedLinear(nn.QuantizedLinear) = false, want true")
 	}
 }
 
@@ -233,20 +242,20 @@ func TestModelShouldUseStepwiseUnembedPrefill(t *testing.T) {
 	}
 }
 
-func TestAttentionShouldUseStepwisePrefill(t *testing.T) {
+func TestAttentionShouldUseStepwiseCachedPrefill(t *testing.T) {
 	a := &Attention{
 		QProj: &nn.QuantizedLinear{},
 		KProj: &nn.QuantizedLinear{},
 		VProj: &nn.QuantizedLinear{},
 		OProj: &nn.QuantizedLinear{},
 	}
-	if a.shouldUseStepwisePrefill() {
-		t.Fatal("all-quantized attention shouldUseStepwisePrefill() = true, want false")
+	if !a.shouldUseStepwiseCachedPrefill() {
+		t.Fatal("quantized cached-prefill attention shouldUseStepwiseCachedPrefill() = false, want true")
 	}
 
 	a.OProj = nn.NewLinear(nil, nil)
-	if !a.shouldUseStepwisePrefill() {
-		t.Fatal("dense attention projection shouldUseStepwisePrefill() = false, want true")
+	if !a.shouldUseStepwiseCachedPrefill() {
+		t.Fatal("dense attention projection shouldUseStepwiseCachedPrefill() = false, want true")
 	}
 
 	t.Setenv("GPTOSS_PREFILL_STEPWISE", "1")
@@ -256,8 +265,8 @@ func TestAttentionShouldUseStepwisePrefill(t *testing.T) {
 		VProj: &nn.QuantizedLinear{},
 		OProj: &nn.QuantizedLinear{},
 	}
-	if !a.shouldUseStepwisePrefill() {
-		t.Fatal("forced all-quantized attention shouldUseStepwisePrefill() = false, want true")
+	if !a.shouldUseStepwiseCachedPrefill() {
+		t.Fatal("forced all-quantized attention shouldUseStepwiseCachedPrefill() = false, want true")
 	}
 }
 
