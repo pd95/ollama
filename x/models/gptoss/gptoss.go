@@ -873,13 +873,29 @@ func loadDirectExpertProjection(tensors map[string]*mlx.Array, layer int, prefix
 		}, nil
 	}
 
-	if err := validateLayerTensorShape(layer, weightName, weight, []int{int(cfg.NumLocalExperts), wantIn, wantOut}, fmt.Sprintf("num_local_experts x in x out for %s", prefix)); err != nil {
-		return nil, err
-	}
 	if err := validateLayerTensorDType(layer, weightName, weight, mlx.DTypeBFloat16, "runtime-ready offline expert weights"); err != nil {
 		return nil, err
 	}
-	return &ExpertProjection{Weight: weight, Bias: bias}, nil
+	if len(weight.Dims()) != 3 || weight.Dim(0) != int(cfg.NumLocalExperts) {
+		return nil, fmt.Errorf("layer %d: tensor %q dims %v, want direct expert layout [num_local_experts, out, in]", layer, weightName, weight.Dims())
+	}
+
+	switch {
+	case weight.Dim(1) == wantOut && weight.Dim(2) == wantIn:
+		weight = mlx.Transpose(weight, 0, 2, 1)
+		weight = mlx.Contiguous(weight, false)
+		mlx.Eval(weight)
+		return &ExpertProjection{Weight: weight, Bias: bias}, nil
+	case weight.Dim(1) == wantIn && weight.Dim(2) == wantOut:
+		// Legacy GPT-OSS direct BF16 layout kept weights pre-transposed for GatherMM.
+		return &ExpertProjection{Weight: weight, Bias: bias}, nil
+	default:
+		return nil, fmt.Errorf("layer %d: tensor %q dims %v, want direct expert layout [%d %d %d] or legacy [%d %d %d]",
+			layer, weightName, weight.Dims(),
+			int(cfg.NumLocalExperts), wantOut, wantIn,
+			int(cfg.NumLocalExperts), wantIn, wantOut,
+		)
+	}
 }
 
 // LoadWeights assigns dense tensors and structural placeholders to the model.
