@@ -418,6 +418,29 @@ func sliceSequence(x *mlx.Array, pos int) *mlx.Array {
 	return mlx.SliceStartStop(x, []int32{0, int32(pos), 0}, []int32{1, int32(pos + 1), int32(x.Dim(2))})
 }
 
+// buildCausalMaskWindow creates a [1, 1, Q, K] additive causal mask with an
+// optional sliding-window restriction. When window > 0, positions where
+// kv < absQ-window+1 are also masked so each query can only see the most
+// recent `window` keys. When window == 0, only the causal constraint applies.
+func buildCausalMaskWindow(Q, K, window int32) *mlx.Array {
+	offset := K - Q
+	vals := make([]float32, Q*K)
+	negInf := float32(math.Inf(-1))
+	for q := range Q {
+		absQ := offset + q
+		var lo int32
+		if window > 0 {
+			lo = max(absQ-window+1, 0)
+		}
+		for kv := range K {
+			if kv > absQ || kv < lo {
+				vals[q*K+kv] = negInf
+			}
+		}
+	}
+	return mlx.FromValues(vals, 1, 1, int(Q), int(K))
+}
+
 func expertSlice(t *mlx.Array, expert int32) *mlx.Array {
 	if t == nil || !t.Valid() {
 		return nil
@@ -1168,13 +1191,25 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 		panic(fmt.Sprintf("gpt-oss layer %d attention cache update is invalid", layerIndex))
 	}
 
+	maskMode := "causal"
+	var mask *mlx.Array
+	if seqLen > 1 && cfg.SlidingWindow > 0 {
+		if _, ok := c.(*cache.RotatingKVCache); ok {
+			// Rotating caches bound decode-time memory, but a batched prefill still
+			// needs an explicit local-attention mask so each query only sees the
+			// same sliding window a stepwise prefill would have exposed.
+			maskMode = "array"
+			mask = buildCausalMaskWindow(seq, int32(key.Dim(2)), cfg.SlidingWindow).AsType(query.DType())
+		}
+	}
+
 	attention := mlx.ScaledDotProductAttentionWithSinks(
 		query,
 		key,
 		value,
 		attentionScale,
-		"causal",
-		nil,
+		maskMode,
+		mask,
 		a.Sinks,
 	)
 	if attention == nil || !attention.Valid() {
