@@ -28,8 +28,8 @@ func ScaledDotProductAttentionWithSinks(query, key, value *Array, scale float32,
 }
 
 type LayerNorm struct {
-	Weight Array `weight:"weight"`
-	Bias   Array `weight:"bias"`
+	Weight *Array `weight:"weight"`
+	Bias   *Array `weight:"bias"`
 }
 
 func (r *LayerNorm) Forward(x *Array, eps float32) *Array {
@@ -39,10 +39,10 @@ func (r *LayerNorm) Forward(x *Array, eps float32) *Array {
 }
 
 type RMSNorm struct {
-	Weight Array `weight:"weight"`
+	Weight *Array `weight:"weight"`
 }
 
-func (r RMSNorm) Forward(x *Array, eps float32) *Array {
+func (r *RMSNorm) Forward(x *Array, eps float32) *Array {
 	out := New("FAST_RMSNORM")
 	C.mlx_fast_rms_norm(&out.ctx, x.ctx, r.Weight.ctx, C.float(eps), DefaultStream().ctx)
 	return out
