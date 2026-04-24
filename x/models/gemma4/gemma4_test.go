@@ -530,36 +530,36 @@ func TestAttentionCachedPrefillBatchParity(t *testing.T) {
 		if tc.name == "nvfp4" && os.Getenv("MLX_TEST_NVFP4_PARITY") != "1" {
 			continue
 		}
+		// Keep the reused input tensor, caches, and lazy evaluation on this
+		// locked goroutine because MLX default streams are thread-local.
 		for _, isSliding := range []bool{true, false} {
 			name := tc.name + "/full"
 			if isSliding {
 				name = tc.name + "/sliding"
 			}
-			t.Run(name, func(t *testing.T) {
-				attn := gemma4ParityAttention(t, cfg, tc.makeLayer)
+			attn := gemma4ParityAttention(t, cfg, tc.makeLayer)
 
-				var fullCache cache.Cache
-				var stepCache cache.Cache
-				if isSliding {
-					fullCache = cache.NewRotatingKVCache(int(cfg.SlidingWindow))
-					stepCache = cache.NewRotatingKVCache(int(cfg.SlidingWindow))
-				} else {
-					fullCache = cache.NewKVCache()
-					stepCache = cache.NewKVCache()
-				}
+			var fullCache cache.Cache
+			var stepCache cache.Cache
+			if isSliding {
+				fullCache = cache.NewRotatingKVCache(int(cfg.SlidingWindow))
+				stepCache = cache.NewRotatingKVCache(int(cfg.SlidingWindow))
+			} else {
+				fullCache = cache.NewKVCache()
+				stepCache = cache.NewKVCache()
+			}
 
-				full, _ := attn.Forward(input, fullCache, 1, seqLen, isSliding, cfg, nil, &slidingMaskCache{})
-				fullLast := gemma4ParityLastToken(full.AsType(mlx.DTypeFloat32))
+			full, _ := attn.Forward(input, fullCache, 1, seqLen, isSliding, cfg, nil, &slidingMaskCache{})
+			fullLast := gemma4ParityLastToken(full.AsType(mlx.DTypeFloat32))
 
-				var step *mlx.Array
-				for pos := range seqLen {
-					stepInput := gemma4ParitySliceSequence(input, pos)
-					step, _ = attn.Forward(stepInput, stepCache, 1, 1, isSliding, cfg, nil, nil)
-				}
-				stepLast := gemma4ParityLastToken(step.AsType(mlx.DTypeFloat32))
+			var step *mlx.Array
+			for pos := range seqLen {
+				stepInput := gemma4ParitySliceSequence(input, pos)
+				step, _ = attn.Forward(stepInput, stepCache, 1, 1, isSliding, cfg, nil, nil)
+			}
+			stepLast := gemma4ParityLastToken(step.AsType(mlx.DTypeFloat32))
 
-				assertGemma4ParityClose(t, "attention output", fullLast, stepLast, tc.tolerance)
-			})
+			assertGemma4ParityClose(t, name+" attention output", fullLast, stepLast, tc.tolerance)
 		}
 	}
 }
