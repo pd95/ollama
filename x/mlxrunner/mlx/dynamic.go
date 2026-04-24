@@ -18,9 +18,11 @@ import (
 	"unsafe"
 )
 
-var initError error
-var initLoadError string
-var initLoadedPath string
+var (
+	initError      error
+	initLoadError  string
+	initLoadedPath string
+)
 
 // LockOSThread pins the current goroutine to one OS thread for MLX work.
 // MLX 0.31 keeps default streams and Metal command encoders thread-local, so
