@@ -4,6 +4,7 @@ package gptoss
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"strings"
@@ -365,39 +366,57 @@ func linearRequiresStepwiseCachedPrefill(linear nn.LinearLayer) bool {
 	if linear == nil {
 		return false
 	}
-
-	_, quantized := linear.(*nn.QuantizedLinear)
-	return !quantized
+	quantized, ok := linear.(*nn.QuantizedLinear)
+	if !ok {
+		return false
+	}
+	return quantized.Mode != "affine"
 }
 
-func isQuantizedLinear(linear nn.LinearLayer) bool {
+func linearIsCachedPrefillRolloutCandidate(linear nn.LinearLayer) bool {
 	if linear == nil {
 		return false
 	}
+	if _, ok := linear.(*nn.QuantizedLinear); ok {
+		return true
+	}
+	return false
+}
 
-	_, quantized := linear.(*nn.QuantizedLinear)
-	return quantized
+func (a *Attention) cachedPrefillWasStepwiseFallbackCandidate() bool {
+	if a == nil {
+		return false
+	}
+
+	return linearIsCachedPrefillRolloutCandidate(a.QProj) ||
+		linearIsCachedPrefillRolloutCandidate(a.KProj) ||
+		linearIsCachedPrefillRolloutCandidate(a.VProj) ||
+		linearIsCachedPrefillRolloutCandidate(a.OProj)
+}
+
+func (a *Attention) cachedPrefillRequiresStepwise() bool {
+	if a == nil {
+		return false
+	}
+
+	return linearRequiresStepwiseCachedPrefill(a.QProj) ||
+		linearRequiresStepwiseCachedPrefill(a.KProj) ||
+		linearRequiresStepwiseCachedPrefill(a.VProj) ||
+		linearRequiresStepwiseCachedPrefill(a.OProj)
 }
 
 func (m *Model) shouldUseStepwiseUnembedPrefill() bool {
 	if stepwisePrefillForced() {
 		return true
 	}
-	return linearRequiresStepwiseCachedPrefill(m.LMHead)
+	return false
 }
 
 func (a *Attention) shouldUseStepwiseCachedPrefill() bool {
 	if stepwisePrefillForced() {
 		return true
 	}
-
-	return linearRequiresStepwiseCachedPrefill(a.QProj) ||
-		linearRequiresStepwiseCachedPrefill(a.KProj) ||
-		linearRequiresStepwiseCachedPrefill(a.VProj) ||
-		linearRequiresStepwiseCachedPrefill(a.OProj) ||
-		isQuantizedLinear(a.QProj) ||
-		isQuantizedLinear(a.KProj) ||
-		isQuantizedLinear(a.VProj)
+	return a.cachedPrefillRequiresStepwise()
 }
 
 // swiGLUAlphaLimit is a compiled kernel implementing the gpt-oss MoE activation:
@@ -1070,6 +1089,8 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
 }
 
 func (m *Model) forwardDense(tokens *mlx.Array, caches []cache.Cache, batchSize, seqLen int) *mlx.Array {
+	m.logCachedPrefillMode(caches, batchSize, seqLen)
+
 	h := m.EmbedTokens.Forward(tokens)
 	for i, layer := range m.Layers {
 		var c cache.Cache
@@ -1080,6 +1101,87 @@ func (m *Model) forwardDense(tokens *mlx.Array, caches []cache.Cache, batchSize,
 	}
 
 	return m.Norm.Forward(h, m.RMSNormEps)
+}
+
+func (m *Model) logCachedPrefillMode(caches []cache.Cache, batchSize, seqLen int) {
+	if m == nil || batchSize != 1 || seqLen <= 1 || len(caches) == 0 {
+		return
+	}
+
+	forcedStepwise := stepwisePrefillForced()
+
+	var stepwiseLayers, batchedLayers int
+	var rotatingLayers, causalLayers int
+	var minOffset, maxOffset int
+	haveOffset := false
+	for i, layer := range m.Layers {
+		if layer == nil || layer.Attention == nil || i >= len(caches) || caches[i] == nil {
+			continue
+		}
+
+		requiresStepwise := layer.Attention.cachedPrefillRequiresStepwise()
+		useStepwise := forcedStepwise || requiresStepwise
+		affected := forcedStepwise || requiresStepwise || layer.Attention.cachedPrefillWasStepwiseFallbackCandidate()
+		if !affected {
+			continue
+		}
+
+		if useStepwise {
+			stepwiseLayers++
+		} else {
+			batchedLayers++
+		}
+
+		switch caches[i].(type) {
+		case *cache.RotatingKVCache:
+			rotatingLayers++
+		case *cache.KVCache:
+			causalLayers++
+		}
+
+		offset := caches[i].Offset()
+		if !haveOffset || offset < minOffset {
+			minOffset = offset
+		}
+		if !haveOffset || offset > maxOffset {
+			maxOffset = offset
+		}
+		haveOffset = true
+	}
+	if stepwiseLayers == 0 && batchedLayers == 0 {
+		return
+	}
+
+	attrs := []any{
+		"batch_size", batchSize,
+		"seq_len", seqLen,
+		"rotating_cache_layers", rotatingLayers,
+		"causal_cache_layers", causalLayers,
+		"forced", forcedStepwise,
+	}
+	if haveOffset {
+		attrs = append(attrs, "cache_offset_min", minOffset, "cache_offset_max", maxOffset)
+	}
+	if stepwiseLayers > 0 {
+		slog.Debug(
+			"gptoss cached prefill stepwise fallback",
+			append(
+				attrs,
+				"attention_layers", stepwiseLayers,
+				"stepwise_attention_calls", stepwiseLayers*seqLen,
+			)...,
+		)
+	}
+	if batchedLayers > 0 {
+		slog.Debug(
+			"gptoss cached prefill batched default",
+			append(
+				attrs,
+				"attention_layers", batchedLayers,
+				"avoided_stepwise_attention_calls", batchedLayers*seqLen,
+			)...,
+		)
+	}
 }
 
 // Unembed projects hidden states back into vocabulary space.
@@ -1135,11 +1237,9 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 		return x
 	}
 	if c != nil && batchSize == 1 && seqLen > 1 && a.shouldUseStepwiseCachedPrefill() {
-		// FIXME: Keep GPT-OSS cached prefill stepwise on MLX for correctness.
-		// Batched cached-prefill matmul parity is still not stable enough for the
-		// affected projection path yet, especially on quantized GPT-OSS imports.
-		// Scope the fallback to cached prefill so decode and uncached batch work
-		// stay on their normal paths until the underlying MLX behavior is stable.
+		// Emergency rollback path for cached prefill. Set
+		// GPTOSS_PREFILL_STEPWISE=1 to force the older per-token path for A/B
+		// validation or field mitigation.
 		steps := make([]*mlx.Array, 0, seqLen)
 		for pos := range seqLen {
 			steps = append(steps, a.Forward(sliceSequence(x, pos), c, 1, 1, cfg, layerIndex))
