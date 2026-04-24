@@ -1016,71 +1016,57 @@ func TestAttentionLastTokenMatchesPrefillStepPathLoadedLayerCausalCache(t *testi
 func TestQuantizedAttentionCachedPrefillParity(t *testing.T) {
 	skipIfNoMLX(t)
 
+	// Keep MLX graph construction and evaluation on this locked goroutine.
+	// MLX default streams are thread-local, so nested t.Run subtests can move
+	// reused lazy arrays/caches onto a different stream.
 	for _, tc := range quantizedCachedPrefillParityCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			m, cfg := quantizedAttentionTestModelWithQuantization(t, tc.groupSize, tc.bits, tc.mode)
-			attn := m.Layers[0].Attention
-			seqLen := 48
-			xVals := patternedHiddenValues(seqLen, int(cfg.HiddenSize))
-			x := mlx.FromValues(xVals, 1, seqLen, int(cfg.HiddenSize)).AsType(mlx.DTypeBFloat16)
+		m, cfg := quantizedAttentionTestModelWithQuantization(t, tc.groupSize, tc.bits, tc.mode)
+		attn := m.Layers[0].Attention
+		seqLen := 48
+		xVals := patternedHiddenValues(seqLen, int(cfg.HiddenSize))
+		x := mlx.FromValues(xVals, 1, seqLen, int(cfg.HiddenSize)).AsType(mlx.DTypeBFloat16)
 
-			t.Run("rotating-cache", func(t *testing.T) {
-				fullCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
-				_, fullTrace := attentionForwardTraceForTest(t, attn, x, fullCache, 1, seqLen, &cfg, 0)
-
-				stepCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
-				var stepTrace attentionPrefillTrace
-				for pos := range seqLen {
-					_, stepTrace = attentionForwardTraceForTest(t, attn, sliceSequence(x, pos), stepCache, 1, 1, &cfg, 0)
-				}
-
-				assertFloatSliceClose(t, "rotating q_proj last-token", fullTrace.qProjLast, stepTrace.qProjLast, tc.projectionTol, tc.projectionTol)
-				assertFloatSliceClose(t, "rotating k_proj last-token", fullTrace.kProjLast, stepTrace.kProjLast, tc.projectionTol, tc.projectionTol)
-				assertFloatSliceClose(t, "rotating v_proj last-token", fullTrace.vProjLast, stepTrace.vProjLast, tc.projectionTol, tc.projectionTol)
-				if fullTrace.visibleKeyLen != stepTrace.visibleKeyLen || fullTrace.visibleValueLen != stepTrace.visibleValueLen {
-					t.Fatalf(
-						"rotating visible cache lens = (%d, %d), want (%d, %d)",
-						fullTrace.visibleKeyLen,
-						fullTrace.visibleValueLen,
-						stepTrace.visibleKeyLen,
-						stepTrace.visibleValueLen,
-					)
-				}
-				assertFloatSliceClose(t, "rotating visible cache last-key", fullTrace.visibleKeyLast, stepTrace.visibleKeyLast, tc.projectionTol, tc.projectionTol)
-				assertFloatSliceClose(t, "rotating visible cache last-value", fullTrace.visibleValueLast, stepTrace.visibleValueLast, tc.projectionTol, tc.projectionTol)
-				assertFloatSliceClose(t, "rotating pre-o-proj attention", fullTrace.preOProjLast, stepTrace.preOProjLast, tc.attentionTol, tc.attentionTol)
-				assertFloatSliceClose(t, "rotating attention output", fullTrace.outputLast, stepTrace.outputLast, tc.attentionTol, tc.attentionTol)
-			})
-
-			t.Run("causal-cache", func(t *testing.T) {
-				fullCache := cache.NewKVCache()
-				_, fullTrace := attentionForwardTraceForTest(t, attn, x, fullCache, 1, seqLen, &cfg, 0)
-
-				stepCache := cache.NewKVCache()
-				var stepTrace attentionPrefillTrace
-				for pos := range seqLen {
-					_, stepTrace = attentionForwardTraceForTest(t, attn, sliceSequence(x, pos), stepCache, 1, 1, &cfg, 0)
-				}
-
-				assertFloatSliceClose(t, "causal q_proj last-token", fullTrace.qProjLast, stepTrace.qProjLast, tc.projectionTol, tc.projectionTol)
-				assertFloatSliceClose(t, "causal k_proj last-token", fullTrace.kProjLast, stepTrace.kProjLast, tc.projectionTol, tc.projectionTol)
-				assertFloatSliceClose(t, "causal v_proj last-token", fullTrace.vProjLast, stepTrace.vProjLast, tc.projectionTol, tc.projectionTol)
-				if fullTrace.visibleKeyLen != stepTrace.visibleKeyLen || fullTrace.visibleValueLen != stepTrace.visibleValueLen {
-					t.Fatalf(
-						"causal visible cache lens = (%d, %d), want (%d, %d)",
-						fullTrace.visibleKeyLen,
-						fullTrace.visibleValueLen,
-						stepTrace.visibleKeyLen,
-						stepTrace.visibleValueLen,
-					)
-				}
-				assertFloatSliceClose(t, "causal visible cache last-key", fullTrace.visibleKeyLast, stepTrace.visibleKeyLast, tc.projectionTol, tc.projectionTol)
-				assertFloatSliceClose(t, "causal visible cache last-value", fullTrace.visibleValueLast, stepTrace.visibleValueLast, tc.projectionTol, tc.projectionTol)
-				assertFloatSliceClose(t, "causal pre-o-proj attention", fullTrace.preOProjLast, stepTrace.preOProjLast, tc.attentionTol, tc.attentionTol)
-				assertFloatSliceClose(t, "causal attention output", fullTrace.outputLast, stepTrace.outputLast, tc.attentionTol, tc.attentionTol)
-			})
-		})
+		assertQuantizedAttentionCachedPrefillParity(t, tc.name+"/rotating-cache", attn, x, cache.NewRotatingKVCache(int(cfg.SlidingWindow)), cache.NewRotatingKVCache(int(cfg.SlidingWindow)), seqLen, &cfg, tc)
+		assertQuantizedAttentionCachedPrefillParity(t, tc.name+"/causal-cache", attn, x, cache.NewKVCache(), cache.NewKVCache(), seqLen, &cfg, tc)
 	}
+}
+
+func assertQuantizedAttentionCachedPrefillParity(
+	t *testing.T,
+	label string,
+	attn *Attention,
+	x *mlx.Array,
+	fullCache, stepCache cache.Cache,
+	seqLen int,
+	cfg *Config,
+	tc quantizedCachedPrefillParityCase,
+) {
+	t.Helper()
+
+	_, fullTrace := attentionForwardTraceForTest(t, attn, x, fullCache, 1, seqLen, cfg, 0)
+
+	var stepTrace attentionPrefillTrace
+	for pos := range seqLen {
+		_, stepTrace = attentionForwardTraceForTest(t, attn, sliceSequence(x, pos), stepCache, 1, 1, cfg, 0)
+	}
+
+	assertFloatSliceClose(t, label+" q_proj last-token", fullTrace.qProjLast, stepTrace.qProjLast, tc.projectionTol, tc.projectionTol)
+	assertFloatSliceClose(t, label+" k_proj last-token", fullTrace.kProjLast, stepTrace.kProjLast, tc.projectionTol, tc.projectionTol)
+	assertFloatSliceClose(t, label+" v_proj last-token", fullTrace.vProjLast, stepTrace.vProjLast, tc.projectionTol, tc.projectionTol)
+	if fullTrace.visibleKeyLen != stepTrace.visibleKeyLen || fullTrace.visibleValueLen != stepTrace.visibleValueLen {
+		t.Fatalf(
+			"%s visible cache lens = (%d, %d), want (%d, %d)",
+			label,
+			fullTrace.visibleKeyLen,
+			fullTrace.visibleValueLen,
+			stepTrace.visibleKeyLen,
+			stepTrace.visibleValueLen,
+		)
+	}
+	assertFloatSliceClose(t, label+" visible cache last-key", fullTrace.visibleKeyLast, stepTrace.visibleKeyLast, tc.projectionTol, tc.projectionTol)
+	assertFloatSliceClose(t, label+" visible cache last-value", fullTrace.visibleValueLast, stepTrace.visibleValueLast, tc.projectionTol, tc.projectionTol)
+	assertFloatSliceClose(t, label+" pre-o-proj attention", fullTrace.preOProjLast, stepTrace.preOProjLast, tc.attentionTol, tc.attentionTol)
+	assertFloatSliceClose(t, label+" attention output", fullTrace.outputLast, stepTrace.outputLast, tc.attentionTol, tc.attentionTol)
 }
 
 func TestQuantizedLayerLastTokenMatchesCachedPrefillStepPath(t *testing.T) {
@@ -1133,28 +1119,28 @@ func TestQuantizedModelLastTokenLogitsMatchCachedPrefillStepPath(t *testing.T) {
 func TestBatchedQuantizedModelCachedPrefillParity(t *testing.T) {
 	skipIfNoMLX(t)
 
+	// Keep this loop on one locked goroutine; the MLX caches and lazy arrays
+	// are evaluated after construction and depend on thread-local streams.
 	for _, tc := range quantizedCachedPrefillParityCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			m, cfg := quantizedAttentionTestModelWithQuantization(t, tc.groupSize, tc.bits, tc.mode)
-			seqLen := 48
-			tokenVals := patternedTokenValues(seqLen, int(cfg.VocabSize))
-			tokens := mlx.FromValues(tokenVals, 1, seqLen)
+		m, cfg := quantizedAttentionTestModelWithQuantization(t, tc.groupSize, tc.bits, tc.mode)
+		seqLen := 48
+		tokenVals := patternedTokenValues(seqLen, int(cfg.VocabSize))
+		tokens := mlx.FromValues(tokenVals, 1, seqLen)
 
-			fullCaches := m.NewCaches()
-			fullHidden := forwardModel(m, tokens, fullCaches)
-			fullLogits := m.Unembed(fullHidden)
-			fullLast := lastTokenFloats(fullLogits.AsType(mlx.DTypeFloat32))
+		fullCaches := m.NewCaches()
+		fullHidden := forwardModel(m, tokens, fullCaches)
+		fullLogits := m.Unembed(fullHidden)
+		fullLast := lastTokenFloats(fullLogits.AsType(mlx.DTypeFloat32))
 
-			stepCaches := m.NewCaches()
-			var stepHidden *mlx.Array
-			for pos := range seqLen {
-				stepHidden = forwardModel(m, mlx.FromValues(tokenVals[pos:pos+1], 1, 1), stepCaches)
-			}
-			stepLogits := m.Unembed(stepHidden)
-			stepLast := lastTokenFloats(stepLogits.AsType(mlx.DTypeFloat32))
+		stepCaches := m.NewCaches()
+		var stepHidden *mlx.Array
+		for pos := range seqLen {
+			stepHidden = forwardModel(m, mlx.FromValues(tokenVals[pos:pos+1], 1, 1), stepCaches)
+		}
+		stepLogits := m.Unembed(stepHidden)
+		stepLast := lastTokenFloats(stepLogits.AsType(mlx.DTypeFloat32))
 
-			assertFloatSliceClose(t, "batched quantized model logits", fullLast, stepLast, tc.modelTol, tc.modelTol)
-		})
+		assertFloatSliceClose(t, tc.name+" batched quantized model logits", fullLast, stepLast, tc.modelTol, tc.modelTol)
 	}
 }
 
