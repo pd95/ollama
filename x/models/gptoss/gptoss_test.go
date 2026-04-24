@@ -1098,14 +1098,14 @@ func TestQuantizedModelLastTokenLogitsMatchCachedPrefillStepPath(t *testing.T) {
 	tokens := mlx.FromValues(tokenVals, 1, seqLen)
 
 	fullCaches := m.NewCaches()
-	fullHidden := m.Forward(tokens, fullCaches)
+	fullHidden := forwardModel(m, tokens, fullCaches)
 	fullLogits := m.Unembed(fullHidden)
 	fullLast := lastTokenFloats(fullLogits.AsType(mlx.DTypeFloat32))
 
 	stepCaches := m.NewCaches()
 	var stepHidden *mlx.Array
 	for pos := range seqLen {
-		stepHidden = m.Forward(mlx.FromValues(tokenVals[pos:pos+1], 1, 1), stepCaches)
+		stepHidden = forwardModel(m, mlx.FromValues(tokenVals[pos:pos+1], 1, 1), stepCaches)
 	}
 	stepLogits := m.Unembed(stepHidden)
 	stepLast := lastTokenFloats(stepLogits.AsType(mlx.DTypeFloat32))
@@ -2860,15 +2860,15 @@ func attentionForwardTraceForTest(
 	trace.kProjLast = lastTokenFloats(key.AsType(mlx.DTypeFloat32))
 	trace.vProjLast = lastTokenFloats(value.AsType(mlx.DTypeFloat32))
 
-	batch := int32(batchSize)
+	batchDim := int32(batchSize)
 	seq := int32(seqLen)
 	numHeads := cfg.NumAttentionHeads
 	numKVHeads := cfg.NumKeyValueHeads
 	headDim := cfg.HeadDim
 
-	query = mlx.Reshape(query, batch, seq, numHeads, headDim)
-	key = mlx.Reshape(key, batch, seq, numKVHeads, headDim)
-	value = mlx.Reshape(value, batch, seq, numKVHeads, headDim)
+	query = mlx.Reshape(query, batchDim, seq, numHeads, headDim)
+	key = mlx.Reshape(key, batchDim, seq, numKVHeads, headDim)
+	value = mlx.Reshape(value, batchDim, seq, numKVHeads, headDim)
 	query = mlx.Transpose(query, 0, 2, 1, 3)
 	key = mlx.Transpose(key, 0, 2, 1, 3)
 	value = mlx.Transpose(value, 0, 2, 1, 3)
@@ -2877,19 +2877,22 @@ func attentionForwardTraceForTest(
 	if c != nil {
 		offset = c.Offset()
 	}
+	positions := mlx.FromValues([]int32{int32(offset)}, 1)
 	attentionScale := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
 	if a.RoPEFreqs != nil && a.RoPEFreqs.Valid() {
-		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, offset, a.RoPEFreqs)
-		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, offset, a.RoPEFreqs)
+		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
+		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
 		attentionScale *= yarnConcentration(cfg) * yarnConcentration(cfg)
 	} else {
 		ropeBase, ropeScale, _ := cfg.RopeParameters()
-		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
-		key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
+		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
+		key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
 	}
 
 	if c != nil {
-		key, value = c.Update(key, value)
+		attnCache := c.(cache.Attention)
+		history := attnCache.Update(&batch.Batch{SeqOffsets: []int32{int32(offset)}}, key, value)
+		key, value = history.K(), history.V()
 	}
 
 	visibleKey, visibleValue := visibleKVForLastQueryForTest(key, value, c, cfg)
@@ -2920,7 +2923,7 @@ func attentionForwardTraceForTest(
 		t.Fatalf("layer %d trace attention is invalid", layerIndex)
 	}
 	attention = mlx.Transpose(attention, 0, 2, 1, 3)
-	attention = mlx.Reshape(attention, batch, seq, numHeads*headDim)
+	attention = mlx.Reshape(attention, batchDim, seq, numHeads*headDim)
 	trace.preOProjLast = lastTokenFloats(attention.AsType(mlx.DTypeFloat32))
 
 	out := a.OProj.Forward(attention)
