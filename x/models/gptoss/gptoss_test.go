@@ -207,20 +207,17 @@ func TestNewModelRestoresHarmonyStopTokens(t *testing.T) {
 }
 
 func TestLinearRequiresStepwiseCachedPrefill(t *testing.T) {
-	if !linearRequiresStepwiseCachedPrefill(nn.NewLinear(nil, nil)) {
-		t.Fatal("linearRequiresStepwiseCachedPrefill(nn.Linear) = false, want true")
+	if linearRequiresStepwiseCachedPrefill(nn.NewLinear(nil, nil)) {
+		t.Fatal("linearRequiresStepwiseCachedPrefill(nn.Linear) = true, want false")
 	}
-	if linearRequiresStepwiseCachedPrefill(&nn.QuantizedLinear{}) {
-		t.Fatal("linearRequiresStepwiseCachedPrefill(nn.QuantizedLinear) = true, want false")
+	if linearRequiresStepwiseCachedPrefill(&nn.QuantizedLinear{Bits: 8, Mode: "affine"}) {
+		t.Fatal("linearRequiresStepwiseCachedPrefill(affine q8) = true, want false")
 	}
-}
-
-func TestIsQuantizedLinear(t *testing.T) {
-	if isQuantizedLinear(nn.NewLinear(nil, nil)) {
-		t.Fatal("isQuantizedLinear(nn.Linear) = true, want false")
+	if linearRequiresStepwiseCachedPrefill(&nn.QuantizedLinear{Bits: 4, Mode: "affine"}) {
+		t.Fatal("linearRequiresStepwiseCachedPrefill(affine q4) = true, want false")
 	}
-	if !isQuantizedLinear(&nn.QuantizedLinear{}) {
-		t.Fatal("isQuantizedLinear(nn.QuantizedLinear) = false, want true")
+	if !linearRequiresStepwiseCachedPrefill(&nn.QuantizedLinear{Bits: 4, Mode: "nvfp4"}) {
+		t.Fatal("linearRequiresStepwiseCachedPrefill(nvfp4) = false, want true")
 	}
 }
 
@@ -231,8 +228,8 @@ func TestModelShouldUseStepwiseUnembedPrefill(t *testing.T) {
 	}
 
 	m.LMHead = nn.NewLinear(nil, nil)
-	if !m.shouldUseStepwiseUnembedPrefill() {
-		t.Fatal("dense LMHead shouldUseStepwiseUnembedPrefill() = false, want true")
+	if m.shouldUseStepwiseUnembedPrefill() {
+		t.Fatal("dense LMHead shouldUseStepwiseUnembedPrefill() = true, want false")
 	}
 
 	t.Setenv("GPTOSS_PREFILL_STEPWISE", "1")
@@ -244,26 +241,42 @@ func TestModelShouldUseStepwiseUnembedPrefill(t *testing.T) {
 
 func TestAttentionShouldUseStepwiseCachedPrefill(t *testing.T) {
 	a := &Attention{
-		QProj: &nn.QuantizedLinear{},
-		KProj: &nn.QuantizedLinear{},
-		VProj: &nn.QuantizedLinear{},
-		OProj: &nn.QuantizedLinear{},
+		QProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
+		KProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
+		VProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
+		OProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
 	}
-	if !a.shouldUseStepwiseCachedPrefill() {
-		t.Fatal("quantized cached-prefill attention shouldUseStepwiseCachedPrefill() = false, want true")
+	if a.shouldUseStepwiseCachedPrefill() {
+		t.Fatal("affine-q8 cached-prefill attention shouldUseStepwiseCachedPrefill() = true, want false")
 	}
 
+	a = &Attention{
+		QProj: &nn.QuantizedLinear{Bits: 4, Mode: "affine"},
+		KProj: &nn.QuantizedLinear{Bits: 4, Mode: "affine"},
+		VProj: &nn.QuantizedLinear{Bits: 4, Mode: "affine"},
+		OProj: &nn.QuantizedLinear{Bits: 4, Mode: "affine"},
+	}
+	if a.shouldUseStepwiseCachedPrefill() {
+		t.Fatal("affine-q4 cached-prefill attention shouldUseStepwiseCachedPrefill() = true, want false")
+	}
+
+	a = &Attention{
+		QProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
+		KProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
+		VProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
+		OProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
+	}
 	a.OProj = nn.NewLinear(nil, nil)
-	if !a.shouldUseStepwiseCachedPrefill() {
-		t.Fatal("dense attention projection shouldUseStepwiseCachedPrefill() = false, want true")
+	if a.shouldUseStepwiseCachedPrefill() {
+		t.Fatal("dense attention projection shouldUseStepwiseCachedPrefill() = true, want false")
 	}
 
 	t.Setenv("GPTOSS_PREFILL_STEPWISE", "1")
 	a = &Attention{
-		QProj: &nn.QuantizedLinear{},
-		KProj: &nn.QuantizedLinear{},
-		VProj: &nn.QuantizedLinear{},
-		OProj: &nn.QuantizedLinear{},
+		QProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
+		KProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
+		VProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
+		OProj: &nn.QuantizedLinear{Bits: 8, Mode: "affine"},
 	}
 	if !a.shouldUseStepwiseCachedPrefill() {
 		t.Fatal("forced all-quantized attention shouldUseStepwiseCachedPrefill() = false, want true")
@@ -1003,67 +1016,71 @@ func TestAttentionLastTokenMatchesPrefillStepPathLoadedLayerCausalCache(t *testi
 func TestQuantizedAttentionCachedPrefillParity(t *testing.T) {
 	skipIfNoMLX(t)
 
-	m, cfg := quantizedAttentionTestModel(t)
-	attn := m.Layers[0].Attention
-	seqLen := 48
-	xVals := patternedHiddenValues(seqLen, int(cfg.HiddenSize))
-	x := mlx.FromValues(xVals, 1, seqLen, int(cfg.HiddenSize)).AsType(mlx.DTypeBFloat16)
+	for _, tc := range quantizedCachedPrefillParityCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			m, cfg := quantizedAttentionTestModelWithQuantization(t, tc.groupSize, tc.bits, tc.mode)
+			attn := m.Layers[0].Attention
+			seqLen := 48
+			xVals := patternedHiddenValues(seqLen, int(cfg.HiddenSize))
+			x := mlx.FromValues(xVals, 1, seqLen, int(cfg.HiddenSize)).AsType(mlx.DTypeBFloat16)
 
-	t.Run("rotating-cache", func(t *testing.T) {
-		fullCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
-		_, fullTrace := attentionForwardTraceForTest(t, attn, x, fullCache, 1, seqLen, &cfg, 0)
+			t.Run("rotating-cache", func(t *testing.T) {
+				fullCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
+				_, fullTrace := attentionForwardTraceForTest(t, attn, x, fullCache, 1, seqLen, &cfg, 0)
 
-		stepCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
-		var stepTrace attentionPrefillTrace
-		for pos := range seqLen {
-			_, stepTrace = attentionForwardTraceForTest(t, attn, sliceSequence(x, pos), stepCache, 1, 1, &cfg, 0)
-		}
+				stepCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
+				var stepTrace attentionPrefillTrace
+				for pos := range seqLen {
+					_, stepTrace = attentionForwardTraceForTest(t, attn, sliceSequence(x, pos), stepCache, 1, 1, &cfg, 0)
+				}
 
-		assertFloatSliceClose(t, "rotating q_proj last-token", fullTrace.qProjLast, stepTrace.qProjLast, 1e-2, 1e-2)
-		assertFloatSliceClose(t, "rotating k_proj last-token", fullTrace.kProjLast, stepTrace.kProjLast, 1e-2, 1e-2)
-		assertFloatSliceClose(t, "rotating v_proj last-token", fullTrace.vProjLast, stepTrace.vProjLast, 1e-2, 1e-2)
-		if fullTrace.visibleKeyLen != stepTrace.visibleKeyLen || fullTrace.visibleValueLen != stepTrace.visibleValueLen {
-			t.Fatalf(
-				"rotating visible cache lens = (%d, %d), want (%d, %d)",
-				fullTrace.visibleKeyLen,
-				fullTrace.visibleValueLen,
-				stepTrace.visibleKeyLen,
-				stepTrace.visibleValueLen,
-			)
-		}
-		assertFloatSliceClose(t, "rotating visible cache last-key", fullTrace.visibleKeyLast, stepTrace.visibleKeyLast, 1e-2, 1e-2)
-		assertFloatSliceClose(t, "rotating visible cache last-value", fullTrace.visibleValueLast, stepTrace.visibleValueLast, 1e-2, 1e-2)
-		assertFloatSliceClose(t, "rotating pre-o-proj attention", fullTrace.preOProjLast, stepTrace.preOProjLast, 5e-2, 5e-2)
-		assertFloatSliceClose(t, "rotating attention output", fullTrace.outputLast, stepTrace.outputLast, 5e-2, 5e-2)
-	})
+				assertFloatSliceClose(t, "rotating q_proj last-token", fullTrace.qProjLast, stepTrace.qProjLast, tc.projectionTol, tc.projectionTol)
+				assertFloatSliceClose(t, "rotating k_proj last-token", fullTrace.kProjLast, stepTrace.kProjLast, tc.projectionTol, tc.projectionTol)
+				assertFloatSliceClose(t, "rotating v_proj last-token", fullTrace.vProjLast, stepTrace.vProjLast, tc.projectionTol, tc.projectionTol)
+				if fullTrace.visibleKeyLen != stepTrace.visibleKeyLen || fullTrace.visibleValueLen != stepTrace.visibleValueLen {
+					t.Fatalf(
+						"rotating visible cache lens = (%d, %d), want (%d, %d)",
+						fullTrace.visibleKeyLen,
+						fullTrace.visibleValueLen,
+						stepTrace.visibleKeyLen,
+						stepTrace.visibleValueLen,
+					)
+				}
+				assertFloatSliceClose(t, "rotating visible cache last-key", fullTrace.visibleKeyLast, stepTrace.visibleKeyLast, tc.projectionTol, tc.projectionTol)
+				assertFloatSliceClose(t, "rotating visible cache last-value", fullTrace.visibleValueLast, stepTrace.visibleValueLast, tc.projectionTol, tc.projectionTol)
+				assertFloatSliceClose(t, "rotating pre-o-proj attention", fullTrace.preOProjLast, stepTrace.preOProjLast, tc.attentionTol, tc.attentionTol)
+				assertFloatSliceClose(t, "rotating attention output", fullTrace.outputLast, stepTrace.outputLast, tc.attentionTol, tc.attentionTol)
+			})
 
-	t.Run("causal-cache", func(t *testing.T) {
-		fullCache := cache.NewKVCache()
-		_, fullTrace := attentionForwardTraceForTest(t, attn, x, fullCache, 1, seqLen, &cfg, 0)
+			t.Run("causal-cache", func(t *testing.T) {
+				fullCache := cache.NewKVCache()
+				_, fullTrace := attentionForwardTraceForTest(t, attn, x, fullCache, 1, seqLen, &cfg, 0)
 
-		stepCache := cache.NewKVCache()
-		var stepTrace attentionPrefillTrace
-		for pos := range seqLen {
-			_, stepTrace = attentionForwardTraceForTest(t, attn, sliceSequence(x, pos), stepCache, 1, 1, &cfg, 0)
-		}
+				stepCache := cache.NewKVCache()
+				var stepTrace attentionPrefillTrace
+				for pos := range seqLen {
+					_, stepTrace = attentionForwardTraceForTest(t, attn, sliceSequence(x, pos), stepCache, 1, 1, &cfg, 0)
+				}
 
-		assertFloatSliceClose(t, "causal q_proj last-token", fullTrace.qProjLast, stepTrace.qProjLast, 1e-2, 1e-2)
-		assertFloatSliceClose(t, "causal k_proj last-token", fullTrace.kProjLast, stepTrace.kProjLast, 1e-2, 1e-2)
-		assertFloatSliceClose(t, "causal v_proj last-token", fullTrace.vProjLast, stepTrace.vProjLast, 1e-2, 1e-2)
-		if fullTrace.visibleKeyLen != stepTrace.visibleKeyLen || fullTrace.visibleValueLen != stepTrace.visibleValueLen {
-			t.Fatalf(
-				"causal visible cache lens = (%d, %d), want (%d, %d)",
-				fullTrace.visibleKeyLen,
-				fullTrace.visibleValueLen,
-				stepTrace.visibleKeyLen,
-				stepTrace.visibleValueLen,
-			)
-		}
-		assertFloatSliceClose(t, "causal visible cache last-key", fullTrace.visibleKeyLast, stepTrace.visibleKeyLast, 1e-2, 1e-2)
-		assertFloatSliceClose(t, "causal visible cache last-value", fullTrace.visibleValueLast, stepTrace.visibleValueLast, 1e-2, 1e-2)
-		assertFloatSliceClose(t, "causal pre-o-proj attention", fullTrace.preOProjLast, stepTrace.preOProjLast, 5e-2, 5e-2)
-		assertFloatSliceClose(t, "causal attention output", fullTrace.outputLast, stepTrace.outputLast, 5e-2, 5e-2)
-	})
+				assertFloatSliceClose(t, "causal q_proj last-token", fullTrace.qProjLast, stepTrace.qProjLast, tc.projectionTol, tc.projectionTol)
+				assertFloatSliceClose(t, "causal k_proj last-token", fullTrace.kProjLast, stepTrace.kProjLast, tc.projectionTol, tc.projectionTol)
+				assertFloatSliceClose(t, "causal v_proj last-token", fullTrace.vProjLast, stepTrace.vProjLast, tc.projectionTol, tc.projectionTol)
+				if fullTrace.visibleKeyLen != stepTrace.visibleKeyLen || fullTrace.visibleValueLen != stepTrace.visibleValueLen {
+					t.Fatalf(
+						"causal visible cache lens = (%d, %d), want (%d, %d)",
+						fullTrace.visibleKeyLen,
+						fullTrace.visibleValueLen,
+						stepTrace.visibleKeyLen,
+						stepTrace.visibleValueLen,
+					)
+				}
+				assertFloatSliceClose(t, "causal visible cache last-key", fullTrace.visibleKeyLast, stepTrace.visibleKeyLast, tc.projectionTol, tc.projectionTol)
+				assertFloatSliceClose(t, "causal visible cache last-value", fullTrace.visibleValueLast, stepTrace.visibleValueLast, tc.projectionTol, tc.projectionTol)
+				assertFloatSliceClose(t, "causal pre-o-proj attention", fullTrace.preOProjLast, stepTrace.preOProjLast, tc.attentionTol, tc.attentionTol)
+				assertFloatSliceClose(t, "causal attention output", fullTrace.outputLast, stepTrace.outputLast, tc.attentionTol, tc.attentionTol)
+			})
+		})
+	}
 }
 
 func TestQuantizedLayerLastTokenMatchesCachedPrefillStepPath(t *testing.T) {
@@ -1111,6 +1128,34 @@ func TestQuantizedModelLastTokenLogitsMatchCachedPrefillStepPath(t *testing.T) {
 	stepLast := lastTokenFloats(stepLogits.AsType(mlx.DTypeFloat32))
 
 	assertFloatSliceClose(t, "quantized model logits", fullLast, stepLast, 5e-2, 5e-2)
+}
+
+func TestBatchedQuantizedModelCachedPrefillParity(t *testing.T) {
+	skipIfNoMLX(t)
+
+	for _, tc := range quantizedCachedPrefillParityCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			m, cfg := quantizedAttentionTestModelWithQuantization(t, tc.groupSize, tc.bits, tc.mode)
+			seqLen := 48
+			tokenVals := patternedTokenValues(seqLen, int(cfg.VocabSize))
+			tokens := mlx.FromValues(tokenVals, 1, seqLen)
+
+			fullCaches := m.NewCaches()
+			fullHidden := forwardModel(m, tokens, fullCaches)
+			fullLogits := m.Unembed(fullHidden)
+			fullLast := lastTokenFloats(fullLogits.AsType(mlx.DTypeFloat32))
+
+			stepCaches := m.NewCaches()
+			var stepHidden *mlx.Array
+			for pos := range seqLen {
+				stepHidden = forwardModel(m, mlx.FromValues(tokenVals[pos:pos+1], 1, 1), stepCaches)
+			}
+			stepLogits := m.Unembed(stepHidden)
+			stepLast := lastTokenFloats(stepLogits.AsType(mlx.DTypeFloat32))
+
+			assertFloatSliceClose(t, "batched quantized model logits", fullLast, stepLast, tc.modelTol, tc.modelTol)
+		})
+	}
 }
 
 func TestQProjLastTokenMatchesBatchPathLoadedLayer(t *testing.T) {
@@ -2782,7 +2827,44 @@ type attentionPrefillTrace struct {
 	outputLast       []float32
 }
 
+type quantizedCachedPrefillParityCase struct {
+	name          string
+	groupSize     int
+	bits          int
+	mode          string
+	projectionTol float64
+	attentionTol  float64
+	modelTol      float64
+}
+
+func quantizedCachedPrefillParityCases() []quantizedCachedPrefillParityCase {
+	return []quantizedCachedPrefillParityCase{
+		{
+			name:          "affine-int8",
+			groupSize:     64,
+			bits:          8,
+			mode:          "affine",
+			projectionTol: 1e-2,
+			attentionTol:  5e-2,
+			modelTol:      5e-2,
+		},
+		{
+			name:          "affine-int4",
+			groupSize:     64,
+			bits:          4,
+			mode:          "affine",
+			projectionTol: 3e-2,
+			attentionTol:  1e-1,
+			modelTol:      1e-1,
+		},
+	}
+}
+
 func quantizedAttentionTestModel(t *testing.T) (*Model, Config) {
+	return quantizedAttentionTestModelWithQuantization(t, 64, 8, "affine")
+}
+
+func quantizedAttentionTestModelWithQuantization(t *testing.T, groupSize, bits int, mode string) (*Model, Config) {
 	t.Helper()
 
 	cfg := denseTestConfig(t)
@@ -2799,9 +2881,9 @@ func quantizedAttentionTestModel(t *testing.T) (*Model, Config) {
 	cfg.RopeScaling.OriginalMaxPositionEmbeddings = 4096
 	cfg.RopeScaling.BetaFast = 32
 	cfg.RopeScaling.BetaSlow = 1
-	cfg.QuantGroupSize = 64
-	cfg.QuantBits = 8
-	cfg.QuantMode = "affine"
+	cfg.QuantGroupSize = groupSize
+	cfg.QuantBits = bits
+	cfg.QuantMode = mode
 
 	m := &Model{
 		Config: &cfg,
@@ -2811,10 +2893,10 @@ func quantizedAttentionTestModel(t *testing.T) (*Model, Config) {
 	tensors := denseTestTensors(t, cfg)
 	for i := range int(cfg.NumHiddenLayers) {
 		prefix := fmt.Sprintf("blocks.%d", i)
-		quantizeTensorForTest(t, tensors, prefix+".q_proj.weight", 64, 8, "affine")
-		quantizeTensorForTest(t, tensors, prefix+".k_proj.weight", 64, 8, "affine")
-		quantizeTensorForTest(t, tensors, prefix+".v_proj.weight", 64, 8, "affine")
-		quantizeTensorForTest(t, tensors, prefix+".attn_out.weight", 64, 8, "affine")
+		quantizeTensorForTest(t, tensors, prefix+".q_proj.weight", groupSize, bits, mode)
+		quantizeTensorForTest(t, tensors, prefix+".k_proj.weight", groupSize, bits, mode)
+		quantizeTensorForTest(t, tensors, prefix+".v_proj.weight", groupSize, bits, mode)
+		quantizeTensorForTest(t, tensors, prefix+".attn_out.weight", groupSize, bits, mode)
 	}
 
 	if err := m.LoadWeights(tensors); err != nil {
