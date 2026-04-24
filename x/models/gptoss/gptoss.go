@@ -406,10 +406,7 @@ func (a *Attention) cachedPrefillRequiresStepwise() bool {
 }
 
 func (m *Model) shouldUseStepwiseUnembedPrefill() bool {
-	if stepwisePrefillForced() {
-		return true
-	}
-	return false
+	return stepwisePrefillForced()
 }
 
 func (a *Attention) shouldUseStepwiseCachedPrefill() bool {
