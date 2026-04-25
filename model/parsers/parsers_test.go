@@ -73,6 +73,57 @@ func TestBuiltInParsersStillWork(t *testing.T) {
 	}
 }
 
+func TestHarmonyParserCapabilitiesAndToolFlow(t *testing.T) {
+	parser := ParserForName("harmony")
+	if parser == nil {
+		t.Fatal("ParserForName(\"harmony\") = nil")
+	}
+	if !parser.HasThinkingSupport() {
+		t.Fatal("harmony parser HasThinkingSupport() = false, want true")
+	}
+	if !parser.HasToolSupport() {
+		t.Fatal("harmony parser HasToolSupport() = false, want true")
+	}
+
+	tools := parser.Init([]api.Tool{{
+		Type: "function",
+		Function: api.ToolFunction{
+			Name: "get-weather",
+		},
+	}}, nil, &api.ThinkValue{Value: true})
+
+	if len(tools) != 1 {
+		t.Fatalf("len(processed tools) = %d, want 1", len(tools))
+	}
+	if tools[0].Function.Name != "get_weather" {
+		t.Fatalf("processed tool name = %q, want %q", tools[0].Function.Name, "get_weather")
+	}
+
+	content, thinking, calls, err := parser.Add(
+		`<|channel|>analysis<|message|>Need current weather.<|end|>`+
+			`<|start|>assistant to=functions.get_weather<|channel|>commentary <|constrain|>json<|message|>{"city":"Paris"}`,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if content != "" {
+		t.Fatalf("content = %q, want empty", content)
+	}
+	if thinking != "Need current weather." {
+		t.Fatalf("thinking = %q, want %q", thinking, "Need current weather.")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("len(calls) = %d, want 1", len(calls))
+	}
+	if calls[0].Function.Name != "get-weather" {
+		t.Fatalf("call name = %q, want %q", calls[0].Function.Name, "get-weather")
+	}
+	if got := calls[0].Function.Arguments.String(); got != `{"city":"Paris"}` {
+		t.Fatalf("call arguments = %s, want %s", got, `{"city":"Paris"}`)
+	}
+}
+
 func TestOverrideBuiltInParser(t *testing.T) {
 	// Override a built-in parser
 	Register("passthrough", func() Parser {
