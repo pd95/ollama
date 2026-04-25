@@ -870,6 +870,11 @@ func TestGetRendererName(t *testing.T) {
 			configJSON: `{"architectures": ["LagunaForCausalLM"], "model_type": "laguna"}`,
 			want:       "laguna",
 		},
+		{
+			name:       "gpt-oss model uses tokenizer template",
+			configJSON: `{"architectures": ["GptOssForCausalLM"], "model_type": "gpt_oss"}`,
+			want:       "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -881,5 +886,50 @@ func TestGetRendererName(t *testing.T) {
 				t.Errorf("getRendererName() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewManifestWriter_GptOssConfig(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", t.TempDir())
+
+	opts := CreateOptions{
+		ModelName: "gptoss-harmony",
+		ModelDir:  t.TempDir(),
+	}
+
+	writer := newManifestWriter(opts, []string{"completion", "thinking"}, "harmony", "")
+	if err := writer(opts.ModelName, create.LayerInfo{}, nil); err != nil {
+		t.Fatalf("newManifestWriter() error = %v", err)
+	}
+
+	name := model.ParseName(opts.ModelName)
+	mf, err := manifest.ParseNamedManifest(name)
+	if err != nil {
+		t.Fatalf("ParseNamedManifest() error = %v", err)
+	}
+
+	configPath, err := manifest.BlobsPath(mf.Config.Digest)
+	if err != nil {
+		t.Fatalf("BlobsPath() error = %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	var cfg model.ConfigV2
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	if cfg.Parser != "harmony" {
+		t.Fatalf("Parser = %q, want %q", cfg.Parser, "harmony")
+	}
+	if cfg.Renderer != "" {
+		t.Fatalf("Renderer = %q, want empty", cfg.Renderer)
+	}
+	if !slices.Equal(cfg.Capabilities, []string{"completion", "thinking"}) {
+		t.Fatalf("Capabilities = %#v, want %#v", cfg.Capabilities, []string{"completion", "thinking"})
 	}
 }
