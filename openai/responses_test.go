@@ -1,11 +1,13 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/template"
 )
 
 func TestResponsesInputMessage_UnmarshalJSON(t *testing.T) {
@@ -743,6 +745,21 @@ func TestFromResponsesRequest_GptOssHarmonyHistoryExact(t *testing.T) {
 	}
 	if chatReq.Messages[4].ToolCallID != "call_weather" {
 		t.Fatalf("tool response ToolCallID = %q, want %q", chatReq.Messages[4].ToolCallID, "call_weather")
+	}
+	if chatReq.Messages[4].ToolName != "get_weather" {
+		t.Fatalf("tool response ToolName = %q, want %q", chatReq.Messages[4].ToolName, "get_weather")
+	}
+
+	tmpl, err := template.Parse(`{{- range .Messages -}}{{- if eq .Role "tool" -}}<|start|>functions.{{ .ToolName }} to=assistant<|channel|>commentary<|message|>{{ .Content }}<|end|>{{- end -}}{{- end -}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, template.Values{Messages: chatReq.Messages}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), `<|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>sunny<|end|>`; got != want {
+		t.Fatalf("rendered tool output = %q, want %q", got, want)
 	}
 }
 
