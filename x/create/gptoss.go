@@ -135,11 +135,12 @@ func (t *gptossImportTransform) quantizationType(name string, shape []int32, qua
 		return ""
 	}
 
+	quantNorm := normalizeQuantType(quantize)
+
 	if strings.Contains(name, ".experts.") && strings.HasSuffix(name, ".weight") {
 		// HF gpt-oss expert tensors are dequantized and reshaped into dense 3-D
 		// expert stacks during import. Requantize the stacks into formats the
 		// GPT-OSS runtime can consume through GatherQMM.
-		quantNorm := normalizeQuantType(quantize)
 		switch quantNorm {
 		case "int4", "int8", "nvfp4", "mxfp4", "mxfp8":
 			if len(shape) != 3 {
@@ -156,6 +157,14 @@ func (t *gptossImportTransform) quantizationType(name string, shape []int32, qua
 		default:
 			return ""
 		}
+	}
+
+	// GPT-OSS NVFP4 is intentionally a mixed-format artifact: NVFP4 is useful
+	// for expert stacks, but applying it to attention/output linears damages
+	// Harmony channel/tool behavior. Keep non-expert weights on the safer
+	// affine INT8 path while preserving NVFP4 for MoE experts above.
+	if quantNorm == "nvfp4" {
+		return GetTensorQuantization(name, shape, "int8")
 	}
 	return GetTensorQuantization(name, shape, quantize)
 }
