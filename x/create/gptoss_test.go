@@ -363,13 +363,13 @@ func TestCreateSafetensorsModel_GptOSSPacksExpertsQuantized(t *testing.T) {
 			}
 
 			createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
-				st.NewTensorDataFromBytes("model.embed_tokens.weight", "BF16", []int32{2, 2}, make([]byte, 8)),
-				st.NewTensorDataFromBytes("model.norm.weight", "BF16", []int32{2}, make([]byte, 4)),
-				st.NewTensorDataFromBytes("lm_head.weight", "BF16", []int32{2, 2}, make([]byte, 8)),
-				st.NewTensorDataFromBytes("model.layers.0.input_layernorm.weight", "BF16", []int32{2}, make([]byte, 4)),
-				st.NewTensorDataFromBytes("model.layers.0.self_attn.q_proj.weight", "BF16", []int32{2, 2}, make([]byte, 8)),
-				st.NewTensorDataFromBytes("model.layers.0.self_attn.sinks", "BF16", []int32{2}, make([]byte, 4)),
-				st.NewTensorDataFromBytes("model.layers.0.mlp.router.weight", "BF16", []int32{2, 2}, make([]byte, 8)),
+				st.NewTensorDataFromBytes("model.embed_tokens.weight", "BF16", []int32{64, 64}, make([]byte, 64*64*2)),
+				st.NewTensorDataFromBytes("model.norm.weight", "BF16", []int32{64}, make([]byte, 64*2)),
+				st.NewTensorDataFromBytes("lm_head.weight", "BF16", []int32{64, 64}, make([]byte, 64*64*2)),
+				st.NewTensorDataFromBytes("model.layers.0.input_layernorm.weight", "BF16", []int32{64}, make([]byte, 64*2)),
+				st.NewTensorDataFromBytes("model.layers.0.self_attn.q_proj.weight", "BF16", []int32{64, 64}, make([]byte, 64*64*2)),
+				st.NewTensorDataFromBytes("model.layers.0.self_attn.sinks", "BF16", []int32{64}, make([]byte, 64*2)),
+				st.NewTensorDataFromBytes("model.layers.0.mlp.router.weight", "BF16", []int32{64, 64}, make([]byte, 64*64*2)),
 				st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_blocks", "U8", []int32{2, 32, 1, 16}, make([]byte, 2*32*16)),
 				st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_scales", "U8", []int32{2, 32, 1}, make([]byte, 2*32)),
 				st.NewTensorDataFromBytes("model.layers.0.mlp.experts.gate_up_proj_bias", "BF16", []int32{2, 32}, make([]byte, 2*32*2)),
@@ -378,6 +378,7 @@ func TestCreateSafetensorsModel_GptOSSPacksExpertsQuantized(t *testing.T) {
 				st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_bias", "BF16", []int32{2, 16}, make([]byte, 2*16*2)),
 			})
 
+			tensorQuantize := make(map[string]string)
 			var packedTensors []PackedTensorInput
 
 			createLayer := func(r io.Reader, mediaType, name string) (LayerInfo, error) {
@@ -387,6 +388,7 @@ func TestCreateSafetensorsModel_GptOSSPacksExpertsQuantized(t *testing.T) {
 
 			createTensorLayer := func(r io.Reader, name, dtype string, shape []int32, quantize string) ([]LayerInfo, error) {
 				_, _ = io.ReadAll(r)
+				tensorQuantize[name] = quantize
 				return []LayerInfo{{Name: name, Digest: "sha256:" + name, MediaType: "application/vnd.ollama.image.tensor"}}, nil
 			}
 
@@ -427,6 +429,26 @@ func TestCreateSafetensorsModel_GptOSSPacksExpertsQuantized(t *testing.T) {
 				if tensor.Quantize != "" {
 					t.Fatalf("packed tensor %q quantize = %q, want empty for bias", tensor.Name, tensor.Quantize)
 				}
+			}
+
+			switch quantize {
+			case "nvfp4":
+				if got := tensorQuantize["output.weight"]; got != "int8" {
+					t.Fatalf("output.weight quantize = %q, want int8 for nvfp4 GPT-OSS non-expert path", got)
+				}
+				if got := tensorQuantize["blocks.0.q_proj.weight"]; got != "int8" {
+					t.Fatalf("blocks.0.q_proj.weight quantize = %q, want int8 for nvfp4 GPT-OSS non-expert path", got)
+				}
+			default:
+				if got := tensorQuantize["output.weight"]; got != quantize {
+					t.Fatalf("output.weight quantize = %q, want %q", got, quantize)
+				}
+				if got := tensorQuantize["blocks.0.q_proj.weight"]; got != quantize {
+					t.Fatalf("blocks.0.q_proj.weight quantize = %q, want %q", got, quantize)
+				}
+			}
+			if got := tensorQuantize["blocks.0.router.weight"]; got != "" {
+				t.Fatalf("blocks.0.router.weight quantize = %q, want empty", got)
 			}
 		})
 	}
