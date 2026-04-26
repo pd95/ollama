@@ -137,12 +137,11 @@ func (t *gptossImportTransform) quantizationType(name string, shape []int32, qua
 
 	if strings.Contains(name, ".experts.") && strings.HasSuffix(name, ".weight") {
 		// HF gpt-oss expert tensors are dequantized and reshaped into dense 3-D
-		// expert stacks during import. For the initial "rebuild" path we allow
-		// create-time requantization into formats the existing GPT-OSS runtime can
-		// already consume via GatherQMM, starting with nvfp4.
+		// expert stacks during import. Requantize the stacks into formats the
+		// GPT-OSS runtime can consume through GatherQMM.
 		quantNorm := normalizeQuantType(quantize)
 		switch quantNorm {
-		case "int4", "int8", "nvfp4":
+		case "int4", "int8", "nvfp4", "mxfp4", "mxfp8":
 			if len(shape) != 3 {
 				return ""
 			}
