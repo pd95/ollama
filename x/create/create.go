@@ -607,6 +607,10 @@ type tensorImportTransform interface {
 	prequantizedMetadata(sourceName string, globalMetadata map[string]string) map[string]string
 }
 
+type packedGroupCompleter interface {
+	packedGroupComplete(groupName string, tensors []PackedTensorInput) bool
+}
+
 type noopImportTransform struct{}
 
 func (noopImportTransform) skipTensor(string) bool { return false }
@@ -696,6 +700,22 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 			ext.Close()
 		}
 		openExtractors = nil
+	}
+
+	flushPackedGroup := func(groupName string) error {
+		tensors := expertGroups[groupName]
+		if len(tensors) == 0 {
+			return nil
+		}
+
+		fn(fmt.Sprintf("packing %s (%d tensors)", groupName, len(tensors)))
+		layer, err := packedCreator(groupName, tensors)
+		if err != nil {
+			return fmt.Errorf("failed to create packed layer for %s: %w", groupName, err)
+		}
+		layers = append(layers, layer)
+		delete(expertGroups, groupName)
+		return nil
 	}
 
 	entries, err := os.ReadDir(modelDir)
@@ -822,6 +842,13 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 						Quantize: quantizeType,
 						Reader:   reader,
 					})
+					if completer, ok := importTransform.(packedGroupCompleter); ok && completer.packedGroupComplete(groupPrefix, expertGroups[groupPrefix]) {
+						if err := flushPackedGroup(groupPrefix); err != nil {
+							extractor.Close()
+							closeExtractors()
+							return err
+						}
+					}
 				} else {
 					// Store as minimal safetensors format (88 bytes header overhead)
 					// This enables native mmap loading via mlx_load_safetensors
@@ -849,14 +876,10 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 	if packedCreator != nil {
 		sort.Strings(expertGroupOrder)
 		for _, groupName := range expertGroupOrder {
-			tensors := expertGroups[groupName]
-			fn(fmt.Sprintf("packing %s (%d tensors)", groupName, len(tensors)))
-			layer, err := packedCreator(groupName, tensors)
-			if err != nil {
+			if err := flushPackedGroup(groupName); err != nil {
 				closeExtractors()
-				return fmt.Errorf("failed to create packed layer for %s: %w", groupName, err)
+				return err
 			}
-			layers = append(layers, layer)
 		}
 	}
 	closeExtractors()

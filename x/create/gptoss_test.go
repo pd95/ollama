@@ -254,9 +254,11 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_blocks", "U8", []int32{2, 16, 1, 16}, make([]byte, 2*16*16)),
 		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_scales", "U8", []int32{2, 16, 1}, make([]byte, 2*16)),
 		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_bias", "BF16", []int32{2, 16}, make([]byte, 2*16*2)),
+		st.NewTensorDataFromBytes("model.layers.0.post_attention_layernorm.weight", "BF16", []int32{2}, make([]byte, 4)),
 	})
 
 	var denseNames []string
+	var events []string
 	var packedGroupName string
 	var packedTensors []PackedTensorInput
 
@@ -268,10 +270,12 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 	createTensorLayer := func(r io.Reader, name, dtype string, shape []int32, quantize string) ([]LayerInfo, error) {
 		_, _ = io.ReadAll(r)
 		denseNames = append(denseNames, name)
+		events = append(events, "tensor:"+name)
 		return []LayerInfo{{Name: name, Digest: "sha256:" + name, MediaType: "application/vnd.ollama.image.tensor"}}, nil
 	}
 
 	createPackedLayer := func(groupName string, tensors []PackedTensorInput) (LayerInfo, error) {
+		events = append(events, "pack:"+groupName)
 		packedGroupName = groupName
 		packedTensors = append([]PackedTensorInput(nil), tensors...)
 		return LayerInfo{Name: groupName, Digest: "sha256:" + groupName, MediaType: "application/vnd.ollama.image.tensor"}, nil
@@ -285,6 +289,11 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 
 	if packedGroupName != "blocks.0.experts" {
 		t.Fatalf("packedGroupName = %q, want %q", packedGroupName, "blocks.0.experts")
+	}
+	packIdx := slices.Index(events, "pack:blocks.0.experts")
+	postIdx := slices.Index(events, "tensor:blocks.0.ffn_norm.weight")
+	if packIdx == -1 || postIdx == -1 || packIdx > postIdx {
+		t.Fatalf("packed group was not flushed as soon as complete; events=%v", events)
 	}
 	if len(packedTensors) != 6 {
 		t.Fatalf("packed tensor count = %d, want 6", len(packedTensors))
@@ -340,6 +349,7 @@ func TestCreateSafetensorsModel_GptOSSPacksExperts(t *testing.T) {
 		"blocks.0.q_proj.weight",
 		"blocks.0.attn_sinks",
 		"blocks.0.router.weight",
+		"blocks.0.ffn_norm.weight",
 	}
 	for _, name := range wantDenseNames {
 		if !slices.Contains(denseNames, name) {
