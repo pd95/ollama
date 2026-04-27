@@ -196,6 +196,30 @@ func (t *gptossImportTransform) prequantizedMetadata(sourceName string, global m
 	return override
 }
 
+func (t *gptossImportTransform) packedGroupComplete(groupName string, tensors []PackedTensorInput) bool {
+	if !strings.HasSuffix(groupName, ".experts") {
+		return false
+	}
+
+	seen := make(map[string]bool, len(tensors))
+	for _, tensor := range tensors {
+		seen[tensor.Name] = true
+	}
+	for _, suffix := range []string{
+		".gate_proj.weight",
+		".up_proj.weight",
+		".down_proj.weight",
+		".gate_proj.bias",
+		".up_proj.bias",
+		".down_proj.bias",
+	} {
+		if !seen[groupName+suffix] {
+			return false
+		}
+	}
+	return true
+}
+
 func (t *gptossImportTransform) transformTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
 	if td == nil {
 		return nil, nil
