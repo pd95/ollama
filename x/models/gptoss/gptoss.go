@@ -362,60 +362,6 @@ func stepwisePrefillForced() bool {
 	return os.Getenv("GPTOSS_PREFILL_STEPWISE") == "1"
 }
 
-func linearRequiresStepwiseCachedPrefill(linear nn.LinearLayer) bool {
-	if linear == nil {
-		return false
-	}
-	quantized, ok := linear.(*nn.QuantizedLinear)
-	if !ok {
-		return false
-	}
-	return quantized.Mode != "affine"
-}
-
-func linearIsCachedPrefillRolloutCandidate(linear nn.LinearLayer) bool {
-	if linear == nil {
-		return false
-	}
-	if _, ok := linear.(*nn.QuantizedLinear); ok {
-		return true
-	}
-	return false
-}
-
-func (a *Attention) cachedPrefillWasStepwiseFallbackCandidate() bool {
-	if a == nil {
-		return false
-	}
-
-	return linearIsCachedPrefillRolloutCandidate(a.QProj) ||
-		linearIsCachedPrefillRolloutCandidate(a.KProj) ||
-		linearIsCachedPrefillRolloutCandidate(a.VProj) ||
-		linearIsCachedPrefillRolloutCandidate(a.OProj)
-}
-
-func (a *Attention) cachedPrefillRequiresStepwise() bool {
-	if a == nil {
-		return false
-	}
-
-	return linearRequiresStepwiseCachedPrefill(a.QProj) ||
-		linearRequiresStepwiseCachedPrefill(a.KProj) ||
-		linearRequiresStepwiseCachedPrefill(a.VProj) ||
-		linearRequiresStepwiseCachedPrefill(a.OProj)
-}
-
-func (m *Model) shouldUseStepwiseUnembedPrefill() bool {
-	return stepwisePrefillForced()
-}
-
-func (a *Attention) shouldUseStepwiseCachedPrefill() bool {
-	if stepwisePrefillForced() {
-		return true
-	}
-	return a.cachedPrefillRequiresStepwise()
-}
-
 // swiGLUAlphaLimit is a compiled kernel implementing the gpt-oss MoE activation:
 //
 //	swish = min(gate, 7) * sigmoid(1.702 * min(gate, 7))
@@ -1116,14 +1062,7 @@ func (m *Model) logCachedPrefillMode(caches []cache.Cache, batchSize, seqLen int
 			continue
 		}
 
-		requiresStepwise := layer.Attention.cachedPrefillRequiresStepwise()
-		useStepwise := forcedStepwise || requiresStepwise
-		affected := forcedStepwise || requiresStepwise || layer.Attention.cachedPrefillWasStepwiseFallbackCandidate()
-		if !affected {
-			continue
-		}
-
-		if useStepwise {
+		if forcedStepwise {
 			stepwiseLayers++
 		} else {
 			batchedLayers++
@@ -1186,7 +1125,7 @@ func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
 	if m == nil || m.LMHead == nil || x == nil {
 		return nil
 	}
-	if m.shouldUseStepwiseUnembedPrefill() {
+	if stepwisePrefillForced() {
 		dims := x.Dims()
 		if len(dims) == 3 && dims[0] == 1 && dims[1] > 1 {
 			steps := make([]*mlx.Array, 0, dims[1])
@@ -1233,7 +1172,7 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 	if a == nil || a.QProj == nil || a.KProj == nil || a.VProj == nil || a.OProj == nil || x == nil || cfg == nil {
 		return x
 	}
-	if c != nil && batchSize == 1 && seqLen > 1 && a.shouldUseStepwiseCachedPrefill() {
+	if c != nil && batchSize == 1 && seqLen > 1 && stepwisePrefillForced() {
 		// Emergency rollback path for cached prefill. Set
 		// GPTOSS_PREFILL_STEPWISE=1 to force the older per-token path for A/B
 		// validation or field mitigation.
