@@ -360,7 +360,7 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if got := inferSafetensorsCapabilities(dir); !slices.Equal(got, tt.want) {
+			if got := inferSafetensorsCapabilities(dir, ""); !slices.Equal(got, tt.want) {
 				t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, tt.want)
 			}
 		})
@@ -568,6 +568,11 @@ func TestSupportsThinking(t *testing.T) {
 			want:       true,
 		},
 		{
+			name:       "laguna architecture without template",
+			configJSON: `{"architectures": ["LagunaForCausalLM"], "model_type": "laguna"}`,
+			want:       false,
+		},
+		{
 			name:       "empty config",
 			configJSON: `{}`,
 			want:       false,
@@ -594,6 +599,55 @@ func TestSupportsThinking(t *testing.T) {
 func TestSupportsThinking_NoConfig(t *testing.T) {
 	if supportsThinking(t.TempDir()) {
 		t.Error("supportsThinking should return false for missing config.json")
+	}
+}
+
+func TestInferSafetensorsCapabilitiesFromParser(t *testing.T) {
+	tests := []struct {
+		name       string
+		parserName string
+		want       []string
+	}{
+		{
+			name:       "laguna tools and thinking",
+			parserName: "laguna",
+			want:       []string{"completion", "tools", "thinking"},
+		},
+		{
+			name:       "functiongemma tools only",
+			parserName: "functiongemma",
+			want:       []string{"completion", "tools"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := inferSafetensorsCapabilities(dir, tt.parserName); !slices.Equal(got, tt.want) {
+				t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInferSafetensorsCapabilitiesLaguna(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"architectures": ["LagunaForCausalLM"], "model_type": "laguna"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := inferSafetensorsCapabilities(dir, "laguna")
+	for _, want := range []string{"completion", "tools", "thinking"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("capabilities %v missing %q", got, want)
+		}
+	}
+	if slices.Contains(got, "vision") || slices.Contains(got, "audio") {
+		t.Fatalf("unexpected non-text capability in %v", got)
 	}
 }
 
@@ -637,6 +691,11 @@ func TestGetParserName(t *testing.T) {
 			name:       "gpt-oss via model_type",
 			configJSON: `{"model_type": "gpt_oss"}`,
 			want:       "harmony",
+		},
+		{
+			name:       "laguna model",
+			configJSON: `{"architectures": ["LagunaForCausalLM"], "model_type": "laguna"}`,
+			want:       "laguna",
 		},
 		{
 			name:       "no config",
@@ -687,6 +746,11 @@ func TestGetRendererName(t *testing.T) {
 			name:       "gpt-oss model uses tokenizer template",
 			configJSON: `{"architectures": ["GptOssForCausalLM"], "model_type": "gpt_oss"}`,
 			want:       "",
+		},
+		{
+			name:       "laguna model",
+			configJSON: `{"architectures": ["LagunaForCausalLM"], "model_type": "laguna"}`,
+			want:       "laguna",
 		},
 	}
 

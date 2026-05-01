@@ -10,12 +10,21 @@ import (
 	"testing"
 
 	"github.com/ollama/ollama/x/imagegen/manifest"
+	"github.com/ollama/ollama/x/mlxrunner/batch"
 	"github.com/ollama/ollama/x/mlxrunner/cache"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
 	"github.com/ollama/ollama/x/models/nn"
 )
+
+func testBatch(tokens *mlx.Array, offset int) *batch.Batch {
+	return &batch.Batch{
+		InputIDs:     tokens,
+		SeqOffsets:   []int32{int32(offset)},
+		SeqQueryLens: []int32{int32(tokens.Dim(1))},
+	}
+}
 
 func TestParseConfig(t *testing.T) {
 	data := []byte(`{
@@ -662,7 +671,7 @@ func TestForwardRunsCompletePath(t *testing.T) {
 	}
 	caches := m.NewCaches()
 	tokens := mlx.FromValues([]int32{1, 2}, 1, 2)
-	out := m.Forward(tokens, caches)
+	out := m.Forward(testBatch(tokens, 0), caches)
 
 	if out == nil || !out.Valid() {
 		t.Fatal("Forward() returned invalid output")
@@ -701,13 +710,13 @@ func TestForwardLastTokenMatchesPrefillStepPath(t *testing.T) {
 	tokens := mlx.FromValues([]int32{1, 2, 3, 4, 5, 6}, 1, 6)
 
 	fullCaches := m.NewCaches()
-	fullHidden := m.Forward(tokens, fullCaches)
+	fullHidden := m.Forward(testBatch(tokens, 0), fullCaches)
 	fullLogits := m.Unembed(fullHidden)
 	fullLast := materializedFloats(fullLogits.Slice(mlx.Slice(), mlx.Slice(fullLogits.Dim(1)-1), mlx.Slice()).Squeeze(1).AsType(mlx.DTypeFloat32))
 
 	stepCaches := m.NewCaches()
-	m.Forward(mlx.FromValues([]int32{1, 2, 3, 4, 5}, 1, 5), stepCaches)
-	stepHidden := m.Forward(mlx.FromValues([]int32{6}, 1, 1), stepCaches)
+	m.Forward(testBatch(mlx.FromValues([]int32{1, 2, 3, 4, 5}, 1, 5), 0), stepCaches)
+	stepHidden := m.Forward(testBatch(mlx.FromValues([]int32{6}, 1, 1), 5), stepCaches)
 	stepLogits := m.Unembed(stepHidden)
 	stepLast := materializedFloats(stepLogits.Squeeze(1).AsType(mlx.DTypeFloat32))
 
@@ -1015,14 +1024,14 @@ func TestQuantizedModelLastTokenLogitsMatchCachedPrefillStepPath(t *testing.T) {
 	tokens := mlx.FromValues(tokenVals, 1, seqLen)
 
 	fullCaches := m.NewCaches()
-	fullHidden := m.Forward(tokens, fullCaches)
+	fullHidden := m.Forward(testBatch(tokens, 0), fullCaches)
 	fullLogits := m.Unembed(fullHidden)
 	fullLast := lastTokenFloats(fullLogits.AsType(mlx.DTypeFloat32))
 
 	stepCaches := m.NewCaches()
 	var stepHidden *mlx.Array
 	for pos := range seqLen {
-		stepHidden = m.Forward(mlx.FromValues(tokenVals[pos:pos+1], 1, 1), stepCaches)
+		stepHidden = m.Forward(testBatch(mlx.FromValues(tokenVals[pos:pos+1], 1, 1), pos), stepCaches)
 	}
 	stepLogits := m.Unembed(stepHidden)
 	stepLast := lastTokenFloats(stepLogits.AsType(mlx.DTypeFloat32))
@@ -1042,14 +1051,14 @@ func TestBatchedQuantizedModelCachedPrefillParity(t *testing.T) {
 		tokens := mlx.FromValues(tokenVals, 1, seqLen)
 
 		fullCaches := m.NewCaches()
-		fullHidden := m.Forward(tokens, fullCaches)
+		fullHidden := m.Forward(testBatch(tokens, 0), fullCaches)
 		fullLogits := m.Unembed(fullHidden)
 		fullLast := lastTokenFloats(fullLogits.AsType(mlx.DTypeFloat32))
 
 		stepCaches := m.NewCaches()
 		var stepHidden *mlx.Array
 		for pos := range seqLen {
-			stepHidden = m.Forward(mlx.FromValues(tokenVals[pos:pos+1], 1, 1), stepCaches)
+			stepHidden = m.Forward(testBatch(mlx.FromValues(tokenVals[pos:pos+1], 1, 1), pos), stepCaches)
 		}
 		stepLogits := m.Unembed(stepHidden)
 		stepLast := lastTokenFloats(stepLogits.AsType(mlx.DTypeFloat32))
@@ -2850,23 +2859,24 @@ func attentionForwardTraceForTest(
 	key = mlx.Transpose(key, 0, 2, 1, 3)
 	value = mlx.Transpose(value, 0, 2, 1, 3)
 
-	offset := 0
-	if c != nil {
-		offset = c.Offset()
-	}
+	b := batchForLegacyForward(c, batchSize, seqLen)
+	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
 	attentionScale := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
 	if a.RoPEFreqs != nil && a.RoPEFreqs.Valid() {
-		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, offset, a.RoPEFreqs)
-		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, offset, a.RoPEFreqs)
+		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
+		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
 		attentionScale *= yarnConcentration(cfg) * yarnConcentration(cfg)
 	} else {
 		ropeBase, ropeScale, _ := cfg.RopeParameters()
-		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
-		key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
+		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
+		key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
 	}
 
+	kv := nn.WithKV(key, value, b.SeqQueryLens)
 	if c != nil {
-		key, value = c.Update(key, value)
+		history := c.(cache.Attention).Update(b, key, value)
+		key, value = history.K(), history.V()
+		kv = nn.WithKVHistory(history)
 	}
 
 	visibleKey, visibleValue := visibleKVForLastQueryForTest(key, value, c, cfg)
@@ -2875,24 +2885,12 @@ func attentionForwardTraceForTest(
 	trace.visibleKeyLast = lastCacheTokenFloats(visibleKey.AsType(mlx.DTypeFloat32))
 	trace.visibleValueLast = lastCacheTokenFloats(visibleValue.AsType(mlx.DTypeFloat32))
 
-	maskMode := "causal"
-	var mask *mlx.Array
-	if seqLen > 1 && cfg.SlidingWindow > 0 {
-		if _, ok := c.(*cache.RotatingKVCache); ok {
-			maskMode = "array"
-			mask = buildCausalMaskWindow(seq, int32(key.Dim(2)), cfg.SlidingWindow).AsType(query.DType())
-		}
+	mask := nn.CausalMask()
+	if c == nil && seqLen > 1 && cfg.SlidingWindow > 0 && layerIndex%2 == 0 {
+		mask = mask.Intersect(nn.SlidingWindowMask(b, key.Dim(2), int(cfg.SlidingWindow), query.DType()))
 	}
 
-	attention := mlx.ScaledDotProductAttentionWithSinks(
-		query,
-		key,
-		value,
-		attentionScale,
-		maskMode,
-		mask,
-		a.Sinks,
-	)
+	attention := nn.ScaledDotProductAttention(b, query, attentionScale, kv, nn.WithMask(mask), nn.WithSinks(a.Sinks))
 	if attention == nil || !attention.Valid() {
 		t.Fatalf("layer %d trace attention is invalid", layerIndex)
 	}

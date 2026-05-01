@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ollama/ollama/x/mlxrunner/batch"
 	"github.com/ollama/ollama/x/mlxrunner/cache"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
@@ -389,29 +390,6 @@ var swiGLUAlphaLimit = mlx.Compile2(
 func sliceSequence(x *mlx.Array, pos int) *mlx.Array {
 	// Callers pass [batch, seq, hidden] tensors only.
 	return mlx.SliceStartStop(x, []int32{0, int32(pos), 0}, []int32{1, int32(pos + 1), int32(x.Dim(2))})
-}
-
-// buildCausalMaskWindow creates a [1, 1, Q, K] additive causal mask with an
-// optional sliding-window restriction. When window > 0, positions where
-// kv < absQ-window+1 are also masked so each query can only see the most
-// recent `window` keys. When window == 0, only the causal constraint applies.
-func buildCausalMaskWindow(Q, K, window int32) *mlx.Array {
-	offset := K - Q
-	vals := make([]float32, Q*K)
-	negInf := float32(math.Inf(-1))
-	for q := range Q {
-		absQ := offset + q
-		var lo int32
-		if window > 0 {
-			lo = max(absQ-window+1, 0)
-		}
-		for kv := range K {
-			if kv > absQ || kv < lo {
-				vals[q*K+kv] = negInf
-			}
-		}
-	}
-	return mlx.FromValues(vals, 1, 1, int(Q), int(K))
 }
 
 func expertSlice(t *mlx.Array, expert int32) *mlx.Array {
@@ -1016,30 +994,31 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	return nil
 }
 
-func (m *Model) Forward(tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
-	if m == nil || m.Config == nil || m.EmbedTokens == nil || m.Norm == nil || tokens == nil {
+func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
+	if m == nil || m.Config == nil || m.EmbedTokens == nil || m.Norm == nil || b == nil || b.InputIDs == nil {
 		return nil
 	}
 
-	dims := tokens.Dims()
+	dims := b.InputIDs.Dims()
 	if len(dims) != 2 {
 		panic(fmt.Sprintf("gpt-oss forward requires 2D token input, got %v", dims))
 	}
 
 	batchSize, seqLen := dims[0], dims[1]
-	return m.forwardDense(tokens, caches, batchSize, seqLen)
+	return m.forwardDense(b, caches, batchSize, seqLen)
 }
 
-func (m *Model) forwardDense(tokens *mlx.Array, caches []cache.Cache, batchSize, seqLen int) *mlx.Array {
+func (m *Model) forwardDense(b *batch.Batch, caches []cache.Cache, batchSize, seqLen int) *mlx.Array {
 	m.logCachedPrefillMode(caches, batchSize, seqLen)
 
-	h := m.EmbedTokens.Forward(tokens)
+	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
+	h := m.EmbedTokens.Forward(b.InputIDs)
 	for i, layer := range m.Layers {
 		var c cache.Cache
 		if caches != nil && i < len(caches) {
 			c = caches[i]
 		}
-		h = layer.Forward(h, c, batchSize, seqLen, m.Config, i)
+		h = layer.ForwardBatch(h, b, c, positions, batchSize, seqLen, m.Config, i)
 	}
 
 	return m.Norm.Forward(h, m.RMSNormEps)
@@ -1138,12 +1117,18 @@ func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
 }
 
 func (l *Layer) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
+	b := batchForLegacyForward(c, batchSize, seqLen)
+	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
+	return l.ForwardBatch(x, b, c, positions, batchSize, seqLen, cfg, layerIndex)
+}
+
+func (l *Layer) ForwardBatch(x *mlx.Array, b *batch.Batch, c cache.Cache, positions *mlx.Array, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
 	if l == nil || l.Attention == nil || l.AttentionNorm == nil || l.FFNNorm == nil || l.Router == nil || l.Experts == nil || x == nil || cfg == nil {
 		panic("gpt-oss layer is not fully loaded")
 	}
 	residual := x
 	x = l.AttentionNorm.Forward(x, cfg.RMSNormEps)
-	x = l.Attention.Forward(x, c, batchSize, seqLen, cfg, layerIndex)
+	x = l.Attention.ForwardBatch(x, b, c, positions, batchSize, seqLen, cfg, layerIndex)
 	if x == nil || !x.Valid() {
 		panic(fmt.Sprintf("gpt-oss layer %d attention output is invalid", layerIndex))
 	}
@@ -1168,6 +1153,24 @@ func (l *Layer) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg 
 }
 
 func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
+	b := batchForLegacyForward(c, batchSize, seqLen)
+	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
+	return a.ForwardBatch(x, b, c, positions, batchSize, seqLen, cfg, layerIndex)
+}
+
+func batchForLegacyForward(c cache.Cache, batchSize, seqLen int) *batch.Batch {
+	offset := 0
+	if c != nil {
+		offset = c.Offset()
+	}
+	return &batch.Batch{
+		InputIDs:     mlx.Zeros(mlx.DTypeInt32, batchSize, seqLen),
+		SeqOffsets:   []int32{int32(offset)},
+		SeqQueryLens: []int32{int32(seqLen)},
+	}
+}
+
+func (a *Attention) ForwardBatch(x *mlx.Array, b *batch.Batch, c cache.Cache, positions *mlx.Array, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
 	if a == nil || a.QProj == nil || a.KProj == nil || a.VProj == nil || a.OProj == nil || x == nil || cfg == nil {
 		return x
 	}
@@ -1177,7 +1180,13 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 		// validation or field mitigation.
 		steps := make([]*mlx.Array, 0, seqLen)
 		for pos := range seqLen {
-			steps = append(steps, a.Forward(sliceSequence(x, pos), c, 1, 1, cfg, layerIndex))
+			stepBatch := &batch.Batch{
+				InputIDs:     b.InputIDs.Slice(mlx.Slice(), mlx.Slice(pos, pos+1)),
+				SeqOffsets:   []int32{b.SeqOffsets[0] + int32(pos)},
+				SeqQueryLens: []int32{1},
+			}
+			stepPositions := mlx.FromValues(stepBatch.SeqOffsets, len(stepBatch.SeqOffsets))
+			steps = append(steps, a.ForwardBatch(sliceSequence(x, pos), stepBatch, c, stepPositions, 1, 1, cfg, layerIndex))
 		}
 		return mlx.Concatenate(steps, 1)
 	}
@@ -1209,52 +1218,36 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 		panic(fmt.Sprintf("gpt-oss layer %d attention transpose is invalid", layerIndex))
 	}
 
-	offset := 0
-	if c != nil {
-		offset = c.Offset()
-	}
 	attentionScale := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
 	if a.RoPEFreqs != nil && a.RoPEFreqs.Valid() {
-		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, offset, a.RoPEFreqs)
-		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, offset, a.RoPEFreqs)
+		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
+		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
 		attentionScale *= yarnConcentration(cfg) * yarnConcentration(cfg)
 	} else {
 		ropeBase, ropeScale, _ := cfg.RopeParameters()
-		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
-		key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, offset)
+		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
+		key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
 	}
 	if query == nil || key == nil || !query.Valid() || !key.Valid() {
 		panic(fmt.Sprintf("gpt-oss layer %d attention RoPE is invalid", layerIndex))
 	}
 
+	mask := nn.CausalMask()
+	var kv nn.SDPAOption
 	if c != nil {
-		key, value = c.Update(key, value)
-	}
-	if key == nil || value == nil || !key.Valid() || !value.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention cache update is invalid", layerIndex))
-	}
-
-	maskMode := "causal"
-	var mask *mlx.Array
-	if seqLen > 1 && cfg.SlidingWindow > 0 {
-		if _, ok := c.(*cache.RotatingKVCache); ok {
-			// Rotating caches bound decode-time memory, but a batched prefill still
-			// needs an explicit local-attention mask so each query only sees the
-			// same sliding window a stepwise prefill would have exposed.
-			maskMode = "array"
-			mask = buildCausalMaskWindow(seq, int32(key.Dim(2)), cfg.SlidingWindow).AsType(query.DType())
+		history := c.(cache.Attention).Update(b, key, value)
+		if history == nil || history.K() == nil || history.V() == nil || !history.K().Valid() || !history.V().Valid() {
+			panic(fmt.Sprintf("gpt-oss layer %d attention cache update is invalid", layerIndex))
 		}
+		kv = nn.WithKVHistory(history)
+	} else {
+		kv = nn.WithKV(key, value, b.SeqQueryLens)
+	}
+	if c == nil && seqLen > 1 && cfg.SlidingWindow > 0 && layerIndex%2 == 0 {
+		mask = mask.Intersect(nn.SlidingWindowMask(b, key.Dim(2), int(cfg.SlidingWindow), query.DType()))
 	}
 
-	attention := mlx.ScaledDotProductAttentionWithSinks(
-		query,
-		key,
-		value,
-		attentionScale,
-		maskMode,
-		mask,
-		a.Sinks,
-	)
+	attention := nn.ScaledDotProductAttention(b, query, attentionScale, kv, nn.WithMask(mask), nn.WithSinks(a.Sinks))
 	if attention == nil || !attention.Valid() {
 		panic(fmt.Sprintf("gpt-oss layer %d attention sdpa is invalid", layerIndex))
 	}

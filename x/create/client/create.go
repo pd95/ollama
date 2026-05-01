@@ -18,6 +18,7 @@ import (
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/manifest"
+	modelparsers "github.com/ollama/ollama/model/parsers"
 	"github.com/ollama/ollama/parser"
 	"github.com/ollama/ollama/progress"
 	"github.com/ollama/ollama/types/model"
@@ -132,11 +133,11 @@ func CreateModel(opts CreateOptions, p *progress.Progress) error {
 	if isSafetensors {
 		modelType = "safetensors model"
 		spinnerKey = "create"
-		capabilities = inferSafetensorsCapabilities(opts.ModelDir)
 
 		// Set parser and renderer name based on architecture
 		parserName = getParserName(opts.ModelDir)
 		rendererName = getRendererName(opts.ModelDir)
+		capabilities = inferSafetensorsCapabilities(opts.ModelDir, resolveParserName(opts.Modelfile, parserName))
 	} else {
 		modelType = "image generation model"
 		spinnerKey = "imagegen"
@@ -183,7 +184,7 @@ func CreateModel(opts CreateOptions, p *progress.Progress) error {
 	return nil
 }
 
-func inferSafetensorsCapabilities(modelDir string) []string {
+func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 	capabilities := []string{"completion"}
 
 	// Qwen3.5 multimodal checkpoints use ConditionalGeneration architectures.
@@ -195,7 +196,16 @@ func inferSafetensorsCapabilities(modelDir string) []string {
 		capabilities = append(capabilities, "audio")
 	}
 
-	if supportsThinking(modelDir) {
+	var builtinParser modelparsers.Parser
+	if parserName != "" {
+		builtinParser = modelparsers.ParserForName(parserName)
+	}
+
+	if builtinParser != nil && builtinParser.HasToolSupport() {
+		capabilities = append(capabilities, "tools")
+	}
+
+	if supportsThinking(modelDir) || (builtinParser != nil && builtinParser.HasThinkingSupport()) {
 		capabilities = append(capabilities, "thinking")
 	}
 
@@ -453,8 +463,8 @@ func createModelfileLayers(mf *ModelfileConfig) ([]manifest.Layer, error) {
 	return layers, nil
 }
 
-// supportsThinking checks if the model supports thinking mode based on its architecture.
-// This reads the config.json from the model directory and checks the architectures field.
+// supportsThinking checks if the model supports thinking mode based on known
+// architectures that do not expose a cleaner signal in their local metadata.
 func supportsThinking(modelDir string) bool {
 	configPath := filepath.Join(modelDir, "config.json")
 	data, err := os.ReadFile(configPath)
@@ -562,6 +572,9 @@ func getParserName(modelDir string) string {
 		if strings.Contains(archLower, "gptoss") || strings.Contains(archLower, "gpt_oss") || strings.Contains(archLower, "gpt-oss") {
 			return "harmony"
 		}
+		if strings.Contains(archLower, "laguna") {
+			return "laguna"
+		}
 		if strings.Contains(archLower, "glm4") || strings.Contains(archLower, "glm-4") {
 			return "glm-4.7"
 		}
@@ -581,6 +594,9 @@ func getParserName(modelDir string) string {
 		typeLower := strings.ToLower(cfg.ModelType)
 		if strings.Contains(typeLower, "gptoss") || strings.Contains(typeLower, "gpt_oss") || strings.Contains(typeLower, "gpt-oss") {
 			return "harmony"
+		}
+		if strings.Contains(typeLower, "laguna") {
+			return "laguna"
 		}
 		if strings.Contains(typeLower, "glm4") || strings.Contains(typeLower, "glm-4") {
 			return "glm-4.7"
@@ -622,6 +638,9 @@ func getRendererName(modelDir string) string {
 		if strings.Contains(archLower, "gptoss") || strings.Contains(archLower, "gpt_oss") || strings.Contains(archLower, "gpt-oss") {
 			return ""
 		}
+		if strings.Contains(archLower, "laguna") {
+			return "laguna"
+		}
 		if strings.Contains(archLower, "gemma4") {
 			return "gemma4"
 		}
@@ -641,6 +660,9 @@ func getRendererName(modelDir string) string {
 		typeLower := strings.ToLower(cfg.ModelType)
 		if strings.Contains(typeLower, "gptoss") || strings.Contains(typeLower, "gpt_oss") || strings.Contains(typeLower, "gpt-oss") {
 			return ""
+		}
+		if strings.Contains(typeLower, "laguna") {
+			return "laguna"
 		}
 		if strings.Contains(typeLower, "gemma4") {
 			return "gemma4"
