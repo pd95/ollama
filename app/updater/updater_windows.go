@@ -94,6 +94,10 @@ func getStagedUpdate() string {
 }
 
 func DoUpgrade(interactive bool) error {
+	if UpdatesDisabled() {
+		return fmt.Errorf("updates disabled by build")
+	}
+
 	bundle := getStagedUpdate()
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
@@ -188,10 +192,18 @@ func verifyDownload() error {
 }
 
 func IsUpdatePending() bool {
+	if UpdatesDisabled() {
+		return false
+	}
+
 	return getStagedUpdate() != ""
 }
 
 func DoUpgradeAtStartup() error {
+	if UpdatesDisabled() {
+		return fmt.Errorf("updates disabled by build")
+	}
+
 	return DoUpgrade(false)
 }
 

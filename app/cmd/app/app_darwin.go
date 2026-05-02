@@ -71,6 +71,11 @@ func StopUI() {
 
 //export StartUpdate
 func StartUpdate() {
+	if updater.UpdatesDisabled() {
+		slog.Info("update request ignored; updates disabled by build")
+		return
+	}
+
 	if err := updater.DoUpgrade(true); err != nil {
 		slog.Error("upgrade failed", "error", err)
 		return

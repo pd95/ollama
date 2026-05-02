@@ -47,6 +47,44 @@ func TestIsNewReleaseAvailable(t *testing.T) {
 	}
 }
 
+func TestUpdatesDisabledSkipsCheck(t *testing.T) {
+	oldDisableUpdates := DisableUpdates
+	DisableUpdates = "true"
+	defer func() { DisableUpdates = oldDisableUpdates }()
+
+	checkCount := atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		checkCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	oldUpdateCheckURLBase := UpdateCheckURLBase
+	UpdateCheckURLBase = server.URL + "/update.json"
+	defer func() { UpdateCheckURLBase = oldUpdateCheckURLBase }()
+
+	upd := &Updater{Store: &store.Store{DBPath: filepath.Join(t.TempDir(), "test.db")}}
+	defer upd.Store.Close()
+
+	available, _ := upd.checkForUpdate(t.Context())
+	if available {
+		t.Fatal("disabled updates should never report an available update")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	upd.StartBackgroundUpdaterChecker(ctx, func(string) error {
+		t.Fatal("disabled updater should not call update callback")
+		return nil
+	})
+	upd.TriggerImmediateCheck()
+	time.Sleep(20 * time.Millisecond)
+
+	if checkCount.Load() != 0 {
+		t.Fatalf("disabled updates should not contact update server, got %d requests", checkCount.Load())
+	}
+}
+
 func TestBackgoundChecker(t *testing.T) {
 	UpdateStageDir = t.TempDir()
 	haveUpdate := false

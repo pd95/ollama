@@ -88,6 +88,10 @@ func init() {
 }
 
 func DoUpgrade(interactive bool) error {
+	if UpdatesDisabled() {
+		return fmt.Errorf("updates disabled by build")
+	}
+
 	// TODO use UpgradeLogFile to record the upgrade details from->to version, etc.
 
 	bundle := getStagedUpdate()
@@ -345,6 +349,10 @@ func verifyDownload() error {
 
 // If we detect an upgrade bundle, attempt to upgrade at startup
 func DoUpgradeAtStartup() error {
+	if UpdatesDisabled() {
+		return fmt.Errorf("updates disabled by build")
+	}
+
 	bundle := getStagedUpdate()
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
@@ -380,6 +388,10 @@ func getStagedUpdate() string {
 }
 
 func IsUpdatePending() bool {
+	if UpdatesDisabled() {
+		return false
+	}
+
 	return getStagedUpdate() != ""
 }
 

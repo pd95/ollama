@@ -38,6 +38,7 @@ var (
 	UpgradeMarkerFile string
 	Installer         string
 	UserAgentOS       string
+	DisableUpdates    string
 
 	VerifyDownload func() error
 )
@@ -48,8 +49,22 @@ type UpdateResponse struct {
 	UpdateVersion string `json:"version"`
 }
 
+func UpdatesDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(DisableUpdates)) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func (u *Updater) checkForUpdate(ctx context.Context) (bool, UpdateResponse) {
 	var updateResp UpdateResponse
+
+	if UpdatesDisabled() {
+		slog.Debug("update check disabled by build")
+		return false, updateResp
+	}
 
 	requestURL, err := url.Parse(UpdateCheckURLBase)
 	if err != nil {
@@ -133,6 +148,10 @@ func (u *Updater) checkForUpdate(ctx context.Context) (bool, UpdateResponse) {
 }
 
 func (u *Updater) DownloadNewRelease(ctx context.Context, updateResp UpdateResponse) error {
+	if UpdatesDisabled() {
+		return errors.New("updates disabled by build")
+	}
+
 	// Create a cancellable context for this download
 	downloadCtx, cancel := context.WithCancel(ctx)
 	u.cancelDownloadLock.Lock()
@@ -278,6 +297,11 @@ func (u *Updater) CancelOngoingDownload() {
 
 // TriggerImmediateCheck signals the background checker to check for updates immediately
 func (u *Updater) TriggerImmediateCheck() {
+	if UpdatesDisabled() {
+		slog.Debug("immediate update check ignored; updates disabled by build")
+		return
+	}
+
 	if u.checkNow != nil {
 		select {
 		case u.checkNow <- struct{}{}:
@@ -288,6 +312,13 @@ func (u *Updater) TriggerImmediateCheck() {
 }
 
 func (u *Updater) StartBackgroundUpdaterChecker(ctx context.Context, cb func(string) error) {
+	if UpdatesDisabled() {
+		slog.Info("background update checker disabled by build")
+		cleanupOldDownloads(UpdateStageDir)
+		UpdateDownloaded = false
+		return
+	}
+
 	u.checkNow = make(chan struct{}, 1)
 	u.checkNow <- struct{}{} // Trigger first check after initial delay
 	go func() {

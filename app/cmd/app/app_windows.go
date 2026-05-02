@@ -121,6 +121,11 @@ func quit() {
 }
 
 func (app *appCallbacks) DoUpdate() {
+	if updater.UpdatesDisabled() {
+		slog.Info("update request ignored; updates disabled by build")
+		return
+	}
+
 	// Safeguard in case we have requests in flight that need to drain...
 	slog.Info("Waiting for server to shutdown")
 
