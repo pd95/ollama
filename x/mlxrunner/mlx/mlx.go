@@ -35,6 +35,8 @@ package mlx
 // }
 import "C"
 
+import "runtime"
+
 func init() {
 	// Replace the default exit(-1) error handler with one that captures
 	// the error message so we can surface it in Go.
@@ -54,7 +56,8 @@ func Version() string {
 // The thread lock ensures the thread-local error state is read from the same
 // thread that executed the call.
 func mlxCheck(fallback string, fn func() C.int) {
-	LockOSThread()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 
 	C.mlx_clear_last_error()
 	if fn() != 0 {
