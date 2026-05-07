@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ollama/ollama/x/imagegen/manifest"
@@ -19,11 +20,18 @@ import (
 	"github.com/ollama/ollama/x/models/nn"
 )
 
+var mlxTestMu sync.Mutex
+
 func forwardModel(m *Model, tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
-	return m.Forward(&batch.Batch{
-		InputIDs:   tokens,
-		SeqOffsets: []int32{0},
-	}, caches)
+	return m.Forward(testBatch(tokens, 0), caches)
+}
+
+func testBatch(tokens *mlx.Array, offset int) *batch.Batch {
+	return &batch.Batch{
+		InputIDs:     tokens,
+		SeqOffsets:   []int32{int32(offset)},
+		SeqQueryLens: []int32{int32(tokens.Dim(1))},
+	}
 }
 
 func TestParseConfig(t *testing.T) {
@@ -2302,14 +2310,20 @@ func TestAttentionForwardMatchesReferenceWithSlidingWindowCache(t *testing.T) {
 
 func skipIfNoMLX(t *testing.T) {
 	t.Helper()
+	mlxTestMu.Lock()
 	runtime.LockOSThread()
-	t.Cleanup(runtime.UnlockOSThread)
 	if err := mlx.CheckInit(); err != nil {
+		runtime.UnlockOSThread()
+		mlxTestMu.Unlock()
 		t.Skipf("MLX not available: %v", err)
 	}
 	if mlx.GPUIsAvailable() {
 		mlx.SetDefaultDeviceGPU()
 	}
+	t.Cleanup(func() {
+		runtime.UnlockOSThread()
+		mlxTestMu.Unlock()
+	})
 }
 
 func denseTestConfig(t *testing.T) Config {
