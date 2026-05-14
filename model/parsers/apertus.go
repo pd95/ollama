@@ -15,12 +15,15 @@ const (
 	apertusToolCloseTag      = "<|tools_suffix|>"
 	apertusAssistantOpenTag  = "<|assistant_start|>"
 	apertusAssistantCloseTag = "<|assistant_end|>"
+	apertusInnerOpenTag      = "<|inner_prefix|>"
+	apertusInnerCloseTag     = "<|inner_suffix|>"
 )
 
 type apertusParserState int
 
 const (
 	apertusParserStateContent apertusParserState = iota
+	apertusParserStateThinking
 	apertusParserStateToolCalls
 )
 
@@ -29,29 +32,47 @@ type ApertusParser struct {
 	acc         strings.Builder
 	allowedTool map[string]bool
 	callIndex   int
+	thinking    bool
 }
 
 func (p *ApertusParser) Init(tools []api.Tool, lastMessage *api.Message, thinkValue *api.ThinkValue) []api.Tool {
+	p.state = apertusParserStateContent
+	p.acc.Reset()
 	p.allowedTool = make(map[string]bool, len(tools))
 	for _, tool := range tools {
 		p.allowedTool[tool.Function.Name] = true
 	}
 	p.callIndex = 0
+	p.thinking = thinkValue != nil && thinkValue.Bool()
 	return tools
 }
 
 func (p *ApertusParser) Add(s string, done bool) (content string, thinking string, calls []api.ToolCall, err error) {
 	p.acc.WriteString(s)
 
-	var sb strings.Builder
+	var contentSB strings.Builder
+	var thinkingSB strings.Builder
 	for {
 		switch p.state {
 		case apertusParserStateContent:
 			current := p.acc.String()
-			if idx := strings.Index(current, apertusToolOpenTag); idx >= 0 {
+			innerIdx := strings.Index(current, apertusInnerOpenTag)
+			toolIdx := strings.Index(current, apertusToolOpenTag)
+			if innerIdx >= 0 && (toolIdx < 0 || innerIdx < toolIdx) {
+				before := cleanApertusContent(current[:innerIdx])
+				if before != "" {
+					contentSB.WriteString(before)
+				}
+				p.acc.Reset()
+				p.acc.WriteString(current[innerIdx+len(apertusInnerOpenTag):])
+				p.state = apertusParserStateThinking
+				continue
+			}
+
+			if idx := toolIdx; idx >= 0 {
 				before := cleanApertusContent(current[:idx])
 				if before != "" {
-					sb.WriteString(before)
+					contentSB.WriteString(before)
 				}
 				p.acc.Reset()
 				p.acc.WriteString(current[idx+len(apertusToolOpenTag):])
@@ -66,19 +87,19 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 					if parseErr == nil {
 						p.acc.Reset()
 						calls = append(calls, parsed...)
-						return sb.String(), "", calls, nil
+						return contentSB.String(), thinkingSB.String(), calls, nil
 					}
 				}
-				sb.WriteString(cleaned)
+				contentSB.WriteString(cleaned)
 				p.acc.Reset()
-				return sb.String(), "", calls, nil
+				return contentSB.String(), thinkingSB.String(), calls, nil
 			}
 
 			if p.looksLikeToolCallStart(current) {
-				return sb.String(), "", calls, nil
+				return contentSB.String(), thinkingSB.String(), calls, nil
 			}
 
-			overlapLen := overlap(current, apertusToolOpenTag)
+			overlapLen := max(overlap(current, apertusToolOpenTag), overlap(current, apertusInnerOpenTag))
 			emitLen := len(current) - overlapLen
 			if overlapLen == 0 {
 				wsLen := trailingWhitespaceLen(current)
@@ -89,19 +110,61 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 				if overlapLen > 0 {
 					emit = strings.TrimRightFunc(emit, unicode.IsSpace)
 				}
-				sb.WriteString(cleanApertusContent(emit))
+				contentSB.WriteString(cleanApertusContent(emit))
 				keep := current[emitLen:]
 				p.acc.Reset()
 				p.acc.WriteString(keep)
 			}
-			return sb.String(), "", calls, nil
+			return contentSB.String(), thinkingSB.String(), calls, nil
+		case apertusParserStateThinking:
+			current := p.acc.String()
+			if idx := strings.Index(current, apertusInnerCloseTag); idx >= 0 {
+				if p.thinking {
+					thinkingSB.WriteString(current[:idx])
+				} else {
+					contentSB.WriteString(cleanApertusContent(current[:idx]))
+				}
+				after := strings.TrimLeftFunc(current[idx+len(apertusInnerCloseTag):], unicode.IsSpace)
+				p.acc.Reset()
+				p.acc.WriteString(after)
+				p.state = apertusParserStateContent
+				continue
+			}
+			if done {
+				if p.thinking {
+					thinkingSB.WriteString(current)
+				} else {
+					contentSB.WriteString(cleanApertusContent(current))
+				}
+				p.acc.Reset()
+				p.state = apertusParserStateContent
+				return contentSB.String(), thinkingSB.String(), calls, nil
+			}
+
+			overlapLen := overlap(current, apertusInnerCloseTag)
+			emitLen := len(current) - overlapLen
+			if overlapLen == 0 {
+				emitLen = len(current) - trailingWhitespaceLen(current)
+			}
+			if emitLen > 0 {
+				emit := current[:emitLen]
+				if p.thinking {
+					thinkingSB.WriteString(emit)
+				} else {
+					contentSB.WriteString(cleanApertusContent(emit))
+				}
+				keep := current[emitLen:]
+				p.acc.Reset()
+				p.acc.WriteString(keep)
+			}
+			return contentSB.String(), thinkingSB.String(), calls, nil
 		case apertusParserStateToolCalls:
 			current := p.acc.String()
 			if idx := strings.Index(current, apertusToolCloseTag); idx >= 0 {
 				parsed, parseErr := p.parseToolCalls(current[:idx])
 				if parseErr != nil {
 					if isSoftApertusToolParseError(parseErr) {
-						sb.WriteString(cleanApertusContent(current[:idx]))
+						contentSB.WriteString(cleanApertusContent(current[:idx]))
 						after := strings.TrimLeftFunc(current[idx+len(apertusToolCloseTag):], unicode.IsSpace)
 						p.acc.Reset()
 						p.acc.WriteString(after)
@@ -121,19 +184,19 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 				parsed, parseErr := p.parseToolCalls(current)
 				if parseErr != nil {
 					if isSoftApertusToolParseError(parseErr) {
-						sb.WriteString(cleanApertusContent(current))
+						contentSB.WriteString(cleanApertusContent(current))
 						p.acc.Reset()
 						p.state = apertusParserStateContent
-						return sb.String(), "", calls, nil
+						return contentSB.String(), thinkingSB.String(), calls, nil
 					}
 					return "", "", nil, fmt.Errorf("unterminated apertus tool call: %w", parseErr)
 				}
 				p.acc.Reset()
 				p.state = apertusParserStateContent
 				calls = append(calls, parsed...)
-				return sb.String(), "", calls, nil
+				return contentSB.String(), thinkingSB.String(), calls, nil
 			}
-			return sb.String(), "", calls, nil
+			return contentSB.String(), thinkingSB.String(), calls, nil
 		default:
 			return "", "", nil, fmt.Errorf("unknown apertus parser state %d", p.state)
 		}
@@ -143,6 +206,8 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 func cleanApertusContent(s string) string {
 	s = strings.ReplaceAll(s, apertusAssistantOpenTag, "")
 	s = strings.ReplaceAll(s, apertusAssistantCloseTag, "")
+	s = strings.ReplaceAll(s, apertusInnerOpenTag, "")
+	s = strings.ReplaceAll(s, apertusInnerCloseTag, "")
 	return strings.TrimRightFunc(s, unicode.IsSpace)
 }
 
@@ -151,7 +216,7 @@ func (p *ApertusParser) HasToolSupport() bool {
 }
 
 func (p *ApertusParser) HasThinkingSupport() bool {
-	return false
+	return true
 }
 
 func (p *ApertusParser) parseToolCalls(raw string) ([]api.ToolCall, error) {
@@ -207,6 +272,10 @@ func (p *ApertusParser) parseToolCalls(raw string) ([]api.ToolCall, error) {
 }
 
 func isSoftApertusToolParseError(err error) bool {
+	if strings.Contains(err.Error(), "empty apertus tool call") {
+		return true
+	}
+
 	var syntaxErr *json.SyntaxError
 	if errors.As(err, &syntaxErr) {
 		return true
