@@ -618,7 +618,7 @@ func TestSupportsThinking(t *testing.T) {
 			want:       false,
 		},
 		{
-			name:       "apertus architecture with tool parser but no thinking support",
+			name:       "apertus architecture uses template-level thinking, not config-level detection",
 			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
 			want:       false,
 		},
@@ -723,8 +723,8 @@ func TestInferSafetensorsCapabilitiesApertusTools(t *testing.T) {
 	}
 
 	got := inferSafetensorsCapabilities(dir, "apertus")
-	if !slices.Equal(got, []string{"completion", "tools"}) {
-		t.Fatalf("inferSafetensorsCapabilities() = %#v, want completion and tools", got)
+	if !slices.Equal(got, []string{"completion", "tools", "thinking"}) {
+		t.Fatalf("inferSafetensorsCapabilities() = %#v, want completion, tools, and thinking", got)
 	}
 }
 
