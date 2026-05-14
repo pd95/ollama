@@ -203,6 +203,19 @@ func TestApertusParserMalformedToolCallFallsBackToContent(t *testing.T) {
 	}
 }
 
+func TestApertusParserEmptyToolCallFallsBackToContent(t *testing.T) {
+	parser := &ApertusParser{}
+	parser.Init([]api.Tool{parserWeatherTool()}, nil, nil)
+
+	content, thinking, calls, err := parser.Add(`<|tools_prefix|><|tools_suffix|>`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || thinking != "" || len(calls) != 0 {
+		t.Fatalf("content=%q thinking=%q calls=%d, want empty fallback", content, thinking, len(calls))
+	}
+}
+
 func TestApertusParserUnterminatedMalformedToolCallFallsBackToContent(t *testing.T) {
 	parser := &ApertusParser{}
 	parser.Init([]api.Tool{parserWeatherTool()}, nil, nil)
@@ -213,6 +226,74 @@ func TestApertusParserUnterminatedMalformedToolCallFallsBackToContent(t *testing
 	}
 	if content != `not json` || thinking != "" || len(calls) != 0 {
 		t.Fatalf("content=%q thinking=%q calls=%d, want malformed JSON as content", content, thinking, len(calls))
+	}
+}
+
+func TestApertusParserThinkingSpan(t *testing.T) {
+	parser := &ApertusParser{}
+	parser.Init(nil, nil, &api.ThinkValue{Value: true})
+
+	content, thinking, calls, err := parser.Add(`<|inner_prefix|>Need a short answer.<|inner_suffix|>Answer.`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "Answer." || thinking != "Need a short answer." || len(calls) != 0 {
+		t.Fatalf("content=%q thinking=%q calls=%d", content, thinking, len(calls))
+	}
+}
+
+func TestApertusParserThinkingSpanAcrossChunks(t *testing.T) {
+	parser := &ApertusParser{}
+	parser.Init(nil, nil, &api.ThinkValue{Value: true})
+
+	content, thinking, calls, err := parser.Add(`<|inner_prefix|>Need `, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || thinking != "Need" || len(calls) != 0 {
+		t.Fatalf("first content=%q thinking=%q calls=%d", content, thinking, len(calls))
+	}
+
+	content, thinking, calls, err = parser.Add(`weather.<|inner_`, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || thinking != " weather." || len(calls) != 0 {
+		t.Fatalf("second content=%q thinking=%q calls=%d", content, thinking, len(calls))
+	}
+
+	content, thinking, calls, err = parser.Add(`suffix|>Checking.`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "Checking." || thinking != "" || len(calls) != 0 {
+		t.Fatalf("final content=%q thinking=%q calls=%d", content, thinking, len(calls))
+	}
+}
+
+func TestApertusParserThinkingThenToolCall(t *testing.T) {
+	parser := &ApertusParser{}
+	parser.Init([]api.Tool{parserWeatherTool()}, nil, &api.ThinkValue{Value: true})
+
+	content, thinking, calls, err := parser.Add(`<|inner_prefix|>Need weather.<|inner_suffix|><|tools_prefix|>[{"get_weather": {"location":"Zurich"}}]<|tools_suffix|>`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || thinking != "Need weather." || len(calls) != 1 {
+		t.Fatalf("content=%q thinking=%q calls=%d", content, thinking, len(calls))
+	}
+}
+
+func TestApertusParserThinkingDisabledTreatsInnerSpanAsContent(t *testing.T) {
+	parser := &ApertusParser{}
+	parser.Init(nil, nil, nil)
+
+	content, thinking, calls, err := parser.Add(`<|inner_prefix|>hidden<|inner_suffix|>Visible.`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "hiddenVisible." || thinking != "" || len(calls) != 0 {
+		t.Fatalf("content=%q thinking=%q calls=%d", content, thinking, len(calls))
 	}
 }
 
@@ -230,8 +311,8 @@ func TestApertusParserCapabilities(t *testing.T) {
 	if !parser.HasToolSupport() {
 		t.Fatal("expected tool support")
 	}
-	if parser.HasThinkingSupport() {
-		t.Fatal("did not expect thinking support")
+	if !parser.HasThinkingSupport() {
+		t.Fatal("expected thinking support")
 	}
 }
 
