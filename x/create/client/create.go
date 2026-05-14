@@ -621,6 +621,9 @@ func getParserName(modelDir string) string {
 		if strings.HasPrefix(arch, "MuseGlimmer") {
 			return "glimmer"
 		}
+		if strings.Contains(archLower, "apertus") {
+			return "apertus"
+		}
 		if strings.Contains(archLower, "laguna") {
 			return lagunaRendererParserName(modelDir)
 		}
@@ -652,6 +655,9 @@ func getParserName(modelDir string) string {
 		typeLower := strings.ToLower(cfg.ModelType)
 		if typeLower == "muse_glimmer" {
 			return "glimmer"
+		}
+		if strings.Contains(typeLower, "apertus") {
+			return "apertus"
 		}
 		if strings.Contains(typeLower, "laguna") {
 			return lagunaRendererParserName(modelDir)
@@ -705,6 +711,9 @@ func getRendererName(modelDir string) string {
 		if strings.HasPrefix(arch, "MuseGlimmer") {
 			return "glimmer"
 		}
+		if strings.Contains(archLower, "apertus") {
+			return "apertus"
+		}
 		if strings.Contains(archLower, "laguna") {
 			return lagunaRendererParserName(modelDir)
 		}
@@ -736,6 +745,9 @@ func getRendererName(modelDir string) string {
 		typeLower := strings.ToLower(cfg.ModelType)
 		if typeLower == "muse_glimmer" {
 			return "glimmer"
+		}
+		if strings.Contains(typeLower, "apertus") {
+			return "apertus"
 		}
 		if strings.Contains(typeLower, "laguna") {
 			return lagunaRendererParserName(modelDir)

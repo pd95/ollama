@@ -613,6 +613,11 @@ func TestDetectCapabilities(t *testing.T) {
 			want:       modelCapabilities{},
 		},
 		{
+			name:       "apertus architecture has no implicit thinking",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       modelCapabilities{},
+		},
+		{
 			name:       "invalid config json",
 			configJSON: `not json`,
 			want:       modelCapabilities{},
@@ -720,6 +725,18 @@ func TestInferSafetensorsCapabilitiesLaguna(t *testing.T) {
 	}
 }
 
+func TestInferSafetensorsCapabilitiesApertusTools(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := inferSafetensorsCapabilities(dir, "apertus")
+	if !slices.Equal(got, []string{"completion", "tools"}) {
+		t.Fatalf("inferSafetensorsCapabilities() = %#v, want completion and tools", got)
+	}
+}
+
 func TestGetParserName(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -775,6 +792,11 @@ func TestGetParserName(t *testing.T) {
 			name:       "glimmer model",
 			configJSON: `{"architectures": ["MuseGlimmerForConditionalGeneration"], "model_type": "muse_glimmer"}`,
 			want:       "glimmer",
+		},
+		{
+			name:       "apertus model",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       "apertus",
 		},
 		{
 			name:       "no config",
@@ -840,6 +862,11 @@ func TestGetRendererName(t *testing.T) {
 			name:       "glimmer model",
 			configJSON: `{"architectures": ["MuseGlimmerForConditionalGeneration"], "model_type": "muse_glimmer"}`,
 			want:       "glimmer",
+		},
+		{
+			name:       "apertus model",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       "apertus",
 		},
 	}
 
