@@ -617,6 +617,9 @@ func getParserName(modelDir string) string {
 	// Check architectures for known parsers
 	for _, arch := range cfg.Architectures {
 		archLower := strings.ToLower(arch)
+		if strings.Contains(archLower, "apertus") {
+			return "apertus"
+		}
 		if strings.Contains(archLower, "laguna") {
 			return lagunaRendererParserName(modelDir)
 		}
@@ -643,6 +646,9 @@ func getParserName(modelDir string) string {
 	// Also check model_type
 	if cfg.ModelType != "" {
 		typeLower := strings.ToLower(cfg.ModelType)
+		if strings.Contains(typeLower, "apertus") {
+			return "apertus"
+		}
 		if strings.Contains(typeLower, "laguna") {
 			return lagunaRendererParserName(modelDir)
 		}
@@ -689,6 +695,9 @@ func getRendererName(modelDir string) string {
 	// Check architectures for known renderers
 	for _, arch := range cfg.Architectures {
 		archLower := strings.ToLower(arch)
+		if strings.Contains(archLower, "apertus") {
+			return "apertus"
+		}
 		if strings.Contains(archLower, "laguna") {
 			return lagunaRendererParserName(modelDir)
 		}
@@ -715,6 +724,9 @@ func getRendererName(modelDir string) string {
 	// Also check model_type
 	if cfg.ModelType != "" {
 		typeLower := strings.ToLower(cfg.ModelType)
+		if strings.Contains(typeLower, "apertus") {
+			return "apertus"
+		}
 		if strings.Contains(typeLower, "laguna") {
 			return lagunaRendererParserName(modelDir)
 		}
