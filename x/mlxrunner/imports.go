@@ -1,6 +1,7 @@
 package mlxrunner
 
 import (
+	_ "github.com/ollama/ollama/x/models/apertus"
 	_ "github.com/ollama/ollama/x/models/dflash"
 	_ "github.com/ollama/ollama/x/models/gemma3"
 	_ "github.com/ollama/ollama/x/models/gemma4"
