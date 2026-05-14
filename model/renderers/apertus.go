@@ -18,6 +18,8 @@ const (
 	apertusUserEnd        = "<|user_end|>"
 	apertusAssistantStart = "<|assistant_start|>"
 	apertusAssistantEnd   = "<|assistant_end|>"
+	apertusInnerPrefix    = "<|inner_prefix|>"
+	apertusInnerSuffix    = "<|inner_suffix|>"
 	apertusToolsPrefix    = "<|tools_prefix|>"
 	apertusToolsSuffix    = "<|tools_suffix|>"
 	apertusImageToken     = "<|image|>"
@@ -26,10 +28,7 @@ const (
 type ApertusRenderer struct{}
 
 func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
-	if think != nil && think.Bool() {
-		return "", fmt.Errorf("apertus renderer does not support thinking")
-	}
-
+	thinkingEnabled := think != nil && think.Bool()
 	var sb strings.Builder
 	messageStart := 0
 	if len(messages) > 0 && messages[0].Role == "system" {
@@ -45,7 +44,11 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 	}
 
 	sb.WriteString(apertusDeveloperStart)
-	sb.WriteString("Deliberation: disabled\n")
+	if thinkingEnabled {
+		sb.WriteString("Deliberation: enabled\n")
+	} else {
+		sb.WriteString("Deliberation: disabled\n")
+	}
 	if len(tools) > 0 {
 		sb.WriteString("Tool Capabilities:\n")
 		renderApertusTools(&sb, tools)
@@ -92,6 +95,11 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 				inAssistant = true
 			}
 			closeToolOutputs()
+			if thinkingEnabled && message.Thinking != "" {
+				sb.WriteString(apertusInnerPrefix)
+				sb.WriteString(message.Thinking)
+				sb.WriteString(apertusInnerSuffix)
+			}
 			sb.WriteString(message.Content)
 			if len(message.ToolCalls) > 0 {
 				if err := renderApertusToolCalls(&sb, message.ToolCalls); err != nil {

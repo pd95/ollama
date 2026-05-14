@@ -79,10 +79,36 @@ func TestApertusRendererAssistantToolCallAndOutput(t *testing.T) {
 	}
 }
 
-func TestApertusRendererThinkingRejected(t *testing.T) {
+func TestApertusRendererThinkingEnabled(t *testing.T) {
 	think := &api.ThinkValue{Value: true}
-	if _, err := (&ApertusRenderer{}).Render(nil, nil, think); err == nil {
-		t.Fatal("expected thinking to be rejected")
+	got, err := (&ApertusRenderer{}).Render([]api.Message{
+		{Role: "user", Content: "Question"},
+		{Role: "assistant", Thinking: "Need a short answer.", Content: "Answer."},
+	}, nil, think)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"<|developer_start|>Deliberation: enabled\nTool Capabilities: disabled<|developer_end|>",
+		"<|assistant_start|><|inner_prefix|>Need a short answer.<|inner_suffix|>Answer.<|assistant_end|>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestApertusRendererThinkingHistorySuppressedWhenDisabled(t *testing.T) {
+	got, err := (&ApertusRenderer{}).Render([]api.Message{
+		{Role: "user", Content: "Question"},
+		{Role: "assistant", Thinking: "hidden", Content: "Visible."},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "<|inner_prefix|>") || strings.Contains(got, "hidden") {
+		t.Fatalf("thinking history should be omitted when thinking is disabled:\n%s", got)
 	}
 }
 
@@ -105,6 +131,7 @@ func TestApertusRendererMatchesHFChatTemplate(t *testing.T) {
 		messages            []api.Message
 		tools               []api.Tool
 		addGenerationPrompt bool
+		enableThinking      bool
 	}{
 		{
 			name: "plain_chat",
@@ -134,16 +161,29 @@ func TestApertusRendererMatchesHFChatTemplate(t *testing.T) {
 			tools:               []api.Tool{apertusWeatherTool()},
 			addGenerationPrompt: true,
 		},
+		{
+			name: "thinking_developer_flag",
+			messages: []api.Message{
+				{Role: "system", Content: "Think if useful."},
+				{Role: "user", Content: "Hello"},
+			},
+			addGenerationPrompt: true,
+			enableThinking:      true,
+		},
 	}
 
 	renderer := &ApertusRenderer{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := renderer.Render(tt.messages, tt.tools, nil)
+			var think *api.ThinkValue
+			if tt.enableThinking {
+				think = &api.ThinkValue{Value: true}
+			}
+			got, err := renderer.Render(tt.messages, tt.tools, think)
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := strings.TrimPrefix(renderApertusHFTemplate(t, modelDir, tt.messages, tt.tools, tt.addGenerationPrompt), "<s>")
+			want := strings.TrimPrefix(renderApertusHFTemplate(t, modelDir, tt.messages, tt.tools, tt.addGenerationPrompt, tt.enableThinking), "<s>")
 			if got != want {
 				t.Fatalf("renderer mismatch\nwant: %q\n got: %q", want, got)
 			}
@@ -164,7 +204,7 @@ func apertusAssistantToolCall(name string, values map[string]any) api.Message {
 	}
 }
 
-func renderApertusHFTemplate(t *testing.T, modelDir string, messages []api.Message, tools []api.Tool, addGenerationPrompt bool) string {
+func renderApertusHFTemplate(t *testing.T, modelDir string, messages []api.Message, tools []api.Tool, addGenerationPrompt bool, enableThinking bool) string {
 	t.Helper()
 
 	messagesJSON, err := json.Marshal(apertusHFMessages(messages))
@@ -185,17 +225,18 @@ model_dir = sys.argv[1]
 messages = json.loads(sys.argv[2])
 tools = json.loads(sys.argv[3])
 add_generation_prompt = sys.argv[4] == "true"
+enable_thinking = sys.argv[5] == "true"
 tok = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
 kwargs = {
     "tokenize": False,
     "add_generation_prompt": add_generation_prompt,
-    "enable_thinking": False,
+    "enable_thinking": enable_thinking,
 }
 if tools:
     kwargs["tools"] = tools
 print(tok.apply_chat_template(messages, **kwargs), end="")
 `
-	cmd := exec.Command("python3", "-c", script, modelDir, string(messagesJSON), string(toolsJSON), boolArg(addGenerationPrompt))
+	cmd := exec.Command("python3", "-c", script, modelDir, string(messagesJSON), string(toolsJSON), boolArg(addGenerationPrompt), boolArg(enableThinking))
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
