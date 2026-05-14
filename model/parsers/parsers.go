@@ -45,6 +45,8 @@ func ParserForName(name string) Parser {
 	var p Parser
 
 	switch name {
+	case "apertus":
+		p = &ApertusParser{}
 	case "qwen3":
 		p = &Qwen3Parser{hasThinkingSupport: false, defaultThinking: false}
 	case "qwen3-thinking":
