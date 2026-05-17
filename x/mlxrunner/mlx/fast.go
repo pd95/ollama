@@ -10,7 +10,6 @@ import (
 func FastScaledDotProductAttention(q, k, v *Array, scale float32, mode string, mask *Array) *Array {
 	sinks := New("")
 	cMode := C.CString(mode)
-	defer C.free(unsafe.Pointer(cMode))
 
 	var maskCtx C.mlx_array
 	if mask != nil {
@@ -22,6 +21,26 @@ func FastScaledDotProductAttention(q, k, v *Array, scale float32, mode string, m
 
 	out := New("FAST_SDPA")
 	C.mlx_fast_scaled_dot_product_attention(&out.ctx, q.ctx, k.ctx, v.ctx, C.float(scale), cMode, maskCtx, sinks.ctx, DefaultStream().ctx)
+	return out
+}
+
+func ScaledDotProductAttention(query, key, value, mask *Array, scale float32) *Array {
+	return ScaledDotProductAttentionWithSinks(query, key, value, scale, "causal", mask, nil)
+}
+
+func ScaledDotProductAttentionWithSinks(query, key, value *Array, scale float32, maskMode string, mask, sinks *Array) *Array {
+	if mask == nil {
+		mask = New("")
+	}
+	if sinks == nil {
+		sinks = New("")
+	}
+
+	cMode := C.CString(maskMode)
+	defer C.free(unsafe.Pointer(cMode))
+
+	out := New("FAST_SDPA")
+	C.mlx_fast_scaled_dot_product_attention(&out.ctx, query.ctx, key.ctx, value.ctx, C.float(scale), cMode, mask.ctx, sinks.ctx, DefaultStream().ctx)
 	return out
 }
 

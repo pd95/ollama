@@ -366,6 +366,14 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 			}`,
 			want: []string{"completion"},
 		},
+		{
+			name: "gpt-oss model",
+			configJSON: `{
+				"architectures": ["GptOssForCausalLM"],
+				"model_type": "gpt_oss"
+			}`,
+			want: []string{"completion", "thinking"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -591,6 +599,56 @@ func TestNewManifestWriter_PopulatesDraftMetadata(t *testing.T) {
 	}
 }
 
+func TestNewManifestWriter_NormalizesGPTOSSFamily(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", t.TempDir())
+
+	modelDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(modelDir, "config.json"), []byte(`{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gpt_oss"
+	}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	opts := CreateOptions{
+		ModelName: "gptoss-family-test",
+		ModelDir:  modelDir,
+	}
+
+	writer := newManifestWriter(opts, []string{"completion", "thinking", "tools"}, "harmony", "")
+	if err := writer(opts.ModelName, create.LayerInfo{}, nil); err != nil {
+		t.Fatalf("newManifestWriter() error = %v", err)
+	}
+
+	name := model.ParseName(opts.ModelName)
+	mf, err := manifest.ParseNamedManifest(name)
+	if err != nil {
+		t.Fatalf("ParseNamedManifest() error = %v", err)
+	}
+
+	configPath, err := manifest.BlobsPath(mf.Config.Digest)
+	if err != nil {
+		t.Fatalf("BlobsPath() error = %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	var cfg model.ConfigV2
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	if cfg.ModelFamily != "gptoss" {
+		t.Fatalf("ModelFamily = %q, want %q", cfg.ModelFamily, "gptoss")
+	}
+	if len(cfg.ModelFamilies) != 1 || cfg.ModelFamilies[0] != "gptoss" {
+		t.Fatalf("ModelFamilies = %v, want [gptoss]", cfg.ModelFamilies)
+	}
+}
+
 func TestSupportsThinking(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -631,6 +689,11 @@ func TestSupportsThinking(t *testing.T) {
 			name:       "laguna architecture without template",
 			configJSON: `{"architectures": ["LagunaForCausalLM"], "model_type": "laguna"}`,
 			want:       false,
+		},
+		{
+			name:       "gpt-oss via model_type",
+			configJSON: `{"model_type": "gpt_oss"}`,
+			want:       true,
 		},
 		{
 			name:       "empty config",
@@ -746,6 +809,16 @@ func TestGetParserName(t *testing.T) {
 			name:       "laguna model",
 			configJSON: `{"architectures": ["LagunaForCausalLM"], "model_type": "laguna"}`,
 			want:       "laguna",
+		},
+		{
+			name:       "gpt-oss model",
+			configJSON: `{"architectures": ["GptOssForCausalLM"]}`,
+			want:       "harmony",
+		},
+		{
+			name:       "gpt-oss via model_type",
+			configJSON: `{"model_type": "gpt_oss"}`,
+			want:       "harmony",
 		},
 		{
 			name:       "no config",

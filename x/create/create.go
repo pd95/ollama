@@ -463,8 +463,10 @@ func GetTensorQuantization(name string, shape []int32, quantize string) string {
 	return quantNorm
 }
 
-var expertLayerPrefixRegexp = regexp.MustCompile(`^(?:model\.language_model\.|language_model(?:\.model)?\.|model\.)?layers\.\d+$`)
-var prequantizedExpertSuffixRegexp = regexp.MustCompile(`^\.(\d+)\.(.+)$`)
+var (
+	expertLayerPrefixRegexp        = regexp.MustCompile(`^(?:blocks\.\d+|(?:model\.language_model\.|language_model(?:\.model)?\.|model\.)?layers\.\d+)$`)
+	prequantizedExpertSuffixRegexp = regexp.MustCompile(`^\.(\d+)\.(.+)$`)
+)
 
 // ExpertGroupPrefix returns the group prefix for expert tensors that should be packed together.
 // For example:
@@ -474,11 +476,8 @@ var prequantizedExpertSuffixRegexp = regexp.MustCompile(`^\.(\d+)\.(.+)$`)
 //   - "model.layers.0.mlp.down_proj.weight" -> "" (dense layer, no experts)
 //   - "model.layers.1.mlp.gate.weight" -> "" (routing gate, not an expert)
 func ExpertGroupPrefix(tensorName string) string {
-	if !strings.HasSuffix(tensorName, ".weight") {
-		return ""
-	}
-
 	for _, marker := range []string{
+		".experts.",
 		".mlp.experts.",
 		".mlp.shared_experts.",
 		".mlp.switch_mlp.",
@@ -804,6 +803,7 @@ func (noopImportTransform) quantizationType(name string, shape []int32, quantize
 type tensorImportTransformFactory func(modelDir string, cfg sourceModelConfig) (tensorImportTransform, error)
 
 var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
+	"GptOssForCausalLM":                    newGPTOSSImportTransform,
 	"Qwen3_5ForCausalLM":                   newQwen35ImportTransform,
 	"Qwen3_5ForConditionalGeneration":      newQwen35ImportTransform,
 	"Qwen3NextForCausalLM":                 newQwen35ImportTransform,
