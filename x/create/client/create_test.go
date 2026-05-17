@@ -618,6 +618,11 @@ func TestSupportsThinking(t *testing.T) {
 			want:       false,
 		},
 		{
+			name:       "apertus architecture uses template-level thinking, not config-level detection",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       false,
+		},
+		{
 			name:       "gemma architecture (no thinking)",
 			configJSON: `{"architectures": ["Gemma3ForCausalLM"], "model_type": "gemma3"}`,
 			want:       false,
@@ -711,6 +716,18 @@ func TestInferSafetensorsCapabilitiesLaguna(t *testing.T) {
 	}
 }
 
+func TestInferSafetensorsCapabilitiesApertusTools(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := inferSafetensorsCapabilities(dir, "apertus")
+	if !slices.Equal(got, []string{"completion", "tools", "thinking"}) {
+		t.Fatalf("inferSafetensorsCapabilities() = %#v, want completion, tools, and thinking", got)
+	}
+}
+
 func TestGetParserName(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -746,6 +763,11 @@ func TestGetParserName(t *testing.T) {
 			name:       "laguna model",
 			configJSON: `{"architectures": ["LagunaForCausalLM"], "model_type": "laguna"}`,
 			want:       "laguna",
+		},
+		{
+			name:       "apertus model",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       "apertus",
 		},
 		{
 			name:       "no config",
@@ -796,6 +818,11 @@ func TestGetRendererName(t *testing.T) {
 			name:       "laguna model",
 			configJSON: `{"architectures": ["LagunaForCausalLM"], "model_type": "laguna"}`,
 			want:       "laguna",
+		},
+		{
+			name:       "apertus model",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       "apertus",
 		},
 	}
 

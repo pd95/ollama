@@ -47,6 +47,8 @@ func rendererForName(name string) Renderer {
 		return constructor()
 	}
 	switch name {
+	case "apertus":
+		return &ApertusRenderer{}
 	case "qwen3-coder":
 		renderer := &Qwen3CoderRenderer{}
 		return renderer
