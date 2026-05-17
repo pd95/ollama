@@ -7,9 +7,13 @@ import (
 	"unsafe"
 )
 
-func FastScaledDotProductAttention(q, k, v *Array, scale float32, mode string, mask *Array) *Array {
+func FastScaledDotProductAttention(q, k, v *Array, scale float32, mode string, mask *Array, sinkArr ...*Array) *Array {
 	sinks := New("")
+	if len(sinkArr) > 0 && sinkArr[0] != nil {
+		sinks = sinkArr[0]
+	}
 	cMode := C.CString(mode)
+	defer C.free(unsafe.Pointer(cMode))
 
 	var maskCtx C.mlx_array
 	if mask != nil {
