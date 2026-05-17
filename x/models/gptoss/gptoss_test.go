@@ -34,6 +34,24 @@ func testBatch(tokens *mlx.Array, offset int) *batch.Batch {
 	}
 }
 
+func testForwardBatch(tokens *mlx.Array, c cache.Cache) *batch.Batch {
+	offset := 0
+	if c != nil {
+		offset = c.Offset()
+	}
+	return testBatch(tokens, offset)
+}
+
+func testGPTOSSRoPEFreqs(cfg *Config) *mlx.Array {
+	freqs, _ := buildGPTOSSRoPEFreqs(cfg)
+	return freqs
+}
+
+func testGPTOSSYarnScale(cfg *Config) float32 {
+	_, scale := buildGPTOSSRoPEFreqs(cfg)
+	return scale
+}
+
 func TestParseConfig(t *testing.T) {
 	data := []byte(`{
 		"architectures": ["GptOssForCausalLM"],
@@ -647,9 +665,9 @@ func TestBuildGPTOSSRoPEFreqsMatchesReference(t *testing.T) {
 	cfg.RopeScaling.OriginalMaxPositionEmbeddings = 4096
 	cfg.RopeScaling.BetaFast = 32
 	cfg.RopeScaling.BetaSlow = 1
-	gotTensor := buildGPTOSSRoPEFreqs(&cfg)
+	gotTensor := testGPTOSSRoPEFreqs(&cfg)
 	if gotTensor == nil || !gotTensor.Valid() {
-		t.Fatal("buildGPTOSSRoPEFreqs() returned invalid tensor")
+		t.Fatal("testGPTOSSRoPEFreqs() returned invalid tensor")
 	}
 
 	got := materializedFloats(gotTensor.AsType(mlx.DTypeFloat32))
@@ -1439,7 +1457,8 @@ func TestAttentionLastTokenMatchesPrefillStepPathScaledRoPE(t *testing.T) {
 		VProj:     nnLinearFromValues(identityFlat(64), nil, 64, 64),
 		OProj:     nnLinearFromValues(identityFlat(64), nil, 64, 64),
 		Sinks:     mlx.FromValues([]float32{0.3}, 1).AsType(mlx.DTypeBFloat16),
-		RoPEFreqs: buildGPTOSSRoPEFreqs(&cfg),
+		RoPEFreqs: testGPTOSSRoPEFreqs(&cfg),
+		RoPEScale: testGPTOSSYarnScale(&cfg),
 	}
 
 	fullCache := cache.NewRotatingKVCache(int(cfg.SlidingWindow))
@@ -1988,7 +2007,8 @@ func TestAttentionForwardMatchesReferenceWithSinksAndScaledRoPE(t *testing.T) {
 		VProj:     nnLinearFromValues(identityFlat(64), nil, 64, 64),
 		OProj:     nnLinearFromValues(identityFlat(64), nil, 64, 64),
 		Sinks:     mlx.FromValues([]float32{0.3}, 1).AsType(mlx.DTypeBFloat16),
-		RoPEFreqs: buildGPTOSSRoPEFreqs(&cfg),
+		RoPEFreqs: testGPTOSSRoPEFreqs(&cfg),
+		RoPEScale: testGPTOSSYarnScale(&cfg),
 	}
 
 	got := attn.Forward(x, nil, 1, 2, &cfg, 0)
@@ -2599,7 +2619,7 @@ func explicitAttentionForwardFromLoadedWeights(t *testing.T, attn *Attention, cf
 	sinks := materializedFloats(attn.Sinks.AsType(mlx.DTypeFloat32))
 
 	denoms := referenceGPTOSSRoPEDenominators(cfg)
-	concentration := yarnConcentration(cfg)
+	concentration := testGPTOSSYarnScale(cfg)
 	scale := float32(1 / math.Sqrt(float64(headDim)))
 
 	query := make([][][]float32, seqLen)
@@ -2878,26 +2898,27 @@ func attentionForwardTraceForTest(
 	key = mlx.Transpose(key, 0, 2, 1, 3)
 	value = mlx.Transpose(value, 0, 2, 1, 3)
 
-	offset := 0
-	if c != nil {
-		offset = c.Offset()
-	}
-	positions := mlx.FromValues([]int32{int32(offset)}, 1)
+	b := testForwardBatch(mlx.Zeros(mlx.DTypeInt32, batchSize, seqLen), c)
+	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
 	attentionScale := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
 	if a.RoPEFreqs != nil && a.RoPEFreqs.Valid() {
 		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
 		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
-		attentionScale *= yarnConcentration(cfg) * yarnConcentration(cfg)
+		attentionScale *= testGPTOSSYarnScale(cfg) * testGPTOSSYarnScale(cfg)
 	} else {
 		ropeBase, ropeScale, _ := cfg.RopeParameters()
 		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
 		key = mlx.RoPEWithBase(key, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
 	}
 
+	var kv nn.SDPAOption
 	if c != nil {
 		attnCache := c.(cache.Attention)
-		history := attnCache.Update(&batch.Batch{SeqOffsets: []int32{int32(offset)}}, key, value)
+		history := attnCache.Update(b, key, value)
 		key, value = history.K(), history.V()
+		kv = nn.WithKVHistory(history)
+	} else {
+		kv = nn.WithKV(key, value, b.SeqQueryLens)
 	}
 
 	visibleKey, visibleValue := visibleKVForLastQueryForTest(key, value, c, cfg)
@@ -2906,23 +2927,13 @@ func attentionForwardTraceForTest(
 	trace.visibleKeyLast = lastCacheTokenFloats(visibleKey.AsType(mlx.DTypeFloat32))
 	trace.visibleValueLast = lastCacheTokenFloats(visibleValue.AsType(mlx.DTypeFloat32))
 
-	maskMode := "causal"
-	var mask *mlx.Array
-	if seqLen > 1 && cfg.SlidingWindow > 0 {
-		if _, ok := c.(*cache.RotatingKVCache); ok {
-			maskMode = "array"
-			mask = buildCausalMaskWindow(seq, int32(key.Dim(2)), cfg.SlidingWindow).AsType(query.DType())
-		}
-	}
-
-	attention := mlx.ScaledDotProductAttentionWithSinks(
+	attention := nn.ScaledDotProductAttention(
+		b,
 		query,
-		key,
-		value,
 		attentionScale,
-		maskMode,
-		mask,
-		a.Sinks,
+		kv,
+		nn.WithMask(nn.CausalMask()),
+		nn.WithSinks(a.Sinks),
 	)
 	if attention == nil || !attention.Valid() {
 		t.Fatalf("layer %d trace attention is invalid", layerIndex)
@@ -3240,7 +3251,7 @@ func referenceAttentionForwardWithSinksScaledRoPE(x []float32, cfg *Config, sink
 	seqLen := len(x) / int(cfg.HiddenSize)
 	headDim := int(cfg.HeadDim)
 	denoms := referenceGPTOSSRoPEDenominators(cfg)
-	concentration := yarnConcentration(cfg)
+	concentration := testGPTOSSYarnScale(cfg)
 
 	query := make([][]float32, seqLen)
 	key := make([][]float32, seqLen)

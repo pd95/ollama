@@ -116,6 +116,7 @@ type Attention struct {
 	OProj     nn.LinearLayer
 	Sinks     *mlx.Array
 	RoPEFreqs *mlx.Array
+	RoPEScale float32
 }
 
 // Experts holds the loaded gpt-oss MoE expert projections.
@@ -392,29 +393,6 @@ func sliceSequence(x *mlx.Array, pos int) *mlx.Array {
 	return mlx.SliceStartStop(x, []int32{0, int32(pos), 0}, []int32{1, int32(pos + 1), int32(x.Dim(2))})
 }
 
-// buildCausalMaskWindow creates a [1, 1, Q, K] additive causal mask with an
-// optional sliding-window restriction. When window > 0, positions where
-// kv < absQ-window+1 are also masked so each query can only see the most
-// recent `window` keys. When window == 0, only the causal constraint applies.
-func buildCausalMaskWindow(Q, K, window int32) *mlx.Array {
-	offset := K - Q
-	vals := make([]float32, Q*K)
-	negInf := float32(math.Inf(-1))
-	for q := range Q {
-		absQ := offset + q
-		var lo int32
-		if window > 0 {
-			lo = max(absQ-window+1, 0)
-		}
-		for kv := range K {
-			if kv > absQ || kv < lo {
-				vals[q*K+kv] = negInf
-			}
-		}
-	}
-	return mlx.FromValues(vals, 1, 1, int(Q), int(K))
-}
-
 func expertSlice(t *mlx.Array, expert int32) *mlx.Array {
 	if t == nil || !t.Valid() {
 		return nil
@@ -458,60 +436,19 @@ func splitGateUpInterleaved(dense, bias *mlx.Array, mid int) (gateWeight, upWeig
 	return gateWeight, upWeight, gateBias, upBias
 }
 
-func buildGPTOSSRoPEFreqs(cfg *Config) *mlx.Array {
+func buildGPTOSSRoPEFreqs(cfg *Config) (*mlx.Array, float32) {
 	if cfg == nil || cfg.HeadDim <= 0 || cfg.RopeTheta <= 0 {
-		return nil
+		return nil, 1
 	}
-	dims := int(cfg.HeadDim)
-	if dims%2 != 0 {
-		return nil
+	params := &nn.RopeParameters{
+		RopeTheta:                     cfg.RopeTheta,
+		RopeType:                      cfg.RopeScaling.RopeType,
+		Factor:                        cfg.RopeScaling.Factor,
+		OriginalMaxPositionEmbeddings: cfg.RopeScaling.OriginalMaxPositionEmbeddings,
+		BetaFast:                      cfg.RopeScaling.BetaFast,
+		BetaSlow:                      cfg.RopeScaling.BetaSlow,
 	}
-
-	factor := float64(cfg.RopeScaling.Factor)
-	origCtx := float64(cfg.RopeScaling.OriginalMaxPositionEmbeddings)
-	base := float64(cfg.RopeTheta)
-	betaFast := float64(cfg.RopeScaling.BetaFast)
-	betaSlow := float64(cfg.RopeScaling.BetaSlow)
-	if factor <= 1 || origCtx <= 0 || base <= 0 {
-		return nil
-	}
-	if betaFast == 0 {
-		betaFast = 32
-	}
-	if betaSlow == 0 {
-		betaSlow = 1
-	}
-
-	dHalf := float64(dims) / 2
-	low := math.Floor(dHalf * math.Log(origCtx/(betaFast*2*math.Pi)) / math.Log(base))
-	high := math.Ceil(dHalf * math.Log(origCtx/(betaSlow*2*math.Pi)) / math.Log(base))
-	if !(0 < low && low < high) {
-		return nil
-	}
-
-	freqs := make([]float32, 0, dims/2)
-	for j := range dims / 2 {
-		ramp := (float64(j) - low) / (high - low)
-		if ramp < 0 {
-			ramp = 0
-		}
-		if ramp > 1 {
-			ramp = 1
-		}
-		mask := 1 - ramp
-		divisor := math.Pow(base, float64(2*j)/float64(dims))
-		mix := (1-mask)/factor + mask
-		freqs = append(freqs, float32(divisor/mix))
-	}
-
-	return mlx.FromValues(freqs, len(freqs))
-}
-
-func yarnConcentration(cfg *Config) float32 {
-	if cfg == nil || cfg.RopeScaling.Factor <= 1 {
-		return 1
-	}
-	return float32(0.1*math.Log(float64(cfg.RopeScaling.Factor)) + 1.0)
+	return nn.BuildYarnRopeFreqs(int(cfg.HeadDim), cfg.RopeTheta, params)
 }
 
 func requireTensor(tensors map[string]*mlx.Array, name string) (*mlx.Array, error) {
@@ -943,7 +880,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 
 	expectedQ := int(m.NumAttentionHeads * m.HeadDim)
 	expectedKV := int(m.NumKeyValueHeads * m.HeadDim)
-	ropeFreqs := buildGPTOSSRoPEFreqs(m.Config)
+	ropeFreqs, ropeScale := buildGPTOSSRoPEFreqs(m.Config)
 	for i := range m.Layers {
 		prefix := fmt.Sprintf("blocks.%d", i)
 
@@ -1004,6 +941,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 				OProj:     oProj,
 				Sinks:     sinks,
 				RoPEFreqs: ropeFreqs,
+				RoPEScale: ropeScale,
 			},
 			FFNNorm: ffnNorm,
 			Router:  router,
@@ -1028,19 +966,19 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
 	}
 
 	batchSize, seqLen := dims[0], dims[1]
-	return m.forwardDense(b.InputIDs, caches, batchSize, seqLen)
+	return m.forwardDense(b, caches, batchSize, seqLen)
 }
 
-func (m *Model) forwardDense(tokens *mlx.Array, caches []cache.Cache, batchSize, seqLen int) *mlx.Array {
+func (m *Model) forwardDense(b *batch.Batch, caches []cache.Cache, batchSize, seqLen int) *mlx.Array {
 	m.logCachedPrefillMode(caches, batchSize, seqLen)
 
-	h := m.EmbedTokens.Forward(tokens)
+	h := m.EmbedTokens.Forward(b.InputIDs)
 	for i, layer := range m.Layers {
 		var c cache.Cache
 		if caches != nil && i < len(caches) {
 			c = caches[i]
 		}
-		h = layer.Forward(h, c, batchSize, seqLen, m.Config, i)
+		h = layer.ForwardBatch(h, b, c, batchSize, seqLen, m.Config, i)
 	}
 
 	return m.Norm.Forward(h, m.RMSNormEps)
@@ -1139,12 +1077,16 @@ func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
 }
 
 func (l *Layer) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
+	return l.ForwardBatch(x, batchForForward(c, seqLen), c, batchSize, seqLen, cfg, layerIndex)
+}
+
+func (l *Layer) ForwardBatch(x *mlx.Array, b *batch.Batch, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
 	if l == nil || l.Attention == nil || l.AttentionNorm == nil || l.FFNNorm == nil || l.Router == nil || l.Experts == nil || x == nil || cfg == nil {
 		panic("gpt-oss layer is not fully loaded")
 	}
 	residual := x
 	x = l.AttentionNorm.Forward(x, cfg.RMSNormEps)
-	x = l.Attention.Forward(x, c, batchSize, seqLen, cfg, layerIndex)
+	x = l.Attention.ForwardBatch(x, b, c, batchSize, seqLen, cfg, layerIndex)
 	if x == nil || !x.Valid() {
 		panic(fmt.Sprintf("gpt-oss layer %d attention output is invalid", layerIndex))
 	}
@@ -1169,6 +1111,22 @@ func (l *Layer) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg 
 }
 
 func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
+	return a.ForwardBatch(x, batchForForward(c, seqLen), c, batchSize, seqLen, cfg, layerIndex)
+}
+
+func batchForForward(c cache.Cache, seqLen int) *batch.Batch {
+	offset := 0
+	if c != nil {
+		offset = c.Offset()
+	}
+	return &batch.Batch{
+		InputIDs:     mlx.Zeros(mlx.DTypeInt32, 1, seqLen),
+		SeqOffsets:   []int32{int32(offset)},
+		SeqQueryLens: []int32{int32(seqLen)},
+	}
+}
+
+func (a *Attention) ForwardBatch(x *mlx.Array, b *batch.Batch, c cache.Cache, batchSize, seqLen int, cfg *Config, layerIndex int) *mlx.Array {
 	if a == nil || a.QProj == nil || a.KProj == nil || a.VProj == nil || a.OProj == nil || x == nil || cfg == nil {
 		return x
 	}
@@ -1178,7 +1136,12 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 		// validation or field mitigation.
 		steps := make([]*mlx.Array, 0, seqLen)
 		for pos := range seqLen {
-			steps = append(steps, a.Forward(sliceSequence(x, pos), c, 1, 1, cfg, layerIndex))
+			stepBatch := &batch.Batch{
+				InputIDs:     b.InputIDs.Slice(mlx.Slice(), mlx.Slice(pos, pos+1)),
+				SeqOffsets:   []int32{b.SeqOffsets[0] + int32(pos)},
+				SeqQueryLens: []int32{1},
+			}
+			steps = append(steps, a.ForwardBatch(sliceSequence(x, pos), stepBatch, c, 1, 1, cfg, layerIndex))
 		}
 		return mlx.Concatenate(steps, 1)
 	}
@@ -1210,16 +1173,16 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 		panic(fmt.Sprintf("gpt-oss layer %d attention transpose is invalid", layerIndex))
 	}
 
-	offset := 0
-	if c != nil {
-		offset = c.Offset()
-	}
-	positions := mlx.FromValues([]int32{int32(offset)}, 1)
+	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
 	attentionScale := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
 	if a.RoPEFreqs != nil && a.RoPEFreqs.Valid() {
 		query = mlx.RoPEWithFreqs(query, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
 		key = mlx.RoPEWithFreqs(key, int(cfg.HeadDim), false, cfg.RopeTheta, 1.0, positions, a.RoPEFreqs)
-		attentionScale *= yarnConcentration(cfg) * yarnConcentration(cfg)
+		ropeScale := a.RoPEScale
+		if ropeScale == 0 {
+			ropeScale = 1
+		}
+		attentionScale *= ropeScale * ropeScale
 	} else {
 		ropeBase, ropeScale, _ := cfg.RopeParameters()
 		query = mlx.RoPEWithBase(query, int(cfg.HeadDim), false, ropeBase, ropeScale, positions)
@@ -1229,38 +1192,28 @@ func (a *Attention) Forward(x *mlx.Array, c cache.Cache, batchSize, seqLen int, 
 		panic(fmt.Sprintf("gpt-oss layer %d attention RoPE is invalid", layerIndex))
 	}
 
+	var kv nn.SDPAOption
 	if c != nil {
 		attnCache, ok := c.(cache.Attention)
 		if !ok {
 			panic(fmt.Sprintf("gpt-oss layer %d cache does not support attention", layerIndex))
 		}
-		history := attnCache.Update(&batch.Batch{SeqOffsets: []int32{int32(offset)}}, key, value)
-		key, value = history.K(), history.V()
-	}
-	if key == nil || value == nil || !key.Valid() || !value.Valid() {
-		panic(fmt.Sprintf("gpt-oss layer %d attention cache update is invalid", layerIndex))
-	}
-
-	maskMode := "causal"
-	var mask *mlx.Array
-	if seqLen > 1 && cfg.SlidingWindow > 0 {
-		if _, ok := c.(*cache.RotatingKVCache); ok {
-			// Rotating caches bound decode-time memory, but a batched prefill still
-			// needs an explicit local-attention mask so each query only sees the
-			// same sliding window a stepwise prefill would have exposed.
-			maskMode = "array"
-			mask = buildCausalMaskWindow(seq, int32(key.Dim(2)), cfg.SlidingWindow).AsType(query.DType())
+		history := attnCache.Update(b, key, value)
+		if history == nil || history.K() == nil || history.V() == nil || !history.K().Valid() || !history.V().Valid() {
+			panic(fmt.Sprintf("gpt-oss layer %d attention cache update is invalid", layerIndex))
 		}
+		kv = nn.WithKVHistory(history)
+	} else {
+		kv = nn.WithKV(key, value, b.SeqQueryLens)
 	}
 
-	attention := mlx.ScaledDotProductAttentionWithSinks(
+	attention := nn.ScaledDotProductAttention(
+		b,
 		query,
-		key,
-		value,
 		attentionScale,
-		maskMode,
-		mask,
-		a.Sinks,
+		kv,
+		nn.WithMask(nn.CausalMask()),
+		nn.WithSinks(a.Sinks),
 	)
 	if attention == nil || !attention.Valid() {
 		panic(fmt.Sprintf("gpt-oss layer %d attention sdpa is invalid", layerIndex))
