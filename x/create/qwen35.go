@@ -158,6 +158,10 @@ func (t qwen35ImportTransform) quantizationType(name string, shape []int32, quan
 	return quantNorm
 }
 
+func (t qwen35ImportTransform) prequantizedMetadata(_ string, global map[string]string) map[string]string {
+	return global
+}
+
 func (t qwen35ImportTransform) rewriteTensorData(td *safetensors.TensorData) (*safetensors.TensorData, error) {
 	if td == nil {
 		return td, nil
