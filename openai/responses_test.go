@@ -1,11 +1,13 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/template"
 )
 
 func TestResponsesInputMessage_UnmarshalJSON(t *testing.T) {
@@ -662,6 +664,102 @@ func TestFromResponsesRequest_FunctionCallOutputContentArrayWithImage(t *testing
 	}
 	if toolMsg.ToolCallID != "call_abc123" {
 		t.Errorf("expected ToolCallID 'call_abc123', got %q", toolMsg.ToolCallID)
+	}
+}
+
+func TestFromResponsesRequest_GptOssHarmonyHistoryExact(t *testing.T) {
+	reqJSON := `{
+		"model": "gpt-oss:20b",
+		"input": [
+			{"type": "message", "role": "system", "content": "System rules."},
+			{"type": "message", "role": "developer", "content": "Developer rules."},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Weather?"}]},
+			{"type": "reasoning", "id": "rs_1", "encrypted_content": "Need a weather lookup.", "summary": []},
+			{"type": "function_call", "call_id": "call_weather", "name": "get_weather", "arguments": "{\"city\":\"Paris\"}"},
+			{"type": "function_call_output", "call_id": "call_weather", "output": "sunny"},
+			{"type": "reasoning", "id": "rs_2", "encrypted_content": "Format the tool result.", "summary": []},
+			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "It is sunny."}]}
+		],
+		"tools": [{
+			"type": "function",
+			"name": "get_weather",
+			"description": "Get weather",
+			"strict": true,
+			"parameters": {
+				"type": "object",
+				"required": ["city"],
+				"properties": {
+					"city": {"type": "string"}
+				}
+			}
+		}]
+	}`
+
+	var req ResponsesRequest
+	if err := json.Unmarshal([]byte(reqJSON), &req); err != nil {
+		t.Fatalf("failed to unmarshal request: %v", err)
+	}
+
+	chatReq, err := FromResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("failed to convert request: %v", err)
+	}
+
+	if chatReq.Model != "gpt-oss:20b" {
+		t.Fatalf("Model = %q, want %q", chatReq.Model, "gpt-oss:20b")
+	}
+	if len(chatReq.Tools) != 1 {
+		t.Fatalf("len(Tools) = %d, want 1", len(chatReq.Tools))
+	}
+	if chatReq.Tools[0].Function.Name != "get_weather" {
+		t.Fatalf("tool name = %q, want %q", chatReq.Tools[0].Function.Name, "get_weather")
+	}
+	if len(chatReq.Messages) != 6 {
+		t.Fatalf("len(Messages) = %d, want 6", len(chatReq.Messages))
+	}
+
+	wantRoles := []string{"system", "developer", "user", "assistant", "tool", "assistant"}
+	wantContent := []string{"System rules.", "Developer rules.", "Weather?", "", "sunny", "It is sunny."}
+	wantThinking := []string{"", "", "", "Need a weather lookup.", "", "Format the tool result."}
+	for i := range chatReq.Messages {
+		msg := chatReq.Messages[i]
+		if msg.Role != wantRoles[i] || msg.Content != wantContent[i] || msg.Thinking != wantThinking[i] {
+			t.Fatalf("Messages[%d] = {Role:%q Content:%q Thinking:%q}, want {Role:%q Content:%q Thinking:%q}",
+				i, msg.Role, msg.Content, msg.Thinking, wantRoles[i], wantContent[i], wantThinking[i])
+		}
+	}
+
+	toolCallMsg := chatReq.Messages[3]
+	if len(toolCallMsg.ToolCalls) != 1 {
+		t.Fatalf("len(Messages[3].ToolCalls) = %d, want 1", len(toolCallMsg.ToolCalls))
+	}
+	toolCall := toolCallMsg.ToolCalls[0]
+	if toolCall.ID != "call_weather" {
+		t.Fatalf("tool call ID = %q, want %q", toolCall.ID, "call_weather")
+	}
+	if toolCall.Function.Name != "get_weather" {
+		t.Fatalf("tool call name = %q, want %q", toolCall.Function.Name, "get_weather")
+	}
+	if got := toolCall.Function.Arguments.String(); got != `{"city":"Paris"}` {
+		t.Fatalf("tool call arguments = %s, want %s", got, `{"city":"Paris"}`)
+	}
+	if chatReq.Messages[4].ToolCallID != "call_weather" {
+		t.Fatalf("tool response ToolCallID = %q, want %q", chatReq.Messages[4].ToolCallID, "call_weather")
+	}
+	if chatReq.Messages[4].ToolName != "get_weather" {
+		t.Fatalf("tool response ToolName = %q, want %q", chatReq.Messages[4].ToolName, "get_weather")
+	}
+
+	tmpl, err := template.Parse(`{{- range .Messages -}}{{- if eq .Role "tool" -}}<|start|>functions.{{ .ToolName }} to=assistant<|channel|>commentary<|message|>{{ .Content }}<|end|>{{- end -}}{{- end -}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, template.Values{Messages: chatReq.Messages}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), `<|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>sunny<|end|>`; got != want {
+		t.Fatalf("rendered tool output = %q, want %q", got, want)
 	}
 }
 
