@@ -108,7 +108,7 @@ _build_darwin() {
 
             # Metal 4.x build (NAX-enabled, macOS 26+)
             # Only possible with Xcode 26+ SDK; skip on older toolchains.
-            SDK_MAJOR=$(xcrun --show-sdk-version 2>/dev/null | cut -d. -f1)
+            SDK_MAJOR=$(xcrun --sdk macosx --show-sdk-version 2>/dev/null | cut -d. -f1)
             if [ "${SDK_MAJOR:-0}" -ge 26 ]; then
                 V3_DEPS=$BUILD_DIR/_deps
                 BUILD_DIR_V4=build/metal-v4
