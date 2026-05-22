@@ -40,6 +40,7 @@ var (
 	UpgradeMarkerFile string
 	Installer         string
 	UserAgentOS       string
+	DisableUpdates    string
 
 	VerifyDownload func() error
 )
@@ -48,6 +49,15 @@ var (
 type UpdateResponse struct {
 	UpdateURL     string `json:"url"`
 	UpdateVersion string `json:"version"`
+}
+
+func AutomaticUpdatesDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(DisableUpdates)) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func (u *Updater) checkForUpdate(ctx context.Context) (bool, UpdateResponse) {
@@ -358,7 +368,11 @@ func (u *Updater) StartBackgroundUpdaterChecker(ctx context.Context, cb func(str
 
 func (u *Updater) startBackgroundUpdaterChecker(ctx context.Context, cb func(string) error) <-chan struct{} {
 	u.checkNow = make(chan struct{}, 1)
-	u.checkNow <- struct{}{} // Trigger first check after initial delay
+	if !AutomaticUpdatesDisabled() {
+		u.checkNow <- struct{}{} // Trigger first check after initial delay
+	} else {
+		slog.Info("automatic update startup check disabled by build")
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -391,6 +405,14 @@ func (u *Updater) startBackgroundUpdaterChecker(ctx context.Context, cb func(str
 				continue
 			}
 
+			if AutomaticUpdatesDisabled() {
+				slog.Debug("update available; automatic download disabled by build", "version", resp.UpdateVersion)
+				if err := cb(resp.UpdateVersion); err != nil {
+					slog.Warn("failed to register update available with tray", "error", err)
+				}
+				continue
+			}
+
 			// Update is available - check if auto-update is enabled for downloading
 			settings, err := u.Store.Settings()
 			if err != nil {
@@ -399,8 +421,11 @@ func (u *Updater) startBackgroundUpdaterChecker(ctx context.Context, cb func(str
 			}
 
 			if !settings.AutoUpdateEnabled {
-				// Auto-update disabled - don't download, just log
+				// Auto-update disabled - don't download, but make the update visible.
 				slog.Debug("update available but auto-update disabled", "version", resp.UpdateVersion)
+				if err := cb(resp.UpdateVersion); err != nil {
+					slog.Warn("failed to register update available with tray", "error", err)
+				}
 				continue
 			}
 
