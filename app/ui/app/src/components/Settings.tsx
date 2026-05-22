@@ -35,6 +35,7 @@ import {
   updateCloudSetting,
   updateSettings,
   getInferenceCompute,
+  checkForUpdates,
 } from "@/api";
 
 function AnimatedDots() {
@@ -264,6 +265,10 @@ export default function Settings() {
     const requestId = ++latestCloudRequestId;
     return updateCloudMutation.mutateAsync({ enabled, requestId });
   };
+
+  const checkForUpdatesMutation = useMutation({
+    mutationFn: checkForUpdates,
+  });
 
   useEffect(() => {
     refetchUser();
@@ -646,12 +651,22 @@ export default function Settings() {
                     </div>
                   </div>
                   <div className="flex-shrink-0">
-                    <Switch
-                      checked={settings.AutoUpdateEnabled}
-                      onChange={(checked) =>
-                        handleChange("AutoUpdateEnabled", checked)
-                      }
-                    />
+                    <div className="flex items-center gap-3">
+                      <Button
+                        outline
+                        type="button"
+                        disabled={checkForUpdatesMutation.isPending}
+                        onClick={() => checkForUpdatesMutation.mutate()}
+                      >
+                        Check now
+                      </Button>
+                      <Switch
+                        checked={settings.AutoUpdateEnabled}
+                        onChange={(checked) =>
+                          handleChange("AutoUpdateEnabled", checked)
+                        }
+                        />
+                    </div>
                   </div>
                 </div>
               </Field>
