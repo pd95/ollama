@@ -95,6 +95,82 @@ func TestIsNewReleaseAvailable(t *testing.T) {
 	}
 }
 
+func TestAutomaticUpdatesDisabledSkipsStartupCheckAndAutoDownload(t *testing.T) {
+	oldDisableUpdates := DisableUpdates
+	oldUpdateDownloaded := UpdateDownloaded
+	oldUpdateCheckURLBase := UpdateCheckURLBase
+	oldUpdateCheckInitialDelay := UpdateCheckInitialDelay
+	oldUpdateCheckInterval := UpdateCheckInterval
+	defer func() {
+		DisableUpdates = oldDisableUpdates
+		UpdateDownloaded = oldUpdateDownloaded
+		UpdateCheckURLBase = oldUpdateCheckURLBase
+		UpdateCheckInitialDelay = oldUpdateCheckInitialDelay
+		UpdateCheckInterval = oldUpdateCheckInterval
+	}()
+
+	DisableUpdates = "true"
+	UpdateDownloaded = true
+	UpdateCheckInitialDelay = time.Millisecond
+	UpdateCheckInterval = time.Hour
+
+	checkCount := atomic.Int32{}
+	downloadCount := atomic.Int32{}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/update.json":
+			checkCount.Add(1)
+			w.Write([]byte(fmt.Sprintf(`{"version": "9.9.9", "url": "%s"}`, server.URL+"/9.9.9/"+Installer)))
+		case "/9.9.9/" + Installer:
+			downloadCount.Add(1)
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	UpdateCheckURLBase = server.URL + "/update.json"
+
+	updater := &Updater{Store: &store.Store{DBPath: filepath.Join(t.TempDir(), "test.db")}}
+	defer updater.Store.Close()
+	settings, err := updater.Store.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.AutoUpdateEnabled = true
+	if err := updater.Store.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	updateAvailable := make(chan struct{}, 1)
+	updater.StartBackgroundUpdaterChecker(ctx, func(string) error {
+		updateAvailable <- struct{}{}
+		return nil
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	if checkCount.Load() != 0 {
+		t.Fatalf("automatic updates should not check on startup, got %d requests", checkCount.Load())
+	}
+
+	updater.TriggerImmediateCheck()
+	select {
+	case <-updateAvailable:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manual update check did not surface available update")
+	}
+
+	if downloadCount.Load() != 0 {
+		t.Fatalf("automatic updates should not download in release build, got %d downloads", downloadCount.Load())
+	}
+	if !UpdateDownloaded {
+		t.Fatal("manual update check should not clear existing downloaded update state")
+	}
+}
+
 func TestDownloadNewReleaseRejectsUnsafeHeaderFilename(t *testing.T) {
 	UpdateStageDir = t.TempDir()
 	oldInstaller := Installer
@@ -380,7 +456,7 @@ func TestBackgoundChecker(t *testing.T) {
 func TestAutoUpdateDisabledSkipsDownload(t *testing.T) {
 	UpdateStageDir = t.TempDir()
 	var downloadAttempted atomic.Bool
-	done := make(chan struct{})
+	updateAvailable := make(chan struct{}, 1)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -421,15 +497,17 @@ func TestAutoUpdateDisabledSkipsDownload(t *testing.T) {
 	}
 
 	cb := func(ver string) error {
-		t.Fatal("callback should not be called when auto-update is disabled")
+		updateAvailable <- struct{}{}
 		return nil
 	}
 
 	updater.StartBackgroundUpdaterChecker(ctx, cb)
 
-	// Wait enough time for multiple check cycles
-	time.Sleep(50 * time.Millisecond)
-	close(done)
+	select {
+	case <-updateAvailable:
+	case <-time.After(2 * time.Second):
+		t.Fatal("available update should be surfaced when auto-update is disabled")
+	}
 
 	if downloadAttempted.Load() {
 		t.Fatal("download should not be attempted when auto-update is disabled")
@@ -489,8 +567,12 @@ func TestAutoUpdateReenabledDownloadsUpdate(t *testing.T) {
 
 	upd.StartBackgroundUpdaterChecker(ctx, cb)
 
-	// Wait for a few cycles with auto-update disabled - no download should happen
-	time.Sleep(50 * time.Millisecond)
+	// Wait for an available-update notification with auto-update disabled; no download should happen.
+	select {
+	case <-callbackCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected update notification while auto-update is disabled")
+	}
 	if downloadAttempted.Load() {
 		t.Fatal("download should not happen while auto-update is disabled")
 	}
@@ -501,15 +583,15 @@ func TestAutoUpdateReenabledDownloadsUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait for the checker to pick it up and download
-	select {
-	case <-callbackCalled:
-		// Success: download happened and callback was called after re-enabling
-		if !downloadAttempted.Load() {
-			t.Fatal("expected download to be attempted after re-enabling")
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for !downloadAttempted.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("expected download after re-enabling auto-update")
+		case <-ticker.C:
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("expected download and callback after re-enabling auto-update")
 	}
 }
 
