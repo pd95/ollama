@@ -367,6 +367,10 @@ func IsUpdatePending() bool {
 }
 
 func DoUpgradeAtStartup() error {
+	if AutomaticUpdatesDisabled() {
+		return fmt.Errorf("automatic updates disabled by build")
+	}
+
 	return DoUpgrade(false)
 }
 

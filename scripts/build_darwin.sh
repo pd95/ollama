@@ -21,6 +21,12 @@ export CGO_LDFLAGS="-mmacosx-version-min=14.0"
 set -e
 
 status() { echo >&2 ">>> $@"; }
+truthy() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        1|t|true|y|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 usage() {
     echo "usage: $(basename $0) [build app [sign]]"
     exit 1
@@ -168,6 +174,68 @@ _sign_darwin() {
     gzip -9vc <dist/ollama-darwin.tar >dist/ollama-darwin.tgz
 }
 
+_build_custom_app_icon() {
+    if [ -n "${OLLAMA_APP_ICON_PNG:-}" ]; then
+        APP_ICON_PNG=$OLLAMA_APP_ICON_PNG
+    elif [ -f ../release-test-site/AppIcon-1024.png ]; then
+        APP_ICON_PNG=../release-test-site/AppIcon-1024.png
+    elif [ -f ../release-test-site/AppIcon.png ]; then
+        APP_ICON_PNG=../release-test-site/AppIcon.png
+    elif [ -f ../inspiration/Ollama/AppIcon-1024.png ]; then
+        APP_ICON_PNG=../inspiration/Ollama/AppIcon-1024.png
+    else
+        APP_ICON_PNG=../inspiration/Ollama/AppIcon.png
+    fi
+
+    if [ ! -f "$APP_ICON_PNG" ]; then
+        return
+    fi
+
+    if ! command -v sips >/dev/null 2>&1 || ! command -v iconutil >/dev/null 2>&1; then
+        echo "custom app icon requires macOS sips and iconutil: $APP_ICON_PNG" >&2
+        exit 1
+    fi
+
+    status "Building custom app icon from $APP_ICON_PNG"
+    ICONSET=dist/OllamaAppIcon.iconset
+    rm -rf "$ICONSET"
+    mkdir -p "$ICONSET"
+
+    sips -z 16 16 "$APP_ICON_PNG" --out "$ICONSET/icon_16x16.png" >/dev/null
+    sips -z 32 32 "$APP_ICON_PNG" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
+    sips -z 32 32 "$APP_ICON_PNG" --out "$ICONSET/icon_32x32.png" >/dev/null
+    sips -z 64 64 "$APP_ICON_PNG" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
+    sips -z 128 128 "$APP_ICON_PNG" --out "$ICONSET/icon_128x128.png" >/dev/null
+    sips -z 256 256 "$APP_ICON_PNG" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
+    sips -z 256 256 "$APP_ICON_PNG" --out "$ICONSET/icon_256x256.png" >/dev/null
+    sips -z 512 512 "$APP_ICON_PNG" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
+    sips -z 512 512 "$APP_ICON_PNG" --out "$ICONSET/icon_512x512.png" >/dev/null
+    sips -z 1024 1024 "$APP_ICON_PNG" --out "$ICONSET/icon_512x512@2x.png" >/dev/null
+
+    iconutil -c icns "$ICONSET" -o dist/Ollama.app/Contents/Resources/icon.icns
+    rm -rf "$ICONSET"
+}
+
+_derive_app_versions() {
+    if [ -z "${OLLAMA_APP_VERSION:-}" ]; then
+        OLLAMA_APP_VERSION=$(printf '%s' "$VERSION" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?).*/\1/')
+    fi
+
+    if [ -z "${OLLAMA_APP_BUILD_VERSION:-}" ]; then
+        case "$VERSION" in
+            "$OLLAMA_APP_VERSION"-*)
+                OLLAMA_APP_BUILD_VERSION=${VERSION#"$OLLAMA_APP_VERSION"-}
+                ;;
+            *)
+                OLLAMA_APP_BUILD_VERSION=$VERSION
+                ;;
+        esac
+    fi
+
+    export OLLAMA_APP_VERSION
+    export OLLAMA_APP_BUILD_VERSION
+}
+
 _build_macapp() {
     if ! command -v npm &> /dev/null; then
         echo "npm is not installed. Please install Node.js and npm first:"
@@ -187,16 +255,24 @@ _build_macapp() {
     npm run build
     cd ../../..
 
+    _derive_app_versions
+
     # Build the Ollama.app bundle
     rm -rf dist/Ollama.app
     cp -a ./app/darwin/Ollama.app dist/Ollama.app
+    _build_custom_app_icon
 
     # update the modified date of the app bundle to now
     touch dist/Ollama.app
 
     go clean -cache
-    GOARCH=amd64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-amd64 -ldflags="-s -w -X=github.com/ollama/ollama/app/version.Version=${VERSION}" ./app/cmd/app
-    GOARCH=arm64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-arm64 -ldflags="-s -w -X=github.com/ollama/ollama/app/version.Version=${VERSION}" ./app/cmd/app
+    APP_LDFLAGS="-s -w -X=github.com/ollama/ollama/app/version.Version=${VERSION}"
+    if truthy "${OLLAMA_DISABLE_UPDATES:-}"; then
+        status "Building app with automatic updates disabled"
+        APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.DisableUpdates=true"
+    fi
+    GOARCH=amd64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-amd64 -ldflags="$APP_LDFLAGS" ./app/cmd/app
+    GOARCH=arm64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-arm64 -ldflags="$APP_LDFLAGS" ./app/cmd/app
     mkdir -p dist/Ollama.app/Contents/MacOS
     lipo -create -output dist/Ollama.app/Contents/MacOS/Ollama dist/darwin-app-amd64 dist/darwin-app-arm64
     rm -f dist/darwin-app-amd64 dist/darwin-app-arm64
@@ -211,8 +287,8 @@ _build_macapp() {
     ln -s Versions/Current/Squirrel dist/Ollama.app/Contents/Frameworks/Squirrel.framework/Squirrel
 
     # Update the version in the Info.plist
-    plutil -replace CFBundleShortVersionString -string "$VERSION" dist/Ollama.app/Contents/Info.plist
-    plutil -replace CFBundleVersion -string "$VERSION" dist/Ollama.app/Contents/Info.plist
+    plutil -replace CFBundleShortVersionString -string "$OLLAMA_APP_VERSION" dist/Ollama.app/Contents/Info.plist
+    plutil -replace CFBundleVersion -string "$OLLAMA_APP_BUILD_VERSION" dist/Ollama.app/Contents/Info.plist
 
     # Setup the ollama binaries
     mkdir -p dist/Ollama.app/Contents/Resources
@@ -315,7 +391,7 @@ _build_macapp() {
 
         (cd dist && ../scripts/create-dmg.sh \
             --volname "${VOL_NAME}" \
-            --volicon ../app/darwin/Ollama.app/Contents/Resources/icon.icns \
+            --volicon Ollama.app/Contents/Resources/icon.icns \
             --background ../app/assets/background.png \
             --window-pos 200 120 \
             --window-size 800 400 \

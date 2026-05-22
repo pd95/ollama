@@ -290,6 +290,16 @@ export async function updateSettings(settings: Settings): Promise<{
   };
 }
 
+export async function checkForUpdates(): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/v1/update/check`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(error || "Failed to check for updates");
+  }
+}
+
 export async function updateCloudSetting(
   enabled: boolean,
 ): Promise<CloudStatusResponse> {
@@ -418,7 +428,9 @@ export interface ModelRecommendationsResponse {
   recommendations: ModelRecommendation[];
 }
 
-export async function getModelRecommendations(): Promise<ModelRecommendation[]> {
+export async function getModelRecommendations(): Promise<
+  ModelRecommendation[]
+> {
   const response = await fetch(
     `${API_BASE}/api/experimental/model-recommendations`,
   );

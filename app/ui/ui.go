@@ -290,6 +290,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/model/upstream", handle(s.modelUpstream))
 	mux.Handle("GET /api/v1/settings", handle(s.getSettings))
 	mux.Handle("POST /api/v1/settings", handle(s.settings))
+	mux.Handle("POST /api/v1/update/check", handle(s.checkForUpdates))
 	mux.Handle("GET /api/v1/cloud", handle(s.getCloudSetting))
 	mux.Handle("POST /api/v1/cloud", handle(s.cloudSetting))
 
@@ -1488,6 +1489,16 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 	return json.NewEncoder(w).Encode(responses.SettingsResponse{
 		Settings: settings,
 	})
+}
+
+func (s *Server) checkForUpdates(w http.ResponseWriter, r *http.Request) error {
+	if s.Updater == nil {
+		return fmt.Errorf("updater is not available")
+	}
+
+	s.Updater.TriggerImmediateCheck()
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 func (s *Server) cloudSetting(w http.ResponseWriter, r *http.Request) error {
