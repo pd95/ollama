@@ -393,6 +393,10 @@ func validBundleLinkTarget(name, link string, scope bundleEntryScope) bool {
 
 // If we detect an upgrade bundle, attempt to upgrade at startup
 func DoUpgradeAtStartup() error {
+	if AutomaticUpdatesDisabled() {
+		return fmt.Errorf("automatic updates disabled by build")
+	}
+
 	bundle := getStagedUpdate()
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
