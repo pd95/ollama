@@ -27,6 +27,10 @@ const (
 
 type ApertusRenderer struct{}
 
+func (r *ApertusRenderer) LeadingBOS() string {
+	return "<s>"
+}
+
 func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
 	thinkingEnabled := think != nil && think.Bool()
 	var sb strings.Builder

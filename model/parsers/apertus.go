@@ -215,6 +215,17 @@ func (p *ApertusParser) HasToolSupport() bool {
 	return true
 }
 
+func (p *ApertusParser) PreservedTokens() []string {
+	return []string{
+		apertusToolOpenTag,
+		apertusToolCloseTag,
+		apertusAssistantOpenTag,
+		apertusAssistantCloseTag,
+		apertusInnerOpenTag,
+		apertusInnerCloseTag,
+	}
+}
+
 func (p *ApertusParser) HasThinkingSupport() bool {
 	return true
 }

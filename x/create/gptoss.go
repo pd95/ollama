@@ -14,8 +14,6 @@ import (
 	"sync"
 
 	"github.com/d4l3k/go-bfloat16"
-	fsggml "github.com/ollama/ollama/fs/ggml"
-	ggml "github.com/ollama/ollama/ml/backend/ggml"
 	"github.com/ollama/ollama/x/safetensors"
 )
 
@@ -317,8 +315,7 @@ func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.Tens
 		copy(dst[1:], tmp[:])
 	}
 
-	decodedElems := uint64(groupCount * 32)
-	values := ggml.ConvertToF32(ggmlBlocks, uint32(fsggml.TensorTypeMXFP4), decodedElems)
+	values := decodeGGMLMXFP4Blocks(ggmlBlocks, groupCount)
 	if validateGPTOSSDequant() {
 		for i, v := range values {
 			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
@@ -329,6 +326,45 @@ func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.Tens
 
 	shape := []int32{blocks.Shape[0], blocks.Shape[1], blocks.Shape[2] * 32}
 	return values, shape, nil
+}
+
+func decodeGGMLMXFP4Blocks(data []byte, groupCount int) []float32 {
+	values := make([]float32, groupCount*32)
+	for group := range groupCount {
+		src := data[group*17 : (group+1)*17]
+		scale := math.Float32frombits(uint32(src[0]) << 23)
+		for i, packed := range src[1:] {
+			values[group*32+i*2] = scale * mxfp4E2M1Value(packed&0x0F)
+			values[group*32+i*2+1] = scale * mxfp4E2M1Value(packed>>4)
+		}
+	}
+	return values
+}
+
+func mxfp4E2M1Value(bits byte) float32 {
+	sign := float32(1)
+	if bits&0x08 != 0 {
+		sign = -1
+	}
+
+	switch bits & 0x07 {
+	case 0:
+		return 0
+	case 1:
+		return sign * 0.5
+	case 2:
+		return sign * 1
+	case 3:
+		return sign * 1.5
+	case 4:
+		return sign * 2
+	case 5:
+		return sign * 3
+	case 6:
+		return sign * 4
+	default:
+		return sign * 6
+	}
 }
 
 func dequantizeGPTOSSMXFP4Tensor(name string, blocks, scales *safetensors.TensorData) (*safetensors.TensorData, error) {
