@@ -769,3 +769,84 @@ func TestTemplatePropertiesRange(t *testing.T) {
 		t.Errorf("Range over Properties failed, got: %s, want: location:string;", got)
 	}
 }
+
+func TestGPTOSSHarmonyTemplateExactBranches(t *testing.T) {
+	tmpl := `{{- range .Messages -}}` +
+		`{{- if eq .Role "system" -}}<|start|>system<|message|>{{ .Content }}<|end|>{{- end -}}` +
+		`{{- if eq .Role "developer" -}}<|start|>developer<|message|>{{ .Content }}{{ with $.Tools }}` + "\n# Tools\n" +
+		`{{ range . }}type {{ .Function.Name }} = (_: {` + "\n" +
+		`{{- range $name, $prop := .Function.Parameters.Properties }}` + "\n" +
+		`  {{ $name }}: {{ $prop | toTypeScriptType }},` +
+		`{{- end }}` + "\n" +
+		`}) => any;{{- end }}{{- end }}<|end|>{{- end -}}` +
+		`{{- if eq .Role "user" -}}<|start|>user<|message|>{{ .Content }}<|end|>{{- end -}}` +
+		`{{- if eq .Role "assistant" -}}` +
+		`{{- if .Thinking -}}<|start|>assistant<|channel|>analysis<|message|>{{ .Thinking }}<|end|>{{- end -}}` +
+		`{{- if .Content -}}<|start|>assistant<|channel|>final<|message|>{{ .Content }}<|end|>{{- end -}}` +
+		`{{- range .ToolCalls -}}<|start|>assistant<|channel|>commentary to=functions.{{ .Function.Name }} <|constrain|>json<|message|>{{ .Function.Arguments }}<|call|>{{- end -}}` +
+		`{{- end -}}` +
+		`{{- if eq .Role "tool" -}}<|start|>functions.{{ .ToolName }} to=assistant<|channel|>commentary<|message|>{{ .Content }}<|end|>{{- end -}}` +
+		`{{- end -}}<|start|>assistant`
+
+	parsed, err := Parse(tmpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	props := api.NewToolPropertiesMap()
+	props.Set("city", api.ToolProperty{Type: api.PropertyType{"string"}})
+
+	args := api.NewToolCallFunctionArguments()
+	args.Set("city", "Paris")
+
+	var buf bytes.Buffer
+	if err := parsed.Execute(&buf, Values{
+		Messages: []api.Message{
+			{Role: "system", Content: "System rules."},
+			{Role: "developer", Content: "Developer rules."},
+			{Role: "user", Content: "Weather?"},
+			{
+				Role:     "assistant",
+				Thinking: "Need a weather lookup.",
+				ToolCalls: []api.ToolCall{{
+					Function: api.ToolCallFunction{
+						Name:      "get_weather",
+						Arguments: args,
+					},
+				}},
+			},
+			{Role: "tool", ToolName: "get_weather", Content: "sunny"},
+			{Role: "assistant", Content: "It is sunny."},
+			{Role: "user", Content: "Thanks."},
+		},
+		Tools: api.Tools{{
+			Type: "function",
+			Function: api.ToolFunction{
+				Name: "get_weather",
+				Parameters: api.ToolFunctionParameters{
+					Type:       "object",
+					Properties: props,
+				},
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := `<|start|>system<|message|>System rules.<|end|>` +
+		`<|start|>developer<|message|>Developer rules.` + "\n" +
+		`# Tools` + "\n" +
+		`type get_weather = (_: {` + "\n" +
+		`  city: string,` + "\n" +
+		`}) => any;<|end|>` +
+		`<|start|>user<|message|>Weather?<|end|>` +
+		`<|start|>assistant<|channel|>analysis<|message|>Need a weather lookup.<|end|>` +
+		`<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Paris"}<|call|>` +
+		`<|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>sunny<|end|>` +
+		`<|start|>assistant<|channel|>final<|message|>It is sunny.<|end|>` +
+		`<|start|>user<|message|>Thanks.<|end|>` +
+		`<|start|>assistant`
+	if got := buf.String(); got != want {
+		t.Fatalf("rendered template mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	}
+}

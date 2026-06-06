@@ -464,7 +464,7 @@ func GetTensorQuantization(name string, shape []int32, quantize string) string {
 }
 
 var (
-	expertLayerPrefixRegexp        = regexp.MustCompile(`^(?:model\.language_model\.|language_model(?:\.model)?\.|model\.)?layers\.\d+$`)
+	expertLayerPrefixRegexp        = regexp.MustCompile(`^(?:blocks\.\d+|(?:model\.language_model\.|language_model(?:\.model)?\.|model\.)?layers\.\d+)$`)
 	prequantizedExpertSuffixRegexp = regexp.MustCompile(`^\.(\d+)\.(.+)$`)
 )
 
@@ -476,11 +476,8 @@ var (
 //   - "model.layers.0.mlp.down_proj.weight" -> "" (dense layer, no experts)
 //   - "model.layers.1.mlp.gate.weight" -> "" (routing gate, not an expert)
 func ExpertGroupPrefix(tensorName string) string {
-	if !strings.HasSuffix(tensorName, ".weight") {
-		return ""
-	}
-
 	for _, marker := range []string{
+		".experts.",
 		".mlp.experts.",
 		".mlp.shared_experts.",
 		".mlp.switch_mlp.",
@@ -781,11 +778,17 @@ type tensorImportTransform interface {
 	skipTensor(name string) bool
 	transformTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error)
 	quantizationType(name string, shape []int32, quantize string) string
+	canonicalTensorName(name string) string
+	prequantizedMetadata(sourceName string, globalMetadata map[string]string) map[string]string
 }
 
 type sourceFP8TensorImportTransform interface {
 	sourceFP8TensorQuantization(name string, shape []int32, requested string, fallback string) string
 	sourceFP8BF16Quantization(name string, shape []int32, requested string) string
+}
+
+type packedGroupCompleter interface {
+	packedGroupComplete(groupName string, tensors []PackedTensorInput) bool
 }
 
 type noopImportTransform struct{}
@@ -803,9 +806,16 @@ func (noopImportTransform) quantizationType(name string, shape []int32, quantize
 	return GetTensorQuantization(name, shape, quantize)
 }
 
+func (noopImportTransform) canonicalTensorName(name string) string { return name }
+
+func (noopImportTransform) prequantizedMetadata(_ string, global map[string]string) map[string]string {
+	return global
+}
+
 type tensorImportTransformFactory func(modelDir string, cfg sourceModelConfig) (tensorImportTransform, error)
 
 var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
+	"GptOssForCausalLM":                     newGPTOSSImportTransform,
 	"Qwen3_5ForCausalLM":                    newQwen35ImportTransform,
 	"Qwen3_5ForConditionalGeneration":       newQwen35ImportTransform,
 	"Qwen3NextForCausalLM":                  newQwen35ImportTransform,
@@ -891,6 +901,22 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 		clear(crossFileExtractors)
 	}
 
+	flushPackedGroup := func(groupName string) error {
+		tensors := expertGroups[groupName]
+		if len(tensors) == 0 {
+			return nil
+		}
+
+		fn(fmt.Sprintf("packing %s (%d tensors)", groupName, len(tensors)))
+		layer, err := packedCreator(groupName, tensors)
+		if err != nil {
+			return fmt.Errorf("failed to create packed layer for %s: %w", groupName, err)
+		}
+		layers = append(layers, layer)
+		delete(expertGroups, groupName)
+		return nil
+	}
+
 	entries, err := os.ReadDir(modelDir)
 	if err != nil {
 		return fmt.Errorf("failed to read directory: %w", err)
@@ -960,7 +986,7 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 			}
 
 			if effectiveQuantize == "" {
-				layer, ok, err := createPrequantizedLayer(extractor, td, tensorName, tensorSet, sourceQuantMetadata, createLayer)
+				layer, ok, err := createPrequantizedLayer(extractor, td, tensorName, tensorSet, sourceQuantMetadata, createLayer, importTransform)
 				if err != nil {
 					extractor.Close()
 					closeExtractors()
@@ -1068,6 +1094,13 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 						Quantize: quantizeType,
 						Reader:   reader,
 					})
+					if completer, ok := importTransform.(packedGroupCompleter); ok && completer.packedGroupComplete(groupPrefix, expertGroups[groupPrefix]) {
+						if err := flushPackedGroup(groupPrefix); err != nil {
+							extractor.Close()
+							closeExtractors()
+							return err
+						}
+					}
 				} else {
 					// Store as minimal safetensors format (88 bytes header overhead)
 					// This enables native mmap loading via mlx_load_safetensors
@@ -1120,14 +1153,10 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 				layers = append(layers, layer)
 				continue
 			}
-			tensors := expertGroups[groupName]
-			fn(fmt.Sprintf("packing %s (%d tensors)", groupName, len(tensors)))
-			layer, err := packedCreator(groupName, tensors)
-			if err != nil {
+			if err := flushPackedGroup(groupName); err != nil {
 				closeExtractors()
-				return fmt.Errorf("failed to create packed layer for %s: %w", groupName, err)
+				return err
 			}
-			layers = append(layers, layer)
 		}
 	}
 	closeExtractors()
@@ -1395,32 +1424,36 @@ func createPrequantizedLayer(
 	tensorSet map[string]struct{},
 	metadata map[string]string,
 	createLayer LayerCreator,
+	transform tensorImportTransform,
 ) (LayerInfo, bool, error) {
 	scaleName, biasName, ok := prequantizedCompanions(tensorName, tensorSet)
 	if !ok {
 		return LayerInfo{}, false, nil
 	}
 
-	tensors := []*safetensors.TensorData{td.WithName(tensorName)}
+	canonical := transform.canonicalTensorName(tensorName)
+	blobMetadata := transform.prequantizedMetadata(tensorName, metadata)
+
+	tensors := []*safetensors.TensorData{td.WithName(canonical)}
 
 	scaleTD, err := extractor.GetTensor(scaleName)
 	if err != nil {
 		return LayerInfo{}, false, fmt.Errorf("failed to get tensor %s: %w", scaleName, err)
 	}
-	tensors = append(tensors, scaleTD.WithName(tensorName+".scale"))
+	tensors = append(tensors, scaleTD.WithName(canonical+".scale"))
 
 	if biasName != "" {
 		biasTD, err := extractor.GetTensor(biasName)
 		if err != nil {
 			return LayerInfo{}, false, fmt.Errorf("failed to get tensor %s: %w", biasName, err)
 		}
-		tensors = append(tensors, biasTD.WithName(tensorName+".bias"))
+		tensors = append(tensors, biasTD.WithName(canonical+".bias"))
 	}
 
 	layer, err := createLayer(
-		safetensors.BuildPackedSafetensorsReaderWithMetadata(tensors, metadata),
+		safetensors.BuildPackedSafetensorsReaderWithMetadata(tensors, blobMetadata),
 		"application/vnd.ollama.image.tensor",
-		tensorName,
+		canonical,
 	)
 	if err != nil {
 		return LayerInfo{}, false, fmt.Errorf("failed to create prequantized layer for %s: %w", tensorName, err)
