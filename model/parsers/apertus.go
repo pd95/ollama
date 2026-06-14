@@ -225,6 +225,8 @@ func (p *ApertusParser) PreservedTokens() []string {
 		apertusToolCloseTag,
 		apertusAssistantOpenTag,
 		apertusAssistantCloseTag,
+		apertusInnerOpenTag,
+		apertusInnerCloseTag,
 	}
 }
 
