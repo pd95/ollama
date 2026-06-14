@@ -331,7 +331,7 @@ type Updater struct {
 	Store              *store.Store
 	cancelDownload     context.CancelFunc
 	cancelDownloadLock sync.Mutex
-	checkNow           chan struct{}
+	checkNow           chan bool
 }
 
 // CancelOngoingDownload cancels any currently running download
@@ -349,7 +349,7 @@ func (u *Updater) CancelOngoingDownload() {
 func (u *Updater) TriggerImmediateCheck() {
 	if u.checkNow != nil {
 		select {
-		case u.checkNow <- struct{}{}:
+		case u.checkNow <- true:
 		default:
 			// Check already pending, no need to queue another
 		}
@@ -357,9 +357,9 @@ func (u *Updater) TriggerImmediateCheck() {
 }
 
 func (u *Updater) StartBackgroundUpdaterChecker(ctx context.Context, cb func(string) error) {
-	u.checkNow = make(chan struct{}, 1)
+	u.checkNow = make(chan bool, 1)
 	if !AutomaticUpdatesDisabled() {
-		u.checkNow <- struct{}{} // Trigger first check after initial delay
+		u.checkNow <- false // Trigger first check after initial delay
 	} else {
 		slog.Info("automatic update startup check disabled by build")
 	}
@@ -372,11 +372,12 @@ func (u *Updater) StartBackgroundUpdaterChecker(ctx context.Context, cb func(str
 		defer ticker.Stop()
 
 		for {
+			manualCheck := false
 			select {
 			case <-ctx.Done():
 				slog.Debug("stopping background update checker")
 				return
-			case <-u.checkNow:
+			case manualCheck = <-u.checkNow:
 				// Immediate check triggered
 			case <-ticker.C:
 				// Regular interval check
@@ -389,7 +390,15 @@ func (u *Updater) StartBackgroundUpdaterChecker(ctx context.Context, cb func(str
 			}
 
 			if AutomaticUpdatesDisabled() {
-				slog.Debug("update available; automatic download disabled by build", "version", resp.UpdateVersion)
+				if !manualCheck {
+					slog.Debug("update available; automatic download disabled by build", "version", resp.UpdateVersion)
+					continue
+				}
+				slog.Info("manual update check downloading available update", "version", resp.UpdateVersion)
+				if err := u.DownloadNewRelease(ctx, resp); err != nil {
+					slog.Error("failed to download new release after manual update check", "error", err)
+					continue
+				}
 				if err := cb(resp.UpdateVersion); err != nil {
 					slog.Warn("failed to register update available with tray", "error", err)
 				}
