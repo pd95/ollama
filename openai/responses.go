@@ -426,6 +426,7 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 	// Handle array of input items
 	// Track pending reasoning to merge with the next assistant message
 	var pendingThinking string
+	toolNamesByCallID := make(map[string]string)
 
 	for _, item := range r.Input.Items {
 		switch v := item.(type) {
@@ -458,6 +459,10 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 					Arguments: args,
 				},
 			}
+			if v.CallID != "" && v.Name != "" {
+				toolNamesByCallID[v.CallID] = toolCall.Function.Name
+			}
+
 			// Merge tool call into existing assistant message if it has content or tool calls
 			if len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
 				lastMsg := &messages[len(messages)-1]
@@ -491,6 +496,7 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 				Role:       "tool",
 				Content:    content,
 				Images:     images,
+				ToolName:   toolNamesByCallID[v.CallID],
 				ToolCallID: v.CallID,
 			})
 		}
