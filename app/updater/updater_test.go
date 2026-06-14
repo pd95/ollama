@@ -95,24 +95,30 @@ func TestIsNewReleaseAvailable(t *testing.T) {
 	}
 }
 
-func TestAutomaticUpdatesDisabledSkipsStartupCheckAndAutoDownload(t *testing.T) {
+func TestAutomaticUpdatesDisabledSkipsStartupCheckButAllowsManualDownload(t *testing.T) {
 	oldDisableUpdates := DisableUpdates
 	oldUpdateDownloaded := UpdateDownloaded
 	oldUpdateCheckURLBase := UpdateCheckURLBase
 	oldUpdateCheckInitialDelay := UpdateCheckInitialDelay
 	oldUpdateCheckInterval := UpdateCheckInterval
+	oldUpdateStageDir := UpdateStageDir
+	oldVerifyDownload := VerifyDownload
 	defer func() {
 		DisableUpdates = oldDisableUpdates
 		UpdateDownloaded = oldUpdateDownloaded
 		UpdateCheckURLBase = oldUpdateCheckURLBase
 		UpdateCheckInitialDelay = oldUpdateCheckInitialDelay
 		UpdateCheckInterval = oldUpdateCheckInterval
+		UpdateStageDir = oldUpdateStageDir
+		VerifyDownload = oldVerifyDownload
 	}()
 
 	DisableUpdates = "true"
-	UpdateDownloaded = true
+	UpdateDownloaded = false
 	UpdateCheckInitialDelay = time.Millisecond
 	UpdateCheckInterval = time.Hour
+	UpdateStageDir = t.TempDir()
+	VerifyDownload = func() error { return nil }
 
 	checkCount := atomic.Int32{}
 	downloadCount := atomic.Int32{}
@@ -163,11 +169,14 @@ func TestAutomaticUpdatesDisabledSkipsStartupCheckAndAutoDownload(t *testing.T) 
 		t.Fatal("manual update check did not surface available update")
 	}
 
-	if downloadCount.Load() != 0 {
-		t.Fatalf("automatic updates should not download in release build, got %d downloads", downloadCount.Load())
+	if downloadCount.Load() == 0 {
+		t.Fatal("manual update check should download in release build")
 	}
 	if !UpdateDownloaded {
-		t.Fatal("manual update check should not clear existing downloaded update state")
+		t.Fatal("manual update check should mark the update as downloaded")
+	}
+	if _, err := os.Stat(getStagedUpdate()); err != nil {
+		t.Fatalf("manual update check should stage an update bundle: %v", err)
 	}
 }
 
