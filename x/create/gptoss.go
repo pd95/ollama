@@ -14,8 +14,6 @@ import (
 	"sync"
 
 	"github.com/d4l3k/go-bfloat16"
-	fsggml "github.com/ollama/ollama/fs/ggml"
-	ggml "github.com/ollama/ollama/ml/backend/ggml"
 	"github.com/ollama/ollama/x/safetensors"
 )
 
@@ -262,6 +260,15 @@ func (t *gptossImportTransform) maybeEmitExpertWeight(name string) ([]*safetenso
 	}
 }
 
+var gptossMXFP4Values = [16]float32{0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12}
+
+func decodeGPTOSSMXFP4Scale(scale byte) float32 {
+	if scale < 2 {
+		return math.Float32frombits(0x00200000 << scale)
+	}
+	return math.Float32frombits(uint32(scale-1) << 23)
+}
+
 func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.TensorData) ([]float32, []int32, error) {
 	if blocks == nil || scales == nil {
 		return nil, nil, fmt.Errorf("gpt-oss expert tensor %q requires blocks and scales", name)
@@ -302,7 +309,7 @@ func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.Tens
 		return nil, nil, fmt.Errorf("gpt-oss expert scales %q byte length = %d, want %d", scales.Name, len(scaleBytes), groupCount)
 	}
 
-	ggmlBlocks := make([]byte, groupCount*17)
+	values := make([]float32, groupCount*32)
 	var tmp [16]byte
 	for i := range groupCount {
 		src := blockBytes[i*16 : (i+1)*16]
@@ -312,13 +319,14 @@ func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.Tens
 			tmp[2*j+1] = (a >> 4) | (b & 0xF0)
 		}
 
-		dst := ggmlBlocks[i*17 : (i+1)*17]
-		dst[0] = scaleBytes[i]
-		copy(dst[1:], tmp[:])
+		scale := decodeGPTOSSMXFP4Scale(scaleBytes[i])
+		base := i * 32
+		for j, packed := range tmp {
+			values[base+j] = gptossMXFP4Values[packed&0x0F] * scale
+			values[base+j+16] = gptossMXFP4Values[packed>>4] * scale
+		}
 	}
 
-	decodedElems := uint64(groupCount * 32)
-	values := ggml.ConvertToF32(ggmlBlocks, uint32(fsggml.TensorTypeMXFP4), decodedElems)
 	if validateGPTOSSDequant() {
 		for i, v := range values {
 			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
