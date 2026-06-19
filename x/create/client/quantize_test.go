@@ -1,14 +1,21 @@
 package client
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 )
 
 func TestDecodeSourceFP8TensorAcceptsWeightScale(t *testing.T) {
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+
 	if err := mlx.CheckInit(); err != nil {
 		t.Skipf("MLX unavailable: %v", err)
+	}
+	if mlx.GPUIsAvailable() {
+		mlx.SetDefaultDeviceGPU()
 	}
 
 	weight := mlx.FromValues([]uint8{0, 1, 2, 3}, 2, 2)

@@ -546,6 +546,12 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 			}
 			configData.Draft = draft
 		}
+		if configData.ModelFamily == "" {
+			configData.ModelFamily = inferModelFamily(opts.ModelDir)
+		}
+		if configData.ModelFamily != "" && len(configData.ModelFamilies) == 0 {
+			configData.ModelFamilies = []string{configData.ModelFamily}
+		}
 		configJSON, err := json.Marshal(configData)
 		if err != nil {
 			return fmt.Errorf("failed to marshal config: %w", err)
@@ -595,6 +601,38 @@ func resolveRendererName(mf *ModelfileConfig, inferred string) string {
 	}
 
 	return inferred
+}
+
+func inferModelFamily(modelDir string) string {
+	configPath := filepath.Join(modelDir, "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+
+	var cfg struct {
+		Architectures []string `json:"architectures"`
+		ModelType     string   `json:"model_type"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+
+	for _, arch := range cfg.Architectures {
+		if isGPTOSSName(arch) {
+			return "gptoss"
+		}
+	}
+	if isGPTOSSName(cfg.ModelType) {
+		return "gptoss"
+	}
+
+	return ""
+}
+
+func isGPTOSSName(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "gptoss") || strings.Contains(s, "gpt_oss") || strings.Contains(s, "gpt-oss")
 }
 
 // createModelfileLayers creates layers for template, system, and license from Modelfile config.
@@ -658,8 +696,13 @@ func supportsThinking(modelDir string) bool {
 		return false
 	}
 
-	// Check architectures that support thinking
+	// Keep these in the normalized identifier spellings we actually observe in
+	// config.json. The parser/renderer helpers also accept "gpt-oss" when they
+	// inspect free-form architecture strings, but supportsThinking only needs to
+	// match the persisted model_type / architecture identifiers.
 	thinkingArchitectures := []string{
+		"gptoss",   // gpt-oss models
+		"gpt_oss",  // HF model_type spelling
 		"glm4moe",  // GLM-4 MoE models
 		"deepseek", // DeepSeek models
 		"qwen3",    // Qwen3 models
@@ -742,11 +785,17 @@ func getParserName(modelDir string) string {
 	// Check architectures for known parsers
 	for _, arch := range cfg.Architectures {
 		archLower := strings.ToLower(arch)
+		if strings.Contains(archLower, "apertus") {
+			return "apertus"
+		}
 		if strings.Contains(archLower, "laguna") {
 			return "laguna"
 		}
 		if strings.Contains(archLower, "cohere2moe") || strings.Contains(archLower, "cohere2_moe") {
 			return "cohere"
+		}
+		if strings.Contains(archLower, "gptoss") || strings.Contains(archLower, "gpt_oss") || strings.Contains(archLower, "gpt-oss") {
+			return "harmony"
 		}
 		if strings.Contains(archLower, "glm4") || strings.Contains(archLower, "glm-4") {
 			return "glm-4.7"
@@ -765,11 +814,17 @@ func getParserName(modelDir string) string {
 	// Also check model_type
 	if cfg.ModelType != "" {
 		typeLower := strings.ToLower(cfg.ModelType)
+		if strings.Contains(typeLower, "apertus") {
+			return "apertus"
+		}
 		if strings.Contains(typeLower, "laguna") {
 			return "laguna"
 		}
 		if strings.Contains(typeLower, "cohere2_moe") {
 			return "cohere"
+		}
+		if strings.Contains(typeLower, "gptoss") || strings.Contains(typeLower, "gpt_oss") || strings.Contains(typeLower, "gpt-oss") {
+			return "harmony"
 		}
 		if strings.Contains(typeLower, "glm4") || strings.Contains(typeLower, "glm-4") {
 			return "glm-4.7"
@@ -808,11 +863,17 @@ func getRendererName(modelDir string) string {
 	// Check architectures for known renderers
 	for _, arch := range cfg.Architectures {
 		archLower := strings.ToLower(arch)
+		if strings.Contains(archLower, "apertus") {
+			return "apertus"
+		}
 		if strings.Contains(archLower, "laguna") {
 			return "laguna"
 		}
 		if strings.Contains(archLower, "cohere2moe") || strings.Contains(archLower, "cohere2_moe") {
 			return "cohere"
+		}
+		if strings.Contains(archLower, "gptoss") || strings.Contains(archLower, "gpt_oss") || strings.Contains(archLower, "gpt-oss") {
+			return ""
 		}
 		if strings.Contains(archLower, "gemma4") {
 			return "gemma4"
@@ -831,11 +892,17 @@ func getRendererName(modelDir string) string {
 	// Also check model_type
 	if cfg.ModelType != "" {
 		typeLower := strings.ToLower(cfg.ModelType)
+		if strings.Contains(typeLower, "apertus") {
+			return "apertus"
+		}
 		if strings.Contains(typeLower, "laguna") {
 			return "laguna"
 		}
 		if strings.Contains(typeLower, "cohere2_moe") {
 			return "cohere"
+		}
+		if strings.Contains(typeLower, "gptoss") || strings.Contains(typeLower, "gpt_oss") || strings.Contains(typeLower, "gpt-oss") {
+			return ""
 		}
 		if strings.Contains(typeLower, "gemma4") {
 			return "gemma4"
