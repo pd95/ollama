@@ -404,6 +404,26 @@ static NSBundle *OllamaResourceBundle(void) {
     return;
 }
 
+- (void)unregisterSelfAsLoginItem {
+    appLogInfo(@"using v13+ SMAppService for login unregistration");
+    SMAppService* service = [SMAppService agentServiceWithPlistName:@"com.ollama.ollama.plist"];
+    if (!service) {
+        appLogInfo(@"SMAppService failed to find service for com.ollama.ollama.plist");
+        return;
+    }
+
+    SMAppServiceStatus status = [service status];
+    if (status == SMAppServiceStatusNotRegistered || status == SMAppServiceStatusNotFound) {
+        appLogInfo(@"service is not registered, no need to unregister");
+        return;
+    }
+
+    NSError *error = nil;
+    if (![service unregisterAndReturnError:&error]) {
+        appLogInfo([NSString stringWithFormat:@"Failed to unregister %@ as a login item: %@", NSBundle.mainBundle.bundleURL, error]);
+    }
+}
+
 /// Remove ollama from the deprecated Login Items list as we now use LaunchAgents
 - (void)unregisterSelfFromLoginItem {
     NSURL *bundleURL = NSBundle.mainBundle.bundleURL;
@@ -1010,6 +1030,12 @@ void uiRequest(char *path) {
 void registerSelfAsLoginItem(bool firstTimeRun) {
     dispatch_async(dispatch_get_main_queue(), ^{
       [appDelegate registerSelfAsLoginItem:firstTimeRun];
+    });
+}
+
+void unregisterSelfAsLoginItem() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [appDelegate unregisterSelfAsLoginItem];
     });
 }
 
