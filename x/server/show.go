@@ -269,7 +269,7 @@ func getTensorInfoFromManifest(mf *manifest.Manifest) ([]api.Tensor, error) {
 
 				var packFactor int64
 				switch strings.ToLower(info.QuantType) {
-				case "int4", "nvfp4":
+				case "int4", "nvfp4", "mxfp4":
 					packFactor = 8
 				case "int8", "mxfp8":
 					packFactor = 4
@@ -384,7 +384,7 @@ type safetensorsTensorInfo struct {
 
 // parseSafetensorsAllHeaders parses all tensor entries from a safetensors header.
 // Returns one safetensorsTensorInfo per main tensor, skipping quantization
-// companion entries such as __metadata__, .scale, .bias, and .global_scale.
+// companion entries such as __metadata__, .scale, .weight_scale, .bias, .weight_qbias, and .global_scale.
 // For packed blobs this returns multiple entries; for single-tensor blobs, one entry.
 // Each tensor's quant type is inferred from its shape and the presence of .scale/.bias entries
 // when no global __metadata__ quant_type is present.
@@ -464,8 +464,11 @@ func parseSafetensorsAllHeaders(r io.Reader) ([]safetensorsTensorInfo, error) {
 func isSafetensorsCompanionTensor(name string) bool {
 	return name == "__metadata__" ||
 		strings.HasSuffix(name, ".scale") ||
+		strings.HasSuffix(name, ".weight_scale") ||
 		strings.HasSuffix(name, ".bias") ||
-		strings.HasSuffix(name, ".global_scale")
+		strings.HasSuffix(name, ".weight_qbias") ||
+		strings.HasSuffix(name, ".global_scale") ||
+		strings.HasSuffix(name, ".weight_global_scale")
 }
 
 // inferQuantType infers the quantization type for a tensor from its shape and scale shape.
