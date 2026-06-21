@@ -195,6 +195,12 @@ func registerLaunchAgent(hasCompletedFirstRun bool) {
 	// Remove any stale Login Item registrations
 	C.unregisterSelfFromLoginItem()
 
+	if updater.AutomaticUpdatesDisabled() {
+		slog.Info("automatic launch at login disabled by build")
+		C.unregisterSelfAsLoginItem()
+		return
+	}
+
 	C.registerSelfAsLoginItem(C._Bool(hasCompletedFirstRun))
 }
 
