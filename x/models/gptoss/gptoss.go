@@ -1242,7 +1242,9 @@ func (p *ExpertProjection) Forward(x, indices *mlx.Array, sorted bool) *mlx.Arra
 		if x.DType() != p.Weight.DType() {
 			x = x.AsType(p.Weight.DType())
 		}
-		out = mlx.GatherMM(x, p.Weight, nil, indices, sorted)
+		// Keep dense GatherMM on the generic path. The sorted dense fast path
+		// fails GPT-OSS expert parity with Xcode 26.5 / MetalToolchain 17.6.
+		out = mlx.GatherMM(x, p.Weight, nil, indices, false)
 	}
 
 	if p.Bias == nil || !p.Bias.Valid() {
