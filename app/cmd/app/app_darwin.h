@@ -35,6 +35,7 @@ void updateAvailable();
 void quit();
 void uiRequest(char *path);
 void registerSelfAsLoginItem(bool firstTimeRun);
+void unregisterSelfAsLoginItem();
 void unregisterSelfFromLoginItem();
 void setWindowDelegate(void *window);
 void showWindow(uintptr_t wndPtr);
