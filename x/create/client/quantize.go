@@ -136,6 +136,18 @@ func loadAndQuantizeArray(r io.Reader, name, quantize string, arrays map[string]
 // The blob includes __metadata__ with quant_type and group_size.
 // Supported quantization types: "int4", "nvfp4", "mxfp4", "int8", "mxfp8".
 func quantizeTensor(r io.Reader, tensorName, dtype string, shape []int32, quantize string) (blobData []byte, err error) {
+	err = runOnMLXWorker(func() error {
+		var innerErr error
+		blobData, innerErr = quantizeTensorOnMLXThread(r, tensorName, dtype, shape, quantize)
+		return innerErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return blobData, nil
+}
+
+func quantizeTensorOnMLXThread(r io.Reader, tensorName, dtype string, shape []int32, quantize string) (blobData []byte, err error) {
 	arrays := make(map[string]*mlx.Array)
 	tmpPath, toEval, st, err := loadAndQuantizeArray(r, tensorName, quantize, arrays)
 	if tmpPath != "" {
@@ -191,6 +203,19 @@ func quantizeTensor(r io.Reader, tensorName, dtype string, shape []int32, quanti
 // Each tensor may have a different quantization type (mixed-precision).
 // Returns the blob bytes.
 func quantizePackedGroup(groupName string, inputs []create.PackedTensorInput) ([]byte, error) {
+	var blobData []byte
+	err := runOnMLXWorker(func() error {
+		var innerErr error
+		blobData, innerErr = quantizePackedGroupOnMLXThread(groupName, inputs)
+		return innerErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return blobData, nil
+}
+
+func quantizePackedGroupOnMLXThread(groupName string, inputs []create.PackedTensorInput) ([]byte, error) {
 	// Check if inputs are per-expert tensors that should be stacked into 3D
 	if projGroups, projQuantize := parsePerExpertInputs(groupName, inputs); projGroups != nil {
 		return stackAndQuantizeExpertGroup(groupName, projGroups, projQuantize)
