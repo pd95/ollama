@@ -735,6 +735,71 @@ func TestGetParameterCountFromManifest_MixedQuantizedPacked(t *testing.T) {
 	}
 }
 
+func TestGetParameterCountFromManifest_MXFP4(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("OLLAMA_MODELS", tempDir)
+
+	blobDir := filepath.Join(tempDir, "blobs")
+	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+		t.Fatalf("failed to create blobs dir: %v", err)
+	}
+
+	header := map[string]any{
+		"__metadata__": map[string]string{
+			"quant_type": "mxfp4",
+			"group_size": "32",
+		},
+		"model.layers.0.mlp.experts.gate_up_proj.weight": map[string]any{
+			"dtype":        "U32",
+			"shape":        []int64{32, 5760, 360},
+			"data_offsets": []int64{0, 42},
+		},
+		"model.layers.0.mlp.experts.gate_up_proj.weight_scale": map[string]any{
+			"dtype":        "U8",
+			"shape":        []int64{32, 5760, 90},
+			"data_offsets": []int64{42, 84},
+		},
+	}
+	headerJSON, _ := json.Marshal(header)
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, uint64(len(headerJSON))); err != nil {
+		t.Fatalf("failed to write header length: %v", err)
+	}
+	buf.Write(headerJSON)
+
+	digest := "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+	blobPath, err := manifest.BlobsPath(digest)
+	if err != nil {
+		t.Fatalf("failed to get blob path: %v", err)
+	}
+	if err := os.WriteFile(blobPath, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("failed to write blob: %v", err)
+	}
+
+	mf := &manifest.Manifest{
+		SchemaVersion: 2,
+		MediaType:     "application/vnd.docker.distribution.manifest.v2+json",
+		Layers: []manifest.Layer{
+			{
+				MediaType: manifest.MediaTypeImageTensor,
+				Digest:    digest,
+				Size:      int64(buf.Len() + 84),
+				Name:      "model.layers.0.mlp.experts.gate_up_proj.weight",
+			},
+		},
+	}
+
+	paramCount, err := getParameterCountFromManifest(mf)
+	if err != nil {
+		t.Fatalf("getParameterCountFromManifest() error = %v", err)
+	}
+
+	const want int64 = 32 * 5760 * 360 * 8
+	if paramCount != want {
+		t.Errorf("parameter_count = %d, want %d", paramCount, want)
+	}
+}
+
 func TestParseSafetensorsAllHeaders(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -860,6 +925,53 @@ func TestParseSafetensorsAllHeaders(t *testing.T) {
 			wantNames:  []string{"model.layers.0.mlp.up_proj.weight"},
 			wantDtypes: []string{"U32"},
 			wantQuants: []string{"nvfp4"},
+		},
+		{
+			name: "mlx underscore companions are hidden",
+			header: map[string]any{
+				"__metadata__": map[string]any{
+					"quant_type": "mxfp4",
+					"group_size": "32",
+				},
+				"model.layers.0.mlp.up_proj.weight": map[string]any{
+					"dtype":        "U32",
+					"shape":        []int64{2560, 320},
+					"data_offsets": []int64{0, 3276800},
+				},
+				"model.layers.0.mlp.up_proj.weight_scale": map[string]any{
+					"dtype":        "U8",
+					"shape":        []int64{2560, 80},
+					"data_offsets": []int64{3276800, 3481600},
+				},
+				"model.layers.0.mlp.up_proj.weight_qbias": map[string]any{
+					"dtype":        "BF16",
+					"shape":        []int64{2560, 80},
+					"data_offsets": []int64{3481600, 3891200},
+				},
+				"model.layers.0.mlp.up_proj.weight_global_scale": map[string]any{
+					"dtype":        "BF16",
+					"shape":        []int64{},
+					"data_offsets": []int64{3891200, 3891202},
+				},
+			},
+			wantCount:  1,
+			wantNames:  []string{"model.layers.0.mlp.up_proj.weight"},
+			wantDtypes: []string{"U32"},
+			wantQuants: []string{"mxfp4"},
+		},
+		{
+			name: "non-quant scale tensors are visible",
+			header: map[string]any{
+				"model.audio_tower.layers.0.self_attn.per_dim_scale": map[string]any{
+					"dtype":        "BF16",
+					"shape":        []int64{128},
+					"data_offsets": []int64{0, 256},
+				},
+			},
+			wantCount:  1,
+			wantNames:  []string{"model.audio_tower.layers.0.self_attn.per_dim_scale"},
+			wantDtypes: []string{"BF16"},
+			wantQuants: []string{""},
 		},
 		{
 			name: "packed mixed-precision blob (no global metadata)",

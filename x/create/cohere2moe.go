@@ -33,6 +33,12 @@ func newCohere2MoeImportTransform(modelDir string, _ sourceModelConfig) (tensorI
 
 func (cohere2MoeImportTransform) skipTensor(string) bool { return false }
 
+func (cohere2MoeImportTransform) canonicalTensorName(name string) string { return name }
+
+func (cohere2MoeImportTransform) prequantizedMetadata(_ string, global map[string]string) map[string]string {
+	return global
+}
+
 func (cohere2MoeImportTransform) transformTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
 	return []*safetensors.TensorData{td}, nil
 }
