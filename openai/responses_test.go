@@ -585,6 +585,105 @@ func TestFromResponsesRequest_NamespacedFunctionCallInputWithNamePrefix(t *testi
 	}
 }
 
+func TestFromResponsesRequest_CustomApplyPatchTool(t *testing.T) {
+	reqJSON := `{
+		"model": "gptoss-mlx:20b-mxfp4",
+		"input": "Edit file.txt so it says new.",
+		"tools": [
+			{
+				"type": "custom",
+				"name": "apply_patch",
+				"description": "Use the apply_patch tool to edit files. This is a FREEFORM tool.",
+				"format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"}
+			},
+			{
+				"type": "function",
+				"name": "get_weather",
+				"description": "Gets weather",
+				"parameters": {"type": "object", "properties": {}, "required": []}
+			}
+		]
+	}`
+
+	var req ResponsesRequest
+	if err := json.Unmarshal([]byte(reqJSON), &req); err != nil {
+		t.Fatalf("failed to unmarshal request: %v", err)
+	}
+
+	chatReq, err := FromResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("failed to convert request: %v", err)
+	}
+
+	if len(chatReq.Tools) != 2 {
+		t.Fatalf("expected 2 converted tools, got %d", len(chatReq.Tools))
+	}
+
+	tool := chatReq.Tools[0]
+	if tool.Type != "function" {
+		t.Errorf("custom apply_patch converted type = %q, want function", tool.Type)
+	}
+	if tool.Function.Name != "apply_patch" {
+		t.Errorf("custom apply_patch converted name = %q, want apply_patch", tool.Function.Name)
+	}
+	input, ok := tool.Function.Parameters.Properties.Get("input")
+	if !ok {
+		t.Fatal("converted apply_patch tool missing input property")
+	}
+	if input.Type.String() != "string" {
+		t.Errorf("input property type = %q, want string", input.Type.String())
+	}
+	if len(tool.Function.Parameters.Required) != 1 || tool.Function.Parameters.Required[0] != "input" {
+		t.Errorf("required = %v, want [input]", tool.Function.Parameters.Required)
+	}
+
+	normal := chatReq.Tools[1]
+	if normal.Type != "function" || normal.Function.Name != "get_weather" {
+		t.Fatalf("normal tool was not preserved: %#v", normal)
+	}
+}
+
+func TestFromResponsesRequest_CustomApplyPatchTurnContinuation(t *testing.T) {
+	reqJSON := `{
+		"model": "gptoss-mlx:20b-mxfp4",
+		"input": [
+			{"type": "message", "role": "user", "content": "Edit file.txt."},
+			{
+				"type": "custom_tool_call",
+				"call_id": "call_patch",
+				"name": "apply_patch",
+				"input": "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch\n"
+			},
+			{"type": "custom_tool_call_output", "call_id": "call_patch", "output": "Done"}
+		]
+	}`
+
+	var req ResponsesRequest
+	if err := json.Unmarshal([]byte(reqJSON), &req); err != nil {
+		t.Fatalf("failed to unmarshal request: %v", err)
+	}
+
+	chatReq, err := FromResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("failed to convert request: %v", err)
+	}
+
+	if len(chatReq.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(chatReq.Messages))
+	}
+	call := chatReq.Messages[1].ToolCalls[0]
+	if call.ID != "call_patch" || call.Function.Name != "apply_patch" {
+		t.Fatalf("unexpected tool call: %#v", call)
+	}
+	input, ok := call.Function.Arguments.Get("input")
+	if !ok || input != "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch\n" {
+		t.Fatalf("tool call input = %#v, ok=%v", input, ok)
+	}
+	if chatReq.Messages[2].Role != "tool" || chatReq.Messages[2].ToolCallID != "call_patch" || chatReq.Messages[2].Content != "Done" {
+		t.Fatalf("unexpected tool result message: %#v", chatReq.Messages[2])
+	}
+}
+
 func TestFromResponsesRequest_ReasoningEffort(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1942,6 +2041,115 @@ func TestToResponse_NamespaceToolCallNameCollisionPreservesFlatName(t *testing.T
 	}
 	if item.Namespace != "" {
 		t.Errorf("Namespace = %q, want empty", item.Namespace)
+	}
+}
+
+func TestToResponse_CustomApplyPatchToolCall(t *testing.T) {
+	args := api.NewToolCallFunctionArguments()
+	args.Set("input", "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch\n")
+
+	response := ToResponse("gptoss-mlx:20b-mxfp4", "resp_123", "msg_456", api.ChatResponse{
+		CreatedAt: time.Now(),
+		Message: api.Message{
+			ToolCalls: []api.ToolCall{{
+				ID: "call_patch",
+				Function: api.ToolCallFunction{
+					Name:      "apply_patch",
+					Arguments: args,
+				},
+			}},
+		},
+		Done: true,
+	}, ResponsesRequest{
+		Tools: []ResponsesTool{{
+			Type: "custom",
+			Name: "apply_patch",
+		}},
+	})
+
+	if len(response.Output) != 1 {
+		t.Fatalf("expected 1 output item, got %d", len(response.Output))
+	}
+	item := response.Output[0]
+	if item.Type != "custom_tool_call" {
+		t.Fatalf("output type = %q, want custom_tool_call", item.Type)
+	}
+	if item.Name != "apply_patch" || item.CallID != "call_patch" {
+		t.Fatalf("unexpected custom tool call metadata: %#v", item)
+	}
+	if item.Input != "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch\n" {
+		t.Fatalf("custom tool input = %q", item.Input)
+	}
+	if item.Arguments != "" {
+		t.Fatalf("custom tool arguments = %q, want empty", item.Arguments)
+	}
+}
+
+func TestToResponse_CustomApplyPatchMalformedArgumentsStayFunctionCall(t *testing.T) {
+	tests := []struct {
+		name string
+		args api.ToolCallFunctionArguments
+	}{
+		{
+			name: "missing input",
+			args: api.NewToolCallFunctionArguments(),
+		},
+		{
+			name: "non-string input",
+			args: func() api.ToolCallFunctionArguments {
+				args := api.NewToolCallFunctionArguments()
+				args.Set("input", 123)
+				return args
+			}(),
+		},
+		{
+			name: "not a patch",
+			args: func() api.ToolCallFunctionArguments {
+				args := api.NewToolCallFunctionArguments()
+				args.Set("input", "hello")
+				return args
+			}(),
+		},
+		{
+			name: "missing end",
+			args: func() api.ToolCallFunctionArguments {
+				args := api.NewToolCallFunctionArguments()
+				args.Set("input", "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n")
+				return args
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := ToResponse("gptoss-mlx:20b-mxfp4", "resp_123", "msg_456", api.ChatResponse{
+				CreatedAt: time.Now(),
+				Message: api.Message{
+					ToolCalls: []api.ToolCall{{
+						ID: "call_patch",
+						Function: api.ToolCallFunction{
+							Name:      "apply_patch",
+							Arguments: tt.args,
+						},
+					}},
+				},
+			}, ResponsesRequest{
+				Tools: []ResponsesTool{{
+					Type: "custom",
+					Name: "apply_patch",
+				}},
+			})
+
+			if len(response.Output) != 1 {
+				t.Fatalf("expected 1 output item, got %d", len(response.Output))
+			}
+			if response.Output[0].Type != "function_call" {
+				t.Fatalf("output type = %q, want function_call", response.Output[0].Type)
+			}
+			if response.Output[0].Arguments == "" {
+				t.Fatal("malformed function call arguments should remain visible")
+			}
+		})
 	}
 }
 
