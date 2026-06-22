@@ -446,8 +446,9 @@ func parseSafetensorsAllHeaders(r io.Reader) ([]safetensorsTensorInfo, error) {
 			// Use global metadata
 			info.QuantType = globalQuantType
 			info.GroupSize = globalGroupSize
-		} else if headerKeys[name+".scale"] {
-			// No global metadata, but has .scale - infer quant type from shape
+		} else if hasQuantScaleCompanion(headerKeys, name) {
+			// No global metadata, but has quantization scale companions -
+			// infer quant type from shape and companion naming.
 			info.QuantType = inferQuantType(header, name)
 		}
 
@@ -483,11 +484,12 @@ func inferQuantType(header map[string]json.RawMessage, name string) string {
 	}
 
 	// Parse scale shape to determine group size
-	scaleRaw, ok := header[name+".scale"]
+	scaleName, scaleRaw, ok := quantScaleCompanion(header, name)
 	if !ok {
 		return ""
 	}
 	var scaleInfo struct {
+		Dtype string  `json:"dtype"`
 		Shape []int64 `json:"shape"`
 	}
 	if json.Unmarshal(scaleRaw, &scaleInfo) != nil || len(scaleInfo.Shape) < 2 {
@@ -509,10 +511,39 @@ func inferQuantType(header map[string]json.RawMessage, name string) string {
 	// int8: ratio = (orig/4) / (orig/64) = 64/4 = 16
 	switch ratio {
 	case 4:
+		if strings.HasSuffix(scaleName, ".weight_scale") || strings.EqualFold(scaleInfo.Dtype, "U8") {
+			return "mxfp4"
+		}
 		return "int4"
 	case 16:
 		return "int8"
 	default:
 		return ""
 	}
+}
+
+func hasQuantScaleCompanion(headerKeys map[string]bool, name string) bool {
+	for _, companion := range quantScaleCompanionNames(name) {
+		if headerKeys[companion] {
+			return true
+		}
+	}
+	return false
+}
+
+func quantScaleCompanion(header map[string]json.RawMessage, name string) (string, json.RawMessage, bool) {
+	for _, companion := range quantScaleCompanionNames(name) {
+		if raw, ok := header[companion]; ok {
+			return companion, raw, true
+		}
+	}
+	return "", nil, false
+}
+
+func quantScaleCompanionNames(name string) []string {
+	names := []string{name + ".scale", name + ".weight_scale"}
+	if prefix, ok := strings.CutSuffix(name, ".weight"); ok {
+		names = append(names, prefix+".weight_scale")
+	}
+	return names
 }

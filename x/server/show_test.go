@@ -960,6 +960,54 @@ func TestParseSafetensorsAllHeaders(t *testing.T) {
 			wantQuants: []string{"mxfp4"},
 		},
 		{
+			name: "packed mlx mxfp4 inferred from weight_scale",
+			header: map[string]any{
+				"blocks.0.experts.gate_proj.weight": map[string]any{
+					"dtype":        "U32",
+					"shape":        []int64{32, 2880, 360},
+					"data_offsets": []int64{0, 33177600},
+				},
+				"blocks.0.experts.gate_proj.weight_scale": map[string]any{
+					"dtype":        "U8",
+					"shape":        []int64{32, 2880, 90},
+					"data_offsets": []int64{33177600, 41472000},
+				},
+				"blocks.0.experts.up_proj.weight": map[string]any{
+					"dtype":        "U32",
+					"shape":        []int64{32, 2880, 360},
+					"data_offsets": []int64{41472000, 74649600},
+				},
+				"blocks.0.experts.up_proj.weight_scale": map[string]any{
+					"dtype":        "U8",
+					"shape":        []int64{32, 2880, 90},
+					"data_offsets": []int64{74649600, 82944000},
+				},
+			},
+			wantCount:  2,
+			wantNames:  []string{"blocks.0.experts.gate_proj.weight", "blocks.0.experts.up_proj.weight"},
+			wantDtypes: []string{"U32", "U32"},
+			wantQuants: []string{"mxfp4", "mxfp4"},
+		},
+		{
+			name: "packed mlx mxfp4 inferred from u8 scale",
+			header: map[string]any{
+				"blocks.0.experts.gate_proj.weight": map[string]any{
+					"dtype":        "U32",
+					"shape":        []int64{32, 2880, 360},
+					"data_offsets": []int64{0, 33177600},
+				},
+				"blocks.0.experts.gate_proj.weight.scale": map[string]any{
+					"dtype":        "U8",
+					"shape":        []int64{32, 2880, 90},
+					"data_offsets": []int64{33177600, 41472000},
+				},
+			},
+			wantCount:  1,
+			wantNames:  []string{"blocks.0.experts.gate_proj.weight"},
+			wantDtypes: []string{"U32"},
+			wantQuants: []string{"mxfp4"},
+		},
+		{
 			name: "non-quant scale tensors are visible",
 			header: map[string]any{
 				"model.audio_tower.layers.0.self_attn.per_dim_scale": map[string]any{
