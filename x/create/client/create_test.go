@@ -186,6 +186,23 @@ func TestCreateModel_InvalidDir(t *testing.T) {
 	}
 }
 
+func TestCreateModel_InvalidDirWithQuantizeDoesNotInitializeMLX(t *testing.T) {
+	err := CreateModel(CreateOptions{
+		ModelName: "test-model",
+		ModelDir:  "/nonexistent/path",
+		Quantize:  "mxfp4",
+	}, nil)
+	if err == nil {
+		t.Fatal("expected error for nonexistent directory, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a supported model directory") {
+		t.Fatalf("error = %v, want unsupported model directory", err)
+	}
+	if strings.Contains(err.Error(), "MLX not available") {
+		t.Fatalf("error = %v, should validate model directory before MLX initialization", err)
+	}
+}
+
 func TestCreateModel_NotSafetensorsDir(t *testing.T) {
 	// Test that CreateModel returns error for directory without safetensors
 	dir := t.TempDir()
