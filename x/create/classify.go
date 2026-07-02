@@ -56,6 +56,9 @@ func Classify(inv Inventory, requested string) (Classification, error) {
 
 	case SourcePrequantized:
 		if requested != "" {
+			if prequantizedRequestPreservesSource(inv, requested) {
+				return Classification{Kind: SourcePrequantized}, nil
+			}
 			return Classification{}, fmt.Errorf("cannot requantize an already-quantized source model (requested %q): only bf16/fp16/fp32 sources can be quantized", requested)
 		}
 		return Classification{Kind: SourcePrequantized}, nil
@@ -101,6 +104,8 @@ func detectKind(inv Inventory) SourceKind {
 		switch {
 		case strings.HasSuffix(name, ".scales"):
 			hasMLXScales = true
+		case strings.HasSuffix(name, "_scales"):
+			hasMLXScales = true
 		case strings.HasSuffix(name, ".weight_packed"):
 			hasPacked = true
 		case strings.HasSuffix(name, ".weight_scale"):
@@ -136,6 +141,19 @@ func firstUnsupportedFP8(inv Inventory) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func prequantizedRequestPreservesSource(inv Inventory, requested string) bool {
+	if inv.Config.Architecture() != "GptOssForCausalLM" {
+		return false
+	}
+	if requested == "mxfp4" {
+		return true
+	}
+	if metadata := inv.Config.QuantMetadata(); metadata != nil {
+		return strings.EqualFold(metadata["quant_type"], requested)
+	}
+	return false
 }
 
 func isPackedDtype(dtype string) bool {
