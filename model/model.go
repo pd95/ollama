@@ -313,7 +313,7 @@ func parseTag(s string) (tag Tag) {
 		}
 	}
 
-	return
+	return tag
 }
 
 func canNil(t reflect.Type) bool {
