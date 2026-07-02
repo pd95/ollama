@@ -252,6 +252,15 @@ func quantizePackedGroup(groupName string, inputs []create.PackedTensorInput) ([
 				metadata[input.Name+".group_size"] = strconv.Itoa(groupSize)
 			}
 		}
+		if input.QuantType != "" {
+			if metadata == nil {
+				metadata = make(map[string]string)
+			}
+			metadata[input.Name+".quant_type"] = input.QuantType
+			if input.GroupSize > 0 {
+				metadata[input.Name+".group_size"] = strconv.Itoa(input.GroupSize)
+			}
+		}
 
 		if st != nil {
 			st.Free()

@@ -14,6 +14,12 @@ func newLagunaImportTransform(string, sourceModelConfig) (tensorImportTransform,
 
 func (lagunaImportTransform) skipTensor(string) bool { return false }
 
+func (lagunaImportTransform) canonicalTensorName(name string) string { return name }
+
+func (lagunaImportTransform) prequantizedMetadata(_ string, global map[string]string) map[string]string {
+	return global
+}
+
 func (lagunaImportTransform) transformTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
 	if td == nil {
 		return nil, nil

@@ -269,7 +269,7 @@ func getTensorInfoFromManifest(mf *manifest.Manifest) ([]api.Tensor, error) {
 
 				var packFactor int64
 				switch strings.ToLower(info.QuantType) {
-				case "int4", "nvfp4":
+				case "int4", "nvfp4", "mxfp4":
 					packFactor = 8
 				case "int8", "mxfp8":
 					packFactor = 4
@@ -384,7 +384,7 @@ type safetensorsTensorInfo struct {
 
 // parseSafetensorsAllHeaders parses all tensor entries from a safetensors header.
 // Returns one safetensorsTensorInfo per main tensor, skipping quantization
-// companion entries such as __metadata__, .scale, .bias, and .global_scale.
+// companion entries such as __metadata__, .scale, .weight_scale, .bias, .weight_qbias, and .global_scale.
 // For packed blobs this returns multiple entries; for single-tensor blobs, one entry.
 // Each tensor's quant type is inferred from its shape and the presence of .scale/.bias entries
 // when no global __metadata__ quant_type is present.
@@ -446,8 +446,9 @@ func parseSafetensorsAllHeaders(r io.Reader) ([]safetensorsTensorInfo, error) {
 			// Use global metadata
 			info.QuantType = globalQuantType
 			info.GroupSize = globalGroupSize
-		} else if headerKeys[name+".scale"] {
-			// No global metadata, but has .scale - infer quant type from shape
+		} else if hasQuantScaleCompanion(headerKeys, name) {
+			// No global metadata, but has quantization scale companions -
+			// infer quant type from shape and companion naming.
 			info.QuantType = inferQuantType(header, name)
 		}
 
@@ -464,8 +465,11 @@ func parseSafetensorsAllHeaders(r io.Reader) ([]safetensorsTensorInfo, error) {
 func isSafetensorsCompanionTensor(name string) bool {
 	return name == "__metadata__" ||
 		strings.HasSuffix(name, ".scale") ||
+		strings.HasSuffix(name, ".weight_scale") ||
 		strings.HasSuffix(name, ".bias") ||
-		strings.HasSuffix(name, ".global_scale")
+		strings.HasSuffix(name, ".weight_qbias") ||
+		strings.HasSuffix(name, ".global_scale") ||
+		strings.HasSuffix(name, ".weight_global_scale")
 }
 
 // inferQuantType infers the quantization type for a tensor from its shape and scale shape.
@@ -480,11 +484,12 @@ func inferQuantType(header map[string]json.RawMessage, name string) string {
 	}
 
 	// Parse scale shape to determine group size
-	scaleRaw, ok := header[name+".scale"]
+	scaleName, scaleRaw, ok := quantScaleCompanion(header, name)
 	if !ok {
 		return ""
 	}
 	var scaleInfo struct {
+		Dtype string  `json:"dtype"`
 		Shape []int64 `json:"shape"`
 	}
 	if json.Unmarshal(scaleRaw, &scaleInfo) != nil || len(scaleInfo.Shape) < 2 {
@@ -506,10 +511,39 @@ func inferQuantType(header map[string]json.RawMessage, name string) string {
 	// int8: ratio = (orig/4) / (orig/64) = 64/4 = 16
 	switch ratio {
 	case 4:
+		if strings.HasSuffix(scaleName, ".weight_scale") || strings.EqualFold(scaleInfo.Dtype, "U8") {
+			return "mxfp4"
+		}
 		return "int4"
 	case 16:
 		return "int8"
 	default:
 		return ""
 	}
+}
+
+func hasQuantScaleCompanion(headerKeys map[string]bool, name string) bool {
+	for _, companion := range quantScaleCompanionNames(name) {
+		if headerKeys[companion] {
+			return true
+		}
+	}
+	return false
+}
+
+func quantScaleCompanion(header map[string]json.RawMessage, name string) (string, json.RawMessage, bool) {
+	for _, companion := range quantScaleCompanionNames(name) {
+		if raw, ok := header[companion]; ok {
+			return companion, raw, true
+		}
+	}
+	return "", nil, false
+}
+
+func quantScaleCompanionNames(name string) []string {
+	names := []string{name + ".scale", name + ".weight_scale"}
+	if prefix, ok := strings.CutSuffix(name, ".weight"); ok {
+		names = append(names, prefix+".weight_scale")
+	}
+	return names
 }
