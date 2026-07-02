@@ -501,11 +501,13 @@ func ExpertGroupPrefix(tensorName string) string {
 
 // PackedTensorInput holds metadata for a tensor that will be packed into a multi-tensor blob.
 type PackedTensorInput struct {
-	Name     string
-	Dtype    string
-	Shape    []int32
-	Quantize string    // per-tensor quantization type (may differ within group)
-	Reader   io.Reader // safetensors-wrapped tensor data
+	Name      string
+	Dtype     string
+	Shape     []int32
+	Quantize  string    // per-tensor quantization type (may differ within group)
+	QuantType string    // metadata-only quantization type for already-packed tensors
+	GroupSize int       // metadata-only quantization group size for already-packed tensors
+	Reader    io.Reader // safetensors-wrapped tensor data
 }
 
 // PackedTensorLayerCreator creates a single blob layer containing multiple packed tensors.
@@ -844,6 +846,16 @@ func newTensorImportTransform(modelDir string, cfg sourceModelConfig) (tensorImp
 	return noopImportTransform{}, nil
 }
 
+func isGPTOSSConfig(cfg sourceModelConfig) bool {
+	for _, s := range []string{cfg.Architecture(), cfg.ModelType, cfg.TextConfig.ModelType} {
+		normalized := strings.ToLower(strings.NewReplacer("-", "", "_", "").Replace(s))
+		if normalized == "gptossforcausallm" || normalized == "gptoss" {
+			return true
+		}
+	}
+	return false
+}
+
 // CreateSafetensorsModel imports a standard safetensors model from a directory.
 // This handles Hugging Face style models with config.json and *.safetensors files.
 // Stores each tensor as a separate blob for fine-grained deduplication.
@@ -860,9 +872,17 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 	if err != nil {
 		return fmt.Errorf("failed to inspect source quantization: %w", err)
 	}
-	effectiveQuantize, err := resolveEffectiveQuantization(sourceConfig, sourceQuantKind, quantize)
-	if err != nil {
-		return err
+	var effectiveQuantize string
+	if isGPTOSSConfig(sourceConfig) {
+		effectiveQuantize, err = normalizeRequestedQuantization("--quantize", quantize)
+		if err != nil {
+			return err
+		}
+	} else {
+		effectiveQuantize, err = resolveEffectiveQuantization(sourceConfig, sourceQuantKind, quantize)
+		if err != nil {
+			return err
+		}
 	}
 	sourceQuantMetadata := sourceConfig.QuantMetadata()
 	sourceTensorFiles, err := readSourceTensorFiles(modelDir)
@@ -1088,12 +1108,20 @@ func CreateSafetensorsModel(modelName, modelDir, quantize string, createLayer La
 					if _, exists := expertGroups[groupPrefix]; !exists {
 						expertGroupOrder = append(expertGroupOrder, groupPrefix)
 					}
+					quantType := ""
+					groupSize := 0
+					if isGPTOSSConfig(sourceConfig) && isGPTOSSPackedExpertWeight(outTD.Name, outTD.Dtype) {
+						quantType = "mxfp4"
+						groupSize = 32
+					}
 					expertGroups[groupPrefix] = append(expertGroups[groupPrefix], PackedTensorInput{
-						Name:     outTD.Name,
-						Dtype:    outTD.Dtype,
-						Shape:    outTD.Shape,
-						Quantize: quantizeType,
-						Reader:   reader,
+						Name:      outTD.Name,
+						Dtype:     outTD.Dtype,
+						Shape:     outTD.Shape,
+						Quantize:  quantizeType,
+						QuantType: quantType,
+						GroupSize: groupSize,
+						Reader:    reader,
 					})
 					if completer, ok := importTransform.(packedGroupCompleter); ok && completer.packedGroupComplete(groupPrefix, expertGroups[groupPrefix]) {
 						if err := flushPackedGroup(groupPrefix); err != nil {

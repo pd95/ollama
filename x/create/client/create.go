@@ -454,17 +454,23 @@ func createUnquantizedLayer(r io.Reader, name string) ([]create.LayerInfo, error
 // creating packed multi-tensor blob layers (used for expert groups).
 func newPackedTensorLayerCreator() create.PackedTensorLayerCreator {
 	return func(groupName string, tensors []create.PackedTensorInput) (create.LayerInfo, error) {
-		// Check if any tensor in the group needs quantization
+		// Check if any tensor in the group needs quantization or quantization metadata.
 		hasQuantize := false
+		hasQuantMetadata := false
 		for _, t := range tensors {
 			if t.Quantize != "" {
 				hasQuantize = true
+			}
+			if t.QuantType != "" {
+				hasQuantMetadata = true
+			}
+			if hasQuantize || hasQuantMetadata {
 				break
 			}
 		}
 
 		var blobReader io.Reader
-		if hasQuantize {
+		if hasQuantize || hasQuantMetadata {
 			if !QuantizeSupported() {
 				return create.LayerInfo{}, fmt.Errorf("quantization requires MLX support")
 			}

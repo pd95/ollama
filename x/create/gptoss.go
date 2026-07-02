@@ -1,19 +1,15 @@
 package create
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 
-	"github.com/d4l3k/go-bfloat16"
 	"github.com/ollama/ollama/x/safetensors"
 )
 
@@ -134,35 +130,11 @@ func (t *gptossImportTransform) quantizationType(name string, shape []int32, qua
 	}
 
 	quantNorm := normalizeQuantType(quantize)
-
-	if strings.Contains(name, ".experts.") && strings.HasSuffix(name, ".weight") {
-		// HF gpt-oss expert tensors are dequantized and reshaped into dense 3-D
-		// expert stacks during import. Requantize the stacks into formats the
-		// GPT-OSS runtime can consume through GatherQMM.
-		switch quantNorm {
-		case "int4", "int8", "nvfp4", "mxfp4", "mxfp8":
-			if len(shape) != 3 {
-				return ""
-			}
-			var elems int64 = 1
-			for _, d := range shape {
-				elems *= int64(d)
-			}
-			if elems < 1024 || !isAligned(shape, quantNorm) {
-				return ""
-			}
-			return quantNorm
-		default:
-			return ""
-		}
+	if quantNorm == "" {
+		return ""
 	}
-
-	// GPT-OSS NVFP4 is intentionally a mixed-format artifact: NVFP4 is useful
-	// for expert stacks, but applying it to attention/output linears damages
-	// Harmony channel/tool behavior. Keep non-expert weights on the safer
-	// affine INT8 path while preserving NVFP4 for MoE experts above.
-	if quantNorm == "nvfp4" {
-		return GetTensorQuantization(name, shape, "int8")
+	if strings.Contains(name, ".experts.") && strings.HasSuffix(name, ".weight") {
+		return ""
 	}
 	return GetTensorQuantization(name, shape, quantize)
 }
@@ -205,8 +177,11 @@ func (t *gptossImportTransform) packedGroupComplete(groupName string, tensors []
 	}
 	for _, suffix := range []string{
 		".gate_proj.weight",
+		".gate_proj.weight.scale",
 		".up_proj.weight",
+		".up_proj.weight.scale",
 		".down_proj.weight",
+		".down_proj.weight.scale",
 		".gate_proj.bias",
 		".up_proj.bias",
 		".down_proj.bias",
@@ -216,6 +191,12 @@ func (t *gptossImportTransform) packedGroupComplete(groupName string, tensors []
 		}
 	}
 	return true
+}
+
+func isGPTOSSPackedExpertWeight(name, dtype string) bool {
+	return dtype == "U32" &&
+		strings.Contains(name, ".experts.") &&
+		strings.HasSuffix(name, ".weight")
 }
 
 func (t *gptossImportTransform) transformTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
@@ -250,23 +231,160 @@ func (t *gptossImportTransform) maybeEmitExpertWeight(name string) ([]*safetenso
 
 	switch {
 	case strings.Contains(name, ".experts.gate_up_proj.weight"):
-		return dequantizeAndSplitGateUpTensor(name, blocks, scales)
+		return preserveAndSplitGateUpTensor(name, blocks, scales)
 	default:
-		weight, err := dequantizeGPTOSSMXFP4Tensor(name, blocks, scales)
+		out, err := preservePackedExpertProjection(name, blocks, scales)
 		if err != nil {
 			return nil, err
 		}
-		return []*safetensors.TensorData{weight}, nil
+		return out, nil
 	}
 }
 
-var gptossMXFP4Values = [16]float32{0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12}
+func validateGPTOSSPackedMXFP4Inputs(name string, blocks, scales *safetensors.TensorData) error {
+	if blocks == nil || scales == nil {
+		return fmt.Errorf("gpt-oss expert tensor %q requires blocks and scales", name)
+	}
+	if blocks.Dtype != "U8" {
+		return fmt.Errorf("gpt-oss expert blocks %q dtype = %q, want U8", blocks.Name, blocks.Dtype)
+	}
+	if scales.Dtype != "U8" {
+		return fmt.Errorf("gpt-oss expert scales %q dtype = %q, want U8", scales.Name, scales.Dtype)
+	}
+	if len(blocks.Shape) != 4 {
+		return fmt.Errorf("gpt-oss expert blocks %q shape = %v, want [experts out groups 16]", blocks.Name, blocks.Shape)
+	}
+	if len(scales.Shape) != 3 {
+		return fmt.Errorf("gpt-oss expert scales %q shape = %v, want [experts out groups]", scales.Name, scales.Shape)
+	}
+	if blocks.Shape[0] != scales.Shape[0] || blocks.Shape[1] != scales.Shape[1] || blocks.Shape[2] != scales.Shape[2] {
+		return fmt.Errorf("gpt-oss expert tensor %q shape mismatch: blocks=%v scales=%v", name, blocks.Shape, scales.Shape)
+	}
+	if blocks.Shape[3] != 16 {
+		return fmt.Errorf("gpt-oss expert blocks %q trailing shape = %v, want [... 16]", blocks.Name, blocks.Shape)
+	}
+	return nil
+}
+
+func preservePackedExpertProjection(name string, blocks, scales *safetensors.TensorData) ([]*safetensors.TensorData, error) {
+	if err := validateGPTOSSPackedMXFP4Inputs(name, blocks, scales); err != nil {
+		return nil, err
+	}
+
+	sourceBlockBytes, err := io.ReadAll(blocks.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("read gpt-oss expert blocks %q: %w", blocks.Name, err)
+	}
+	sourceScaleBytes, err := io.ReadAll(scales.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("read gpt-oss expert scales %q: %w", scales.Name, err)
+	}
+	blockBytes, err := preserveGPTOSSMXFP4Blocks(blocks.Name, sourceBlockBytes, int(blocks.Shape[2]))
+	if err != nil {
+		return nil, err
+	}
+	scaleBytes := convertGPTOSSMXFP4Scales(sourceScaleBytes)
+
+	blockShape := []int32{blocks.Shape[0], blocks.Shape[1], blocks.Shape[2] * 4}
+	scaleShape := []int32{scales.Shape[0], scales.Shape[1], scales.Shape[2]}
+	return []*safetensors.TensorData{
+		safetensors.NewTensorDataFromBytes(name, "U32", blockShape, blockBytes),
+		safetensors.NewTensorDataFromBytes(name+".scale", "U8", scaleShape, scaleBytes),
+	}, nil
+}
+
+func preserveAndSplitGateUpTensor(name string, blocks, scales *safetensors.TensorData) ([]*safetensors.TensorData, error) {
+	if err := validateGPTOSSPackedMXFP4Inputs(name, blocks, scales); err != nil {
+		return nil, err
+	}
+
+	experts, outDim, groups := int(blocks.Shape[0]), int(blocks.Shape[1]), int(blocks.Shape[2])
+	if outDim%2 != 0 {
+		return nil, fmt.Errorf("gpt-oss expert tensor %q output dim = %d, want even gate/up rows", name, outDim)
+	}
+	mid := outDim / 2
+
+	sourceBlockBytes, err := io.ReadAll(blocks.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("read gpt-oss expert blocks %q: %w", blocks.Name, err)
+	}
+	sourceScaleBytes, err := io.ReadAll(scales.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("read gpt-oss expert scales %q: %w", scales.Name, err)
+	}
+	blockBytes, err := preserveGPTOSSMXFP4Blocks(blocks.Name, sourceBlockBytes, groups)
+	if err != nil {
+		return nil, err
+	}
+	scaleBytes := convertGPTOSSMXFP4Scales(sourceScaleBytes)
+
+	rowBlockBytes := groups * 16
+	rowScaleBytes := groups
+	wantBlockBytes := experts * outDim * rowBlockBytes
+	wantScaleBytes := experts * outDim * rowScaleBytes
+	if len(blockBytes) != wantBlockBytes {
+		return nil, fmt.Errorf("gpt-oss expert blocks %q byte length = %d, want %d", blocks.Name, len(blockBytes), wantBlockBytes)
+	}
+	if len(scaleBytes) != wantScaleBytes {
+		return nil, fmt.Errorf("gpt-oss expert scales %q byte length = %d, want %d", scales.Name, len(scaleBytes), wantScaleBytes)
+	}
+
+	gateBlocks := make([]byte, experts*mid*rowBlockBytes)
+	upBlocks := make([]byte, experts*mid*rowBlockBytes)
+	gateScales := make([]byte, experts*mid*rowScaleBytes)
+	upScales := make([]byte, experts*mid*rowScaleBytes)
+	for e := range experts {
+		for row := range outDim {
+			dstRow := row / 2
+			srcBlock := (e*outDim + row) * rowBlockBytes
+			dstBlock := (e*mid + dstRow) * rowBlockBytes
+			srcScale := (e*outDim + row) * rowScaleBytes
+			dstScale := (e*mid + dstRow) * rowScaleBytes
+			if row%2 == 0 {
+				copy(gateBlocks[dstBlock:dstBlock+rowBlockBytes], blockBytes[srcBlock:srcBlock+rowBlockBytes])
+				copy(gateScales[dstScale:dstScale+rowScaleBytes], scaleBytes[srcScale:srcScale+rowScaleBytes])
+			} else {
+				copy(upBlocks[dstBlock:dstBlock+rowBlockBytes], blockBytes[srcBlock:srcBlock+rowBlockBytes])
+				copy(upScales[dstScale:dstScale+rowScaleBytes], scaleBytes[srcScale:srcScale+rowScaleBytes])
+			}
+		}
+	}
+
+	gateName := strings.Replace(name, "gate_up_proj", "gate_proj", 1)
+	upName := strings.Replace(name, "gate_up_proj", "up_proj", 1)
+	blockShape := []int32{int32(experts), int32(mid), int32(groups * 4)}
+	scaleShape := []int32{int32(experts), int32(mid), int32(groups)}
+	return []*safetensors.TensorData{
+		safetensors.NewTensorDataFromBytes(gateName, "U32", blockShape, gateBlocks),
+		safetensors.NewTensorDataFromBytes(gateName+".scale", "U8", scaleShape, gateScales),
+		safetensors.NewTensorDataFromBytes(upName, "U32", blockShape, upBlocks),
+		safetensors.NewTensorDataFromBytes(upName+".scale", "U8", scaleShape, upScales),
+	}, nil
+}
+
+func preserveGPTOSSMXFP4Blocks(name string, source []byte, groups int) ([]byte, error) {
+	if groups <= 0 {
+		return nil, fmt.Errorf("gpt-oss expert blocks %q group count must be positive, got %d", name, groups)
+	}
+	if len(source)%(groups*16) != 0 {
+		return nil, fmt.Errorf("gpt-oss expert blocks %q byte length = %d, want multiple of row bytes %d", name, len(source), groups*16)
+	}
+
+	out := make([]byte, len(source))
+	copy(out, source)
+	return out, nil
+}
+
+func convertGPTOSSMXFP4Scales(source []byte) []byte {
+	out := make([]byte, len(source))
+	copy(out, source)
+	return out
+}
+
+var gptossMXFP4Values = [16]float32{0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6}
 
 func decodeGPTOSSMXFP4Scale(scale byte) float32 {
-	if scale < 2 {
-		return math.Float32frombits(0x00200000 << scale)
-	}
-	return math.Float32frombits(uint32(scale-1) << 23)
+	return math.Float32frombits(uint32(scale) << 23)
 }
 
 func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.TensorData) ([]float32, []int32, error) {
@@ -310,20 +428,14 @@ func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.Tens
 	}
 
 	values := make([]float32, groupCount*32)
-	var tmp [16]byte
 	for i := range groupCount {
 		src := blockBytes[i*16 : (i+1)*16]
-		for j := range 8 {
-			a, b := src[j], src[j+8]
-			tmp[2*j+0] = (a & 0x0F) | (b << 4)
-			tmp[2*j+1] = (a >> 4) | (b & 0xF0)
-		}
 
 		scale := decodeGPTOSSMXFP4Scale(scaleBytes[i])
 		base := i * 32
-		for j, packed := range tmp {
-			values[base+j] = gptossMXFP4Values[packed&0x0F] * scale
-			values[base+j+16] = gptossMXFP4Values[packed>>4] * scale
+		for j, packed := range src {
+			values[base+2*j] = gptossMXFP4Values[packed&0x0F] * scale
+			values[base+2*j+1] = gptossMXFP4Values[packed>>4] * scale
 		}
 	}
 
@@ -351,88 +463,6 @@ func dequantizeGPTOSSMXFP4Tensor(name string, blocks, scales *safetensors.Tensor
 	}
 
 	return safetensors.NewTensorDataFromBytes(name, "BF16", shape, raw), nil
-}
-
-func dequantizeAndSplitGateUpTensor(name string, blocks, scales *safetensors.TensorData) ([]*safetensors.TensorData, error) {
-	values, shape, err := decodeGPTOSSMXFP4TensorValues(name, blocks, scales)
-	if err != nil {
-		return nil, err
-	}
-	if len(shape) != 3 {
-		return nil, fmt.Errorf("gpt-oss expert tensor %q shape = %v, want [experts out in]", name, shape)
-	}
-
-	experts, outDim, inDim := int(shape[0]), int(shape[1]), int(shape[2])
-	if outDim%2 != 0 {
-		return nil, fmt.Errorf("gpt-oss expert tensor %q output dim = %d, want even gate/up rows", name, outDim)
-	}
-	mid := outDim / 2
-
-	gateRaw := make([]byte, experts*mid*inDim*2)
-	upRaw := make([]byte, experts*mid*inDim*2)
-	parallelizeGPTOSSExperts(experts, func(e int) {
-		for row := range outDim {
-			dstRow := row / 2
-			for col := range inDim {
-				src := (e*outDim+row)*inDim + col
-				dst := (e*mid+dstRow)*inDim + col
-				bits := uint16(bfloat16.FromFloat32(values[src]))
-				if row%2 == 0 {
-					binary.LittleEndian.PutUint16(gateRaw[dst*2:], bits)
-				} else {
-					binary.LittleEndian.PutUint16(upRaw[dst*2:], bits)
-				}
-			}
-		}
-	})
-
-	gateName := strings.Replace(name, "gate_up_proj", "gate_proj", 1)
-	upName := strings.Replace(name, "gate_up_proj", "up_proj", 1)
-	outShape := []int32{int32(experts), int32(mid), int32(inDim)}
-	return []*safetensors.TensorData{
-		safetensors.NewTensorDataFromBytes(gateName, "BF16", outShape, gateRaw),
-		safetensors.NewTensorDataFromBytes(upName, "BF16", outShape, upRaw),
-	}, nil
-}
-
-func parallelizeGPTOSSExperts(experts int, fn func(int)) {
-	if experts <= 1 {
-		for e := range experts {
-			fn(e)
-		}
-		return
-	}
-
-	workers := runtime.GOMAXPROCS(0)
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > experts {
-		workers = experts
-	}
-	if workers == 1 {
-		for e := range experts {
-			fn(e)
-		}
-		return
-	}
-
-	var wg sync.WaitGroup
-	work := make(chan int, experts)
-	wg.Add(workers)
-	for range workers {
-		go func() {
-			defer wg.Done()
-			for e := range work {
-				fn(e)
-			}
-		}()
-	}
-	for e := range experts {
-		work <- e
-	}
-	close(work)
-	wg.Wait()
 }
 
 func splitGateUpBiasTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
