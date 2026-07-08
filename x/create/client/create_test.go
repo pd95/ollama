@@ -737,6 +737,11 @@ func TestGetParserName(t *testing.T) {
 			want:       "glm-4.7",
 		},
 		{
+			name:       "gpt-oss model",
+			configJSON: `{"architectures": ["GptOssForCausalLM"], "model_type": "gpt_oss"}`,
+			want:       "harmony",
+		},
+		{
 			name:       "llama model (no parser)",
 			configJSON: `{"architectures": ["LlamaForCausalLM"]}`,
 			want:       "",
@@ -745,6 +750,11 @@ func TestGetParserName(t *testing.T) {
 			name:       "qwen3 via model_type",
 			configJSON: `{"model_type": "qwen3"}`,
 			want:       "qwen3",
+		},
+		{
+			name:       "gpt-oss via model_type",
+			configJSON: `{"model_type": "gpt_oss"}`,
+			want:       "harmony",
 		},
 		{
 			name:       "laguna model",
@@ -800,6 +810,11 @@ func TestGetRendererName(t *testing.T) {
 			name:       "glm4 model",
 			configJSON: `{"architectures": ["GLM4ForCausalLM"]}`,
 			want:       "glm-4.7",
+		},
+		{
+			name:       "gpt-oss model",
+			configJSON: `{"architectures": ["GptOssForCausalLM"], "model_type": "gpt_oss"}`,
+			want:       "",
 		},
 		{
 			name:       "llama model (no renderer)",
