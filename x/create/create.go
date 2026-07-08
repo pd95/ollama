@@ -482,6 +482,7 @@ var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
 	"Gemma4ForConditionalGeneration":        newGemma4ImportTransform,
 	"Gemma4UnifiedForCausalLM":              newGemma4ImportTransform,
 	"Gemma4UnifiedForConditionalGeneration": newGemma4ImportTransform,
+	"ApertusForCausalLM":                    newApertusImportTransform,
 	"gemma4_unified":                        newGemma4ImportTransform,
 	"gemma4_unified_text":                   newGemma4ImportTransform,
 	"LagunaForCausalLM":                     newLagunaImportTransform,
