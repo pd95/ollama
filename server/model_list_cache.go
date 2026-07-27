@@ -391,7 +391,13 @@ func buildModelListSummary(name model.Name, mf *manifest.Manifest) (modelListSum
 		summary.Capabilities = appendModelListCapability(summary.Capabilities, model.CapabilityVision)
 	}
 
-	if cfg.ModelFormat == "safetensors" && isGemma4Renderer(cfg.Renderer) {
+	if isLocalGemma4SafetensorsConfig(cfg) {
+		if !hasGemma4VisionTensorLayers(mf.Layers) {
+			summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
+				return c == model.CapabilityVision
+			})
+		}
+
 		summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
 			return c == model.CapabilityAudio
 		})

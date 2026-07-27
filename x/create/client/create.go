@@ -522,12 +522,45 @@ func detectCapabilities(modelDir string) modelCapabilities {
 		_ = json.Unmarshal(data, &cfg)
 	}
 
+	vision := cfg.VisionConfig != nil || cfg.HasVision
+	if vision && isGemma4ModelConfig(cfg.Architectures, cfg.ModelType) {
+		vision = gemma4ModelDirHasVisionTensors(modelDir)
+	}
+
 	return modelCapabilities{
-		vision: cfg.VisionConfig != nil || cfg.HasVision,
+		vision: vision,
 		audio:  cfg.AudioConfig != nil,
 		thinking: chatTemplateHasThinkingSupport(readChatTemplate(modelDir)) ||
 			alwaysSupportsThinking(cfg.Architectures, cfg.ModelType),
 	}
+}
+
+func isGemma4ModelConfig(architectures []string, modelType string) bool {
+	for _, arch := range architectures {
+		if strings.Contains(strings.ToLower(arch), "gemma4") {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(modelType), "gemma4")
+}
+
+func gemma4ModelDirHasVisionTensors(modelDir string) bool {
+	inv, err := create.ReadInventory(modelDir)
+	if err != nil {
+		return false
+	}
+
+	return hasAnySourceTensor(inv, "vision_tower.patch_embedder.input_proj.weight", "model.vision_tower.patch_embedder.input_proj.weight") &&
+		hasAnySourceTensor(inv, "embed_vision.embedding_projection.weight", "model.embed_vision.embedding_projection.weight")
+}
+
+func hasAnySourceTensor(inv create.Inventory, names ...string) bool {
+	for _, name := range names {
+		if inv.Has(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // readChatTemplate returns the model's chat template, preferring the
