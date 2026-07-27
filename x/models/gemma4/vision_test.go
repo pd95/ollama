@@ -2,11 +2,15 @@ package gemma4
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
 	"math"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
@@ -28,6 +32,46 @@ func TestParseVisionConfigDefaults(t *testing.T) {
 	}
 	if cfg.RopeParameters.RopeTheta != 100 {
 		t.Fatalf("vision rope theta = %v, want 100", cfg.RopeParameters.RopeTheta)
+	}
+}
+
+func TestPreprocessGemma4ImageRejectsLimitsAndCancellation(t *testing.T) {
+	cfg := &VisionConfig{PatchSize: 16, PoolingKernelSize: 3, DefaultOutputLength: 1}
+	if _, err := preprocessGemma4Image(context.Background(), make([]byte, maxGemma4ImageBytes+1), cfg, 1); err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("oversized image error = %v", err)
+	}
+	if err := validateGemma4ImageDimensions(maxGemma4ImageDimension+1, 1); err == nil {
+		t.Fatal("oversized dimension error = nil")
+	}
+	if err := validateGemma4ImageDimensions(8192, 8193); err == nil {
+		t.Fatal("oversized pixel count error = nil")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := preprocessGemma4Image(ctx, []byte("image"), cfg, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled preprocessing error = %v", err)
+	}
+}
+
+func TestDecodeGemma4WebP(t *testing.T) {
+	data, err := base64.StdEncoding.DecodeString("UklGRrIBAABXRUJQVlA4TKUBAAAvSsAYAA8w//M///MfeJAkbXvaSG7m8Q3GfYSBJekwQztm/IcZlgwnmWImn2BK7aFmBtnVir6q//8VOkFE/xm4baTIu8c48ArEo6+B3zFKYln3pqClSCKX0begFTAXFOLXHSyF8cCNcZEG4OywuA4KVVfJCiArU7GAgJI8+lJP/OKMT/fBAjevg1cYB7YVkFuWga2lyPi5I0HFy5YTpWIHg0RZpkniRVW9odHAKOwosWuOGdxIyn2OvaCDvhg/we6TwadPBPbqBV58MsLmMJ8yZnOWk8SRz4N+QoyPL+MnamzMvcE1rHNEr91F9GKZPVUcS9w7PhhH36suB9qPeYb/oLk6cuTiJ0wOK3m5h1cKjW6EVZCYMK7dxcKCBdgP9HkKr9gkAO2P8GKZGWVdIAatQa+1IDpt6qyorVwdy01xdW8Jkfk6xjEXmVQQ+HQdFr6OKhIN34dXWq0+0qr6EJSCeeVLH9+gvGTLyqM65PQ44ihzlTXxQKjKbAvshXgir7Lil9w4L2bvMycmjQcqXaMCO6BlY28i+FOLzbfI1vEqxAhotocAAA==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, format, err := decodeGemma4ImageConfig(context.Background(), data)
+	if err != nil {
+		t.Fatalf("decodeGemma4ImageConfig() error = %v", err)
+	}
+	if format != "webp" || cfg.Width <= 0 || cfg.Height <= 0 {
+		t.Fatalf("WebP config = %dx%d %q", cfg.Width, cfg.Height, format)
+	}
+	img, format, err := decodeGemma4Image(context.Background(), data)
+	if err != nil {
+		t.Fatalf("decodeGemma4Image() error = %v", err)
+	}
+	if format != "webp" || img.Bounds().Dx() != cfg.Width || img.Bounds().Dy() != cfg.Height {
+		t.Fatalf("WebP image = %v %q", img.Bounds(), format)
 	}
 }
 
@@ -93,7 +137,7 @@ func TestPreprocessGemma4ImageSoftTokenBudget(t *testing.T) {
 		t.Fatalf("png.Encode() error = %v", err)
 	}
 
-	img, err := preprocessGemma4Image(buf.Bytes(), &VisionConfig{PatchSize: 16, PoolingKernelSize: 3, DefaultOutputLength: 1}, 1)
+	img, err := preprocessGemma4Image(context.Background(), buf.Bytes(), &VisionConfig{PatchSize: 16, PoolingKernelSize: 3, DefaultOutputLength: 1}, 1)
 	if err != nil {
 		t.Fatalf("preprocessGemma4Image() error = %v", err)
 	}
