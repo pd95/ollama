@@ -72,6 +72,7 @@ type Model struct {
 	PreferChatTemplate bool // set when GGUF chat_template should take precedence over Go TEMPLATE
 	AdapterPaths       []string
 	ProjectorPaths     []string
+	TensorLayerNames   []string
 	System             string
 	License            []string
 	Digest             string
@@ -450,6 +451,12 @@ func (m *Model) modelFamilyCapabilities(capabilities []model.Capability) []model
 }
 
 func (m *Model) filterUnsupportedCapabilities(capabilities []model.Capability, modelArch string) []model.Capability {
+	if suppressGemma4SafetensorsVisionCapability(m) {
+		capabilities = slices.DeleteFunc(capabilities, func(c model.Capability) bool {
+			return c == model.CapabilityVision
+		})
+	}
+
 	if suppressAudioCapability(m, modelArch) {
 		capabilities = slices.DeleteFunc(capabilities, func(c model.Capability) bool {
 			return c == model.CapabilityAudio
@@ -468,6 +475,14 @@ func suppressVisionCapability(m *Model) bool {
 	// The current MLX Nemotron path is text-only. Do not advertise vision for
 	// safetensors manifests until the runner can load and serve that modality.
 	return isNemotron3NanoSafetensors(m)
+}
+
+func suppressGemma4SafetensorsVisionCapability(m *Model) bool {
+	if m == nil || !isLocalGemma4SafetensorsConfig(m.Config) {
+		return false
+	}
+
+	return !hasGemma4VisionTensorLayerNames(m.TensorLayerNames)
 }
 
 func suppressAudioCapability(m *Model, arch string) bool {
@@ -501,6 +516,61 @@ func isNemotron3NanoSafetensorsConfig(cfg model.ConfigV2) bool {
 			cfg.Renderer == "nemotron-3-nano" ||
 			cfg.ModelFamily == "nemotron_h_omni" ||
 			slices.Contains(cfg.ModelFamilies, "nemotron_h_omni"))
+}
+
+func isLocalGemma4SafetensorsConfig(cfg model.ConfigV2) bool {
+	return cfg.ModelFormat == "safetensors" &&
+		isGemma4Renderer(cfg.Renderer) &&
+		cfg.RemoteHost == "" &&
+		cfg.RemoteModel == ""
+}
+
+var (
+	gemma4VisionPatchTensorLayerNames = []string{
+		"vision_tower.patch_embedder.input_proj.weight",
+		"model.vision_tower.patch_embedder.input_proj.weight",
+	}
+	gemma4VisionProjectorTensorLayerNames = []string{
+		"embed_vision.embedding_projection.weight",
+		"model.embed_vision.embedding_projection.weight",
+	}
+)
+
+func hasGemma4VisionTensorLayers(layers []manifest.Layer) bool {
+	names := make([]string, 0, len(layers))
+	for _, layer := range layers {
+		if layer.MediaType == manifest.MediaTypeImageTensor {
+			names = append(names, layer.Name)
+		}
+	}
+
+	return hasGemma4VisionTensorLayerNames(names)
+}
+
+func hasGemma4VisionTensorLayerNames(names []string) bool {
+	hasVisionTower := hasAnyTensorLayerName(names, gemma4VisionPatchTensorLayerNames...) ||
+		hasTensorLayerNamePart(names, "vision_tower")
+	hasProjector := hasAnyTensorLayerName(names, gemma4VisionProjectorTensorLayerNames...) ||
+		hasTensorLayerNamePart(names, "embed_vision")
+	return hasVisionTower && hasProjector
+}
+
+func hasAnyTensorLayerName(names []string, candidates ...string) bool {
+	for _, candidate := range candidates {
+		if slices.Contains(names, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTensorLayerNamePart(names []string, part string) bool {
+	for _, name := range names {
+		if strings.Contains(name, part) {
+			return true
+		}
+	}
+	return false
 }
 
 func projectorHasAudio(f *gguf.File) bool {
@@ -566,6 +636,10 @@ func (m *Model) CheckCapabilities(want ...model.Capability) error {
 			// append a message to the existing error
 			return fmt.Errorf("%w. Pull the model again to get the latest version with full thinking support", err)
 		}
+	}
+
+	if slices.Contains(errs, errCapabilityVision) && suppressGemma4SafetensorsVisionCapability(m) {
+		return fmt.Errorf("%w. Recreate or pull the model so it includes Gemma 4 vision tensor layers", err)
 	}
 
 	return err
@@ -726,6 +800,8 @@ func GetModel(name string) (*Model, error) {
 			m.AdapterPaths = append(m.AdapterPaths, filename)
 		case "application/vnd.ollama.image.projector":
 			m.ProjectorPaths = append(m.ProjectorPaths, filename)
+		case manifest.MediaTypeImageTensor:
+			m.TensorLayerNames = append(m.TensorLayerNames, layer.Name)
 		case "application/vnd.ollama.image.prompt",
 			"application/vnd.ollama.image.template":
 			m.HasGoTemplate = true
