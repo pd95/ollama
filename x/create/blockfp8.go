@@ -17,6 +17,9 @@ func planBlockFP8(inv Inventory, target string, policy quantizePolicy) ([]BlobSp
 	// blob, so it is not emitted on its own.
 	consumed := make(map[string]bool)
 	for _, name := range sortedTensorNames(inv) {
+		if !tensorIncluded(policy, name) {
+			continue
+		}
 		if isFP8Weight(inv, name) {
 			if scale, ok := fp8ScaleFor(inv, name); ok {
 				consumed[scale] = true
@@ -28,6 +31,9 @@ func planBlockFP8(inv Inventory, target string, policy quantizePolicy) ([]BlobSp
 	fp8Groups := make(map[string][]SourceTensor)
 	specs := make([]BlobSpec, 0, len(inv.Tensors))
 	for _, name := range sortedTensorNames(inv) {
+		if !tensorIncluded(policy, name) {
+			continue
+		}
 		if consumed[name] {
 			continue
 		}

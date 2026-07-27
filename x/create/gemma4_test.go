@@ -165,6 +165,7 @@ func TestGemma4QuantizationType(t *testing.T) {
 		{"vision q_proj nvfp4", transform26B, "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight", aligned, "nvfp4", ""},
 		{"unified vision embedder nvfp4", transform26B, "model.vision_embedder.patch_dense.weight", aligned, "nvfp4", ""},
 		{"vision projection nvfp4", transform26B, "model.embed_vision.embedding_projection.linear.weight", aligned, "nvfp4", ""},
+		{"embed_vision int4", transform26B, "model.embed_vision.embedding_projection.weight", aligned, "int4", ""},
 		// Audio tower down_proj
 		{"audio down_proj int4", transform26B, "model.audio_tower.layers.0.mlp.down_proj.linear.weight", aligned, "int4", ""},
 		{"audio down_proj nvfp4", transform26B, "model.audio_tower.layers.0.mlp.down_proj.linear.weight", aligned, "nvfp4", ""},
@@ -178,6 +179,52 @@ func TestGemma4QuantizationType(t *testing.T) {
 					tt.tensor, tt.shape, tt.quantize, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGemma4ImportPlanKeepsVisionAndDropsAudio(t *testing.T) {
+	policy := gemma4ImportTransform{numLayers: 2}
+	inv := newInventory(sourceModelConfig{}, map[string]string{
+		"model.embed_tokens.weight":                                            "BF16",
+		"model.layers.0.self_attn.q_proj.weight":                               "BF16",
+		"model.vision_tower.patch_embedder.input_proj.weight":                  "BF16",
+		"model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight":   "BF16",
+		"model.embed_vision.embedding_projection.weight":                       "BF16",
+		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight": "BF16",
+		"model.embed_audio.embedding_projection.weight":                        "BF16",
+	})
+
+	specs, err := Plan(inv, Classification{Kind: SourceFloat, Quantize: "nvfp4"}, policy)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	got := make(map[string]TensorSpec)
+	for _, spec := range specs {
+		for _, tensor := range spec.Tensors {
+			got[tensor.Name] = tensor
+		}
+	}
+	for _, name := range []string{
+		"model.vision_tower.patch_embedder.input_proj.weight",
+		"model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight",
+		"model.embed_vision.embedding_projection.weight",
+	} {
+		tensor, ok := got[name]
+		if !ok {
+			t.Fatalf("%s missing from plan; got %v", name, specNames(specs))
+		}
+		if tensor.Quantize != "" {
+			t.Fatalf("%s Quantize = %q, want source precision", name, tensor.Quantize)
+		}
+	}
+	for _, name := range []string{
+		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight",
+		"model.embed_audio.embedding_projection.weight",
+	} {
+		if _, ok := got[name]; ok {
+			t.Fatalf("%s present in plan, want audio tensor excluded", name)
+		}
 	}
 }
 
