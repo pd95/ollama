@@ -19,7 +19,7 @@ import (
 )
 
 type mediaPromptPreparer interface {
-	PrepareMediaPrompt(prompt string, media []llm.MediaData) (*batch.PreparedInput, error)
+	PrepareMediaPrompt(ctx context.Context, prompt string, media []llm.MediaData) (*batch.PreparedInput, error)
 }
 
 type mediaEmbeddingPreparer interface {
@@ -34,6 +34,12 @@ func prefillChunkSize() int {
 // context length. It is safe to call from any goroutine. On success it
 // populates request.Tokens and adjusts request.Options.NumPredict.
 func (r *Runner) Prepare(request *Request) error {
+	return r.PrepareContext(context.Background(), request)
+}
+
+// PrepareContext prepares a request while allowing media decoding and
+// preprocessing to stop when the caller disconnects.
+func (r *Runner) PrepareContext(ctx context.Context, request *Request) error {
 	if r.Model == nil {
 		return errors.New("model not loaded")
 	}
@@ -44,7 +50,7 @@ func (r *Runner) Prepare(request *Request) error {
 		if !ok {
 			return fmt.Errorf("MLX runner does not support media inputs for this model")
 		}
-		prepared, err := preparer.PrepareMediaPrompt(request.Prompt, request.Media)
+		prepared, err := preparer.PrepareMediaPrompt(ctx, request.Prompt, request.Media)
 		if err != nil {
 			return err
 		}
@@ -115,6 +121,7 @@ func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) er
 			return errors.New("media prompt preparation did not produce input embeddings")
 		}
 		pleInputIDs = request.Prepared.PLEInputIDs
+		defer pinInputEmbeddings(embeddings)()
 	}
 
 	var session *cacheSession
@@ -152,6 +159,11 @@ func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) er
 	}
 	defer d.close()
 	return r.decode(ctx, request, session, d, promptEval)
+}
+
+func pinInputEmbeddings(embeddings *mlx.Array) func() {
+	mlx.Pin(embeddings)
+	return func() { mlx.Unpin(embeddings) }
 }
 
 // prefill evaluates the prompt in chunks, leaving one token for decode to
