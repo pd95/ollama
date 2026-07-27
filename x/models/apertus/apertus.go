@@ -18,6 +18,7 @@ import (
 
 func init() {
 	base.Register("ApertusForCausalLM", newModel)
+	base.Register("Apertus1p5ForConditionalGeneration", newModel)
 }
 
 // RopeScaling carries the Llama 3 RoPE scaling block used by Apertus.
@@ -26,6 +27,7 @@ type RopeScaling struct {
 	HighFreqFactor                float32 `json:"high_freq_factor"`
 	LowFreqFactor                 float32 `json:"low_freq_factor"`
 	OriginalMaxPositionEmbeddings int32   `json:"original_max_position_embeddings"`
+	RopeTheta                     float32 `json:"rope_theta,omitempty"`
 	RopeType                      string  `json:"rope_type,omitempty"`
 	Type                          string  `json:"type,omitempty"`
 }
@@ -41,10 +43,12 @@ type Config struct {
 	NumAttentionHeads     int32       `json:"num_attention_heads"`
 	NumKeyValueHeads      int32       `json:"num_key_value_heads"`
 	VocabSize             int32       `json:"vocab_size"`
+	OutputVocabSize       int32       `json:"output_vocab_size"`
 	MaxPositionEmbeddings int32       `json:"max_position_embeddings"`
 	RMSNormEps            float32     `json:"rms_norm_eps"`
 	RopeTheta             float32     `json:"rope_theta"`
 	RopeScaling           RopeScaling `json:"rope_scaling"`
+	RopeParameters        RopeScaling `json:"rope_parameters"`
 	HiddenAct             string      `json:"hidden_act"`
 	QKNorm                bool        `json:"qk_norm"`
 	PostNorm              bool        `json:"post_norm"`
@@ -60,6 +64,7 @@ type Config struct {
 	HeadDim   int32      `json:"-"`
 	Scale     float32    `json:"-"`
 	RopeFreqs *mlx.Array `json:"-"`
+	prefix    string
 }
 
 // Model is an Apertus text model.
@@ -139,6 +144,12 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load tokenizer config: %w", err)
 	}
+	if isApertus1p5Config(cfg) {
+		tokData, err = pruneApertus1p5TokenizerAddedTokens(tokData, cfg.OutputVocabSize)
+		if err != nil {
+			return nil, fmt.Errorf("prune Apertus 1.5 tokenizer: %w", err)
+		}
+	}
 
 	tokConfig := &tokenizer.TokenizerConfig{
 		ConfigJSON: configData,
@@ -163,6 +174,48 @@ func newModel(root *model.Root) (base.Model, error) {
 		Layers: make([]*Layer, cfg.NumHiddenLayers),
 		tok:    tok,
 	}, nil
+}
+
+func isApertus1p5Config(cfg Config) bool {
+	return strings.EqualFold(cfg.Architecture, "Apertus1p5ForConditionalGeneration")
+}
+
+func pruneApertus1p5TokenizerAddedTokens(data []byte, outputVocabSize int32) ([]byte, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	addedRaw, ok := raw["added_tokens"]
+	if !ok {
+		return data, nil
+	}
+
+	var added []json.RawMessage
+	if err := json.Unmarshal(addedRaw, &added); err != nil {
+		return nil, err
+	}
+
+	filtered := make([]json.RawMessage, 0, len(added))
+	for _, tokenRaw := range added {
+		var token struct {
+			ID int32 `json:"id"`
+		}
+		if err := json.Unmarshal(tokenRaw, &token); err != nil {
+			return nil, err
+		}
+		if token.ID >= 0 && token.ID < outputVocabSize {
+			filtered = append(filtered, tokenRaw)
+		}
+	}
+
+	filteredRaw, err := json.Marshal(filtered)
+	if err != nil {
+		return nil, err
+	}
+	raw["added_tokens"] = filteredRaw
+
+	return json.Marshal(raw)
 }
 
 func parseConfig(configData []byte) (Config, error) {
@@ -222,14 +275,37 @@ func parseConfig(configData []byte) (Config, error) {
 	if cfg.RMSNormEps == 0 {
 		cfg.RMSNormEps = 1e-5
 	}
-	if cfg.RopeTheta == 0 {
-		cfg.RopeTheta = 12000000
+	if isApertus1p5Config(cfg) {
+		if cfg.RopeParameters.RopeTheta == 0 {
+			return Config{}, fmt.Errorf("missing rope_parameters.rope_theta")
+		}
+		cfg.RopeTheta = cfg.RopeParameters.RopeTheta
+		cfg.RopeScaling = cfg.RopeParameters
+	} else {
+		if cfg.RopeTheta == 0 {
+			cfg.RopeTheta = cfg.RopeParameters.RopeTheta
+		}
+		if cfg.RopeScaling.Factor == 0 && cfg.RopeParameters.Factor != 0 {
+			cfg.RopeScaling = cfg.RopeParameters
+		}
+		if cfg.RopeTheta == 0 {
+			cfg.RopeTheta = 12000000
+		}
 	}
 	if cfg.MaxPositionEmbeddings <= 0 {
 		return Config{}, fmt.Errorf("invalid max_position_embeddings: %d", cfg.MaxPositionEmbeddings)
 	}
 	if cfg.HiddenAct != "xielu" {
 		return Config{}, fmt.Errorf("unsupported hidden_act %q", cfg.HiddenAct)
+	}
+	if cfg.VocabSize <= 0 {
+		return Config{}, fmt.Errorf("invalid vocab_size: %d", cfg.VocabSize)
+	}
+	if cfg.OutputVocabSize == 0 {
+		cfg.OutputVocabSize = cfg.VocabSize
+	}
+	if cfg.OutputVocabSize <= 0 || cfg.OutputVocabSize > cfg.VocabSize {
+		return Config{}, fmt.Errorf("invalid output_vocab_size: %d (vocab_size: %d)", cfg.OutputVocabSize, cfg.VocabSize)
 	}
 	if !cfg.QKNorm {
 		return Config{}, fmt.Errorf("unsupported qk_norm=false")
@@ -316,14 +392,31 @@ func Llama3Freqs(headDim int32, base, factor, lowFreqFactor, highFreqFactor floa
 	return freqs, nil
 }
 
+func tensorPrefix(tensors map[string]*mlx.Array) (string, error) {
+	for _, prefix := range []string{"model.language_model.", "model."} {
+		if tensors[prefix+"embed_tokens.weight"] != nil && tensors[prefix+"norm.weight"] != nil {
+			return prefix, nil
+		}
+	}
+	return "", fmt.Errorf("missing required tensor namespace: expected model.embed_tokens.weight or model.language_model.embed_tokens.weight")
+}
+
 func checkRequiredTensors(tensors map[string]*mlx.Array, cfg *Config) error {
+	prefix := cfg.prefix
+	if prefix == "" {
+		var err error
+		prefix, err = tensorPrefix(tensors)
+		if err != nil {
+			return err
+		}
+	}
 	required := []string{
-		"model.embed_tokens.weight",
-		"model.norm.weight",
+		prefix + "embed_tokens.weight",
+		prefix + "norm.weight",
 		"lm_head.weight",
 	}
 	for i := range cfg.NumHiddenLayers {
-		layerPrefix := fmt.Sprintf("model.layers.%d", i)
+		layerPrefix := fmt.Sprintf("%slayers.%d", prefix, i)
 		required = append(required,
 			layerPrefix+".attention_layernorm.weight",
 			layerPrefix+".feedforward_layernorm.weight",
@@ -365,21 +458,26 @@ func XIELUScalar(x, alphaPParam, alphaNParam, beta, eps float64) float64 {
 // LoadWeights receives all tensors loaded from the manifest and assigns them
 // to model fields.
 func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
+	prefix, err := tensorPrefix(tensors)
+	if err != nil {
+		return err
+	}
+	m.Config.prefix = prefix
 	if err := checkRequiredTensors(tensors, m.Config); err != nil {
 		return err
 	}
 
 	linears := model.NewLinearFactory(tensors, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 
-	embedTokens := model.MakeEmbeddingLayer(tensors, "model.embed_tokens", m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+	embedTokens := model.MakeEmbeddingLayer(tensors, prefix+"embed_tokens", m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 	if embedTokens == nil {
-		return fmt.Errorf("missing embedding weight: model.embed_tokens.weight")
+		return fmt.Errorf("missing embedding weight: %sembed_tokens.weight", prefix)
 	}
 	m.EmbedTokens = embedTokens
 
-	normWeight := tensors["model.norm.weight"]
+	normWeight := tensors[prefix+"norm.weight"]
 	if normWeight == nil {
-		return fmt.Errorf("missing final norm weight: model.norm.weight")
+		return fmt.Errorf("missing final norm weight: %snorm.weight", prefix)
 	}
 	m.Norm = nn.NewRMSNorm(normWeight, m.RMSNormEps)
 
@@ -390,7 +488,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	m.LMHead = lmHead
 
 	for i := range m.NumHiddenLayers {
-		layerPrefix := fmt.Sprintf("model.layers.%d", i)
+		layerPrefix := fmt.Sprintf("%slayers.%d", prefix, i)
 		layer := &Layer{
 			Attention: &Attention{},
 			MLP:       &MLP{},
@@ -468,7 +566,7 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (*mlx.Array, *mlx.
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
 	dims := x.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
-	return mlx.Reshape(m.LMHead.Forward(x), B, L, m.VocabSize)
+	return mlx.Reshape(m.LMHead.Forward(x), B, L, m.OutputVocabSize)
 }
 
 func (m *Model) NumLayers() int {
