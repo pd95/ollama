@@ -52,8 +52,11 @@ type cacheSession struct {
 	inputs  []int32
 	outputs []int32
 
-	caches    []cache.Cache
-	remaining []int32
+	caches          []cache.Cache
+	remaining       []int32
+	inputEmbeddings *mlx.Array
+	pleInputIDs     []int32
+	cacheable       bool
 
 	// pendingSnapshots lists offsets where snapshots should be captured
 	// during prefill, sorted by offset. Entries are scheduled on the caches
@@ -111,6 +114,7 @@ func (c *kvCache) begin(m base.Model, inputs []int32) *cacheSession {
 		inputs:    inputs,
 		caches:    c.caches,
 		remaining: remaining,
+		cacheable: true,
 	}
 
 	// Schedule a snapshot at the branch point during prefill so future
@@ -126,6 +130,29 @@ func (c *kvCache) begin(m base.Model, inputs []int32) *cacheSession {
 	slog.Info(msg, "total", len(inputs), "matched", originalMatched, "cached", prefix, "left", len(remaining))
 
 	return session
+}
+
+// beginEphemeral prepares fresh caches without consulting or updating the
+// token-keyed prompt cache. Multimodal prompts need this until cache keys
+// include the media identity; otherwise different images with the same image
+// token span could reuse stale KV.
+func (c *kvCache) beginEphemeral(m base.Model, inputs []int32) *cacheSession {
+	var caches []cache.Cache
+	if cacheFactory, ok := m.(interface{ NewCaches() []cache.Cache }); ok {
+		caches = cacheFactory.NewCaches()
+	} else {
+		caches = make([]cache.Cache, m.NumLayers())
+		for i := range caches {
+			caches[i] = cache.NewKVCache()
+		}
+	}
+	slog.Info("cache disabled for media request", "total", len(inputs))
+	return &cacheSession{
+		cache:     c,
+		inputs:    inputs,
+		caches:    caches,
+		remaining: inputs,
+	}
 }
 
 // switchToPath transitions from the current active path to a new path,
@@ -262,6 +289,9 @@ pageIn:
 // prompt, are dropped: callers only request offsets ahead of the prefill base,
 // so this is a defensive guard.
 func (s *cacheSession) schedulePrefillSnapshots(offsets []int) {
+	if !s.cacheable {
+		return
+	}
 	c := s.cache
 	base := c.minCacheOffset()
 	for _, offset := range offsets {
@@ -306,6 +336,9 @@ func (s *cacheSession) schedulePrefillSnapshots(offsets []int) {
 // schedule, so close can call it unconditionally to clean up an abandoned
 // prefill.
 func (s *cacheSession) discardPrefillSnapshots() {
+	if !s.cacheable {
+		return
+	}
 	if len(s.pendingSnapshots) == 0 {
 		return
 	}
@@ -330,6 +363,9 @@ func (s *cacheSession) discardPrefillSnapshots() {
 // advanced to each offset in turn, so its node edges [prev, offset) match the
 // edge-local ranges the caches captured.
 func (s *cacheSession) attachPrefillSnapshots() {
+	if !s.cacheable {
+		return
+	}
 	if len(s.pendingSnapshots) == 0 {
 		return
 	}
@@ -463,6 +499,14 @@ func (c *kvCache) minCacheOffset() int {
 
 // close saves the token state if the forward pass ran.
 func (s *cacheSession) close() {
+	if !s.cacheable {
+		for _, kv := range s.caches {
+			if kv != nil {
+				kv.Free()
+			}
+		}
+		return
+	}
 	// Release any prefill snapshots the session scheduled but never attached to
 	// the trie. A successful prefill drains them in attachPrefillSnapshots (so
 	// this is a no-op then); an abandoned one (e.g. cancellation between

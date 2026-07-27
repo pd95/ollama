@@ -18,6 +18,14 @@ import (
 	"github.com/ollama/ollama/x/tokenizer"
 )
 
+type mediaPromptPreparer interface {
+	PrepareMediaPrompt(prompt string, media []llm.MediaData) (*batch.PreparedInput, error)
+}
+
+type mediaEmbeddingPreparer interface {
+	PrepareMediaEmbeddings(prepared *batch.PreparedInput) error
+}
+
 func prefillChunkSize() int {
 	return 2 << 10
 }
@@ -30,7 +38,24 @@ func (r *Runner) Prepare(request *Request) error {
 		return errors.New("model not loaded")
 	}
 
-	tokens := r.Tokenizer.Encode(request.Prompt, r.Tokenizer.AddBOS())
+	var tokens []int32
+	if len(request.Media) > 0 {
+		preparer, ok := r.Model.(mediaPromptPreparer)
+		if !ok {
+			return fmt.Errorf("MLX runner does not support media inputs for this model")
+		}
+		prepared, err := preparer.PrepareMediaPrompt(request.Prompt, request.Media)
+		if err != nil {
+			return err
+		}
+		if prepared == nil {
+			return errors.New("media prompt preparation returned nil")
+		}
+		request.Prepared = prepared
+		tokens = prepared.Tokens
+	} else {
+		tokens = r.Tokenizer.Encode(request.Prompt, r.Tokenizer.AddBOS())
+	}
 	if len(tokens) == 0 {
 		return errors.New("empty prompt")
 	}
@@ -70,14 +95,45 @@ func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) er
 	}()
 
 	inputs := request.Tokens
+	var embeddings *mlx.Array
+	var pleInputIDs []int32
+	cacheable := len(request.Media) == 0
 
-	session := r.cache.begin(r.Model, inputs)
+	if len(request.Media) > 0 {
+		preparer, ok := r.Model.(mediaEmbeddingPreparer)
+		if !ok {
+			return fmt.Errorf("MLX runner does not support media embeddings for this model")
+		}
+		if request.Prepared == nil {
+			return errors.New("missing prepared media input")
+		}
+		if err := preparer.PrepareMediaEmbeddings(request.Prepared); err != nil {
+			return err
+		}
+		embeddings = request.Prepared.InputEmbeddings
+		if embeddings == nil {
+			return errors.New("media prompt preparation did not produce input embeddings")
+		}
+		pleInputIDs = request.Prepared.PLEInputIDs
+	}
+
+	var session *cacheSession
+	if cacheable {
+		session = r.cache.begin(r.Model, inputs)
+	} else {
+		session = r.cache.beginEphemeral(r.Model, inputs)
+	}
+	session.inputEmbeddings = embeddings
+	session.pleInputIDs = pleInputIDs
 	defer session.close()
 	caches := session.caches
 
 	// Built before prefill so a drafter with draft caches follows the prompt
 	// through prefill alongside the target.
-	spec := r.spec.open(request, caches)
+	var spec *speculationSession
+	if cacheable {
+		spec = r.spec.open(request, caches)
+	}
 	defer spec.close()
 
 	seed, position, promptEval, err := r.prefill(ctx, session, spec)
@@ -145,11 +201,21 @@ func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *specu
 		n := min(prefillChunk, total-processed-1)
 
 		chunkIDs := mlx.FromValues(tokens[processed:processed+n], 1, n)
-		hidden := r.Model.Forward(&batch.Batch{
+		b := &batch.Batch{
 			InputIDs:     chunkIDs,
 			SeqOffsets:   []int32{int32(position)},
 			SeqQueryLens: []int32{int32(n)},
-		}, caches)
+		}
+		if session.inputEmbeddings != nil {
+			b.InputEmbeddings = mlx.SliceStartStop(session.inputEmbeddings,
+				[]int32{0, int32(position), 0},
+				[]int32{1, int32(position + n), int32(session.inputEmbeddings.Dim(2))},
+			)
+		}
+		if len(session.pleInputIDs) > 0 {
+			b.PLEInputIDs = mlx.FromValues(session.pleInputIDs[position:position+n], 1, n)
+		}
+		hidden := r.Model.Forward(b, caches)
 		spec.committed(chunkIDs, hidden, position)
 		mlx.Sweep()
 		materializeCaches()
