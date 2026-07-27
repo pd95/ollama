@@ -44,6 +44,73 @@ func testArgs(m map[string]any) api.ToolCallFunctionArguments {
 	return args
 }
 
+func TestBindJSONWithLimit(t *testing.T) {
+	t.Run("accepts body within limit", func(t *testing.T) {
+		body := `{"model":"gemma4"}`
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(body))
+		var req api.GenerateRequest
+		if err := bindJSONWithLimit(c, &req, int64(len(body))); err != nil {
+			t.Fatalf("bindJSONWithLimit() error = %v", err)
+		}
+		if req.Model != "gemma4" {
+			t.Fatalf("model = %q, want gemma4", req.Model)
+		}
+	})
+
+	t.Run("rejects body over limit", func(t *testing.T) {
+		body := `{"model":"gemma4"}`
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(body))
+		var req api.GenerateRequest
+		err := bindJSONWithLimit(c, &req, int64(len(body)-1))
+		var maxBytesErr *http.MaxBytesError
+		if !errors.As(err, &maxBytesErr) {
+			t.Fatalf("bindJSONWithLimit() error = %v, want MaxBytesError", err)
+		}
+	})
+}
+
+type repeatedSpaceReader struct {
+	remaining int64
+}
+
+func (r *repeatedSpaceReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := min(int64(len(p)), r.remaining)
+	for i := range int(n) {
+		p[i] = ' '
+	}
+	r.remaining -= n
+	return int(n), nil
+}
+
+func TestInferenceHandlersRejectOversizedBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := &Server{}
+	for _, test := range []struct {
+		name    string
+		handler func(*gin.Context)
+	}{
+		{name: "generate", handler: s.GenerateHandler},
+		{name: "chat", handler: s.ChatHandler},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			w := NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/", io.NopCloser(&repeatedSpaceReader{remaining: maxInferenceRequestBodySize + 1}))
+			test.handler(c)
+			if w.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusRequestEntityTooLarge, w.Body.String())
+			}
+		})
+	}
+}
+
 // argsComparer provides cmp options for comparing ToolCallFunctionArguments by value
 var argsComparer = cmp.Comparer(func(a, b api.ToolCallFunctionArguments) bool {
 	return cmp.Equal(a.ToMap(), b.ToMap())
