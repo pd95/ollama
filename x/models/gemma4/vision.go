@@ -394,7 +394,7 @@ func (m *Model) PrepareMediaEmbeddings(prepared *batch.PreparedInput) error {
 		return errors.New("invalid Gemma4 media payload")
 	}
 	if m.Vision == nil || m.EmbedVision == nil {
-		return errors.New("Gemma4 MLX vision weights are not loaded")
+		return errors.New("Gemma4 MLX vision weights are not loaded; recreate or pull the model so it includes Gemma 4 vision tensor layers")
 	}
 
 	tokens := mlx.FromValues(prepared.Tokens, 1, len(prepared.Tokens))

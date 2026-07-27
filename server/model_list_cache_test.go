@@ -103,6 +103,51 @@ func TestModelListCacheRefreshUpdatesEntry(t *testing.T) {
 	}
 }
 
+func TestModelListSummaryGemma4SafetensorsVisionRequiresTensorLayers(t *testing.T) {
+	setTestHome(t, t.TempDir())
+
+	cfg := model.ConfigV2{
+		ModelFormat:  "safetensors",
+		Renderer:     gemma4RendererLarge,
+		Capabilities: []string{"completion", "vision", "audio"},
+	}
+
+	createSafetensorsTestModel(t, "list-gemma4-text-only", cfg, nil)
+	mf, err := manifest.ParseNamedManifest(model.ParseName("list-gemma4-text-only"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := buildModelListSummary(model.ParseName("list-gemma4-text-only"), mf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(summary.Capabilities, model.CapabilityCompletion) {
+		t.Fatalf("capabilities = %v, want completion", summary.Capabilities)
+	}
+	if slices.Contains(summary.Capabilities, model.CapabilityVision) {
+		t.Fatalf("capabilities = %v, did not expect vision", summary.Capabilities)
+	}
+	if slices.Contains(summary.Capabilities, model.CapabilityAudio) {
+		t.Fatalf("capabilities = %v, did not expect audio", summary.Capabilities)
+	}
+
+	createSafetensorsTestModel(t, "list-gemma4-vision", cfg, gemma4VisionManifestLayers(t))
+	mf, err = manifest.ParseNamedManifest(model.ParseName("list-gemma4-vision"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err = buildModelListSummary(model.ParseName("list-gemma4-vision"), mf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(summary.Capabilities, model.CapabilityVision) {
+		t.Fatalf("capabilities = %v, want vision", summary.Capabilities)
+	}
+	if slices.Contains(summary.Capabilities, model.CapabilityAudio) {
+		t.Fatalf("capabilities = %v, did not expect audio", summary.Capabilities)
+	}
+}
+
 func TestModelListCacheMutationHooks(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	setTestHome(t, t.TempDir())
