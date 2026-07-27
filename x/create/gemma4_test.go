@@ -226,6 +226,27 @@ func TestGemma4ImportPlanKeepsVisionAndDropsAudio(t *testing.T) {
 	}
 }
 
+func TestGemma4ClassificationIgnoresExcludedAudioTensors(t *testing.T) {
+	inv := newInventory(sourceModelConfig{Architectures: []string{"gemma4_unified"}}, map[string]string{
+		"model.embed_tokens.weight":              "BF16",
+		"model.layers.0.self_attn.q_proj.weight": "BF16",
+		"model.audio_tower.proj.weight":          "F8_E5M2",
+		"model.embed_audio.projection.scales":    "BF16",
+	})
+	inv.RawConfig = []byte(`{"architectures":["gemma4_unified"],"num_hidden_layers":2}`)
+	transform, err := newTensorImportTransform(inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	class, err := Classify(filterInventory(inv, transform), "nvfp4")
+	if err != nil {
+		t.Fatalf("Classify() error = %v", err)
+	}
+	if class.Kind != SourceFloat || class.Quantize != "nvfp4" {
+		t.Fatalf("Classify() = %#v, want float nvfp4", class)
+	}
+}
+
 func TestUseMoreBits(t *testing.T) {
 	// 30 layers: first 1/8 = layers 0-2, last 1/8 = layers 27-29
 	// In between: every 3rd from offset (i - n/8) % 3 == 2
