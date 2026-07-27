@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"image/png"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,26 @@ func TestParseVisionConfigDefaults(t *testing.T) {
 	}
 	if cfg.RopeParameters.RopeTheta != 100 {
 		t.Fatalf("vision rope theta = %v, want 100", cfg.RopeParameters.RopeTheta)
+	}
+}
+
+func TestParseUnifiedVisionConfig(t *testing.T) {
+	cfg, err := parseVisionConfig([]byte(`{"vision_config":{"model_type":"gemma4_unified_vision","mm_embed_dim":3840,"mm_posemb_size":1120,"model_patch_size":48,"num_soft_tokens":280,"output_proj_dims":3840,"patch_size":16,"pooling_kernel_size":3}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.unified() || cfg.ModelPatchSize != 48 || cfg.MMEmbedDim != 3840 || cfg.MMPosembSize != 1120 {
+		t.Fatalf("unexpected unified config: %+v", cfg)
+	}
+	if cfg.DefaultOutputLength != 280 {
+		t.Fatalf("DefaultOutputLength = %d, want 280", cfg.DefaultOutputLength)
+	}
+}
+
+func TestParseUnifiedVisionConfigRejectsInvalidPatchSize(t *testing.T) {
+	_, err := parseVisionConfig([]byte(`{"vision_config":{"model_type":"gemma4_unified_vision","patch_size":16,"pooling_kernel_size":3,"model_patch_size":32}}`))
+	if err == nil || !strings.Contains(err.Error(), "model_patch_size") {
+		t.Fatalf("parseVisionConfig() error = %v, want model patch mismatch", err)
 	}
 }
 
@@ -85,6 +106,13 @@ func TestGemma4ResizeDimensions(t *testing.T) {
 	}
 }
 
+func TestGemma4ResizeDimensionsRejectsUnboundedWork(t *testing.T) {
+	_, _, err := gemma4ResizeDimensions(1, 1, 16, maxGemma4ResizePixels, 3)
+	if err == nil || !strings.Contains(err.Error(), "resize target") {
+		t.Fatalf("gemma4ResizeDimensions() error = %v, want resize work limit", err)
+	}
+}
+
 func TestImageToCHWFloat32UsesBoundsAndChannelOrder(t *testing.T) {
 	img := image.NewRGBA(image.Rect(10, 20, 12, 22))
 	img.SetRGBA(10, 20, color.RGBA{R: 255, A: 255})
@@ -104,6 +132,31 @@ func TestImageToCHWFloat32UsesBoundsAndChannelOrder(t *testing.T) {
 	for i := range want {
 		if math.Abs(float64(got[i]-want[i])) > 1e-6 {
 			t.Fatalf("pixel[%d] = %f, want %f", i, got[i], want[i])
+		}
+	}
+}
+
+func TestImageToUnifiedPatchesUsesHWCModelPatchOrder(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 2))
+	for y := range 2 {
+		for x := range 4 {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(1 + x + 4*y), G: uint8(11 + x + 4*y), B: uint8(21 + x + 4*y), A: 255})
+		}
+	}
+	patches, positions, err := imageToUnifiedPatchesContext(context.Background(), img, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := positions, []int32{0, 0, 1, 0}; !slices.Equal(got, want) {
+		t.Fatalf("positions = %v, want %v", got, want)
+	}
+	wantBytes := []uint8{1, 11, 21, 2, 12, 22, 5, 15, 25, 6, 16, 26, 3, 13, 23, 4, 14, 24, 7, 17, 27, 8, 18, 28}
+	if len(patches) != len(wantBytes) {
+		t.Fatalf("patch length = %d, want %d", len(patches), len(wantBytes))
+	}
+	for i, want := range wantBytes {
+		if math.Abs(float64(patches[i]-float32(want)/255)) > 1e-6 {
+			t.Fatalf("patch[%d] = %f, want %f", i, patches[i], float32(want)/255)
 		}
 	}
 }
