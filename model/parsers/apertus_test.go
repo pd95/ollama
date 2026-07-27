@@ -158,6 +158,19 @@ func TestApertusParserStripsAssistantTagsFromFinalText(t *testing.T) {
 	}
 }
 
+func TestApertusParserStripsApertus1p5ContinuationFraming(t *testing.T) {
+	parser := &ApertusParser{}
+	parser.Init(nil, nil, nil)
+
+	content, thinking, calls, err := parser.Add(`<|tool_output_start|>{"temperature":22}<|tool_output_end|><|assistant_start|>It is mild.<|assistant_end|>`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != `{"temperature":22}It is mild.` || thinking != "" || len(calls) != 0 {
+		t.Fatalf("content=%q thinking=%q calls=%d, want cleaned continuation text", content, thinking, len(calls))
+	}
+}
+
 func TestApertusParserStripsAssistantEndAfterToolCall(t *testing.T) {
 	parser := &ApertusParser{}
 	parser.Init([]api.Tool{parserWeatherTool()}, nil, nil)
