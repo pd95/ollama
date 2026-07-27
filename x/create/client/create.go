@@ -333,6 +333,10 @@ func readConfigV2(m *imagemanifest.ModelManifest) (*model.ConfigV2, error) {
 func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 	capabilities := []string{"completion"}
 
+	if isApertus1p5ModelDir(modelDir) {
+		return []string{"completion", "tools", "thinking"}
+	}
+
 	caps := detectCapabilities(modelDir)
 	if caps.vision {
 		capabilities = append(capabilities, "vision")
@@ -655,6 +659,9 @@ func getParserName(modelDir string) string {
 	// Check architectures for known parsers
 	for _, arch := range cfg.Architectures {
 		archLower := strings.ToLower(arch)
+		if isApertus1p5Name(archLower) {
+			return "apertus"
+		}
 		if strings.Contains(archLower, "apertus") {
 			return "apertus"
 		}
@@ -687,6 +694,9 @@ func getParserName(modelDir string) string {
 	// Also check model_type
 	if cfg.ModelType != "" {
 		typeLower := strings.ToLower(cfg.ModelType)
+		if isApertus1p5Name(typeLower) {
+			return "apertus"
+		}
 		if strings.Contains(typeLower, "apertus") {
 			return "apertus"
 		}
@@ -739,6 +749,9 @@ func getRendererName(modelDir string) string {
 	// Check architectures for known renderers
 	for _, arch := range cfg.Architectures {
 		archLower := strings.ToLower(arch)
+		if isApertus1p5Name(archLower) {
+			return "apertus1p5"
+		}
 		if strings.Contains(archLower, "apertus") {
 			return "apertus"
 		}
@@ -771,6 +784,9 @@ func getRendererName(modelDir string) string {
 	// Also check model_type
 	if cfg.ModelType != "" {
 		typeLower := strings.ToLower(cfg.ModelType)
+		if isApertus1p5Name(typeLower) {
+			return "apertus1p5"
+		}
 		if strings.Contains(typeLower, "apertus") {
 			return "apertus"
 		}
@@ -801,6 +817,35 @@ func getRendererName(modelDir string) string {
 	}
 
 	return ""
+}
+
+func isApertus1p5ModelDir(modelDir string) bool {
+	configPath := filepath.Join(modelDir, "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		Architectures []string `json:"architectures"`
+		ModelType     string   `json:"model_type"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false
+	}
+	if isApertus1p5Name(cfg.ModelType) {
+		return true
+	}
+	for _, arch := range cfg.Architectures {
+		if isApertus1p5Name(arch) {
+			return true
+		}
+	}
+	return false
+}
+
+func isApertus1p5Name(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "apertus1p5") || strings.Contains(s, "apertus-1.5")
 }
 
 func isGPTOSSName(s string) bool {
