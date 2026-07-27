@@ -42,6 +42,8 @@ func newGemma4ImportTransform(rawConfig json.RawMessage) (quantizePolicy, error)
 func (t gemma4ImportTransform) quantizationType(name string, shape []int32, quantize string) string {
 	base := normalizeQuantType(quantize)
 	switch {
+	case isGemma4VisionTensor(name):
+		return ""
 	case isEmbedTokensWeight(name):
 		// The embedding doubles as the lm_head projection; an 8-bit type keeps
 		// quality close to bf16 (matching GGUF Q6_K) while saving bandwidth.
@@ -62,12 +64,23 @@ func (t gemma4ImportTransform) quantizationType(name string, shape []int32, quan
 	}
 }
 
+func (t gemma4ImportTransform) includeTensor(name string) bool {
+	return !isGemma4AudioTensor(name)
+}
+
+func isGemma4VisionTensor(name string) bool {
+	return isVisionTower(name) || strings.Contains(name, "embed_vision")
+}
+
+func isGemma4AudioTensor(name string) bool {
+	return isAudioTower(name) || strings.Contains(name, "audio")
+}
+
 // isSensitiveProjection reports the value/key/down projections whose precision
-// most affects quality — attention output (v/k) and the residual stream
-// (down). Audio and vision tower tensors are excluded and follow the generic
-// policy.
+// most affects quality: attention output (v/k) and the residual stream
+// (down). Non-text media tensors are handled separately.
 func (t gemma4ImportTransform) isSensitiveProjection(name string) bool {
-	if isVisionTower(name) || isAudioTower(name) {
+	if isGemma4VisionTensor(name) || isGemma4AudioTensor(name) {
 		return false
 	}
 	return strings.Contains(name, ".v_proj") ||
