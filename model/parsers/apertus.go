@@ -11,12 +11,14 @@ import (
 )
 
 const (
-	apertusToolOpenTag       = "<|tools_prefix|>"
-	apertusToolCloseTag      = "<|tools_suffix|>"
-	apertusAssistantOpenTag  = "<|assistant_start|>"
-	apertusAssistantCloseTag = "<|assistant_end|>"
-	apertusInnerOpenTag      = "<|inner_prefix|>"
-	apertusInnerCloseTag     = "<|inner_suffix|>"
+	apertusToolOpenTag        = "<|tools_prefix|>"
+	apertusToolCloseTag       = "<|tools_suffix|>"
+	apertusAssistantOpenTag   = "<|assistant_start|>"
+	apertusAssistantCloseTag  = "<|assistant_end|>"
+	apertusInnerOpenTag       = "<|inner_prefix|>"
+	apertusInnerCloseTag      = "<|inner_suffix|>"
+	apertusToolOutputOpenTag  = "<|tool_output_start|>"
+	apertusToolOutputCloseTag = "<|tool_output_end|>"
 )
 
 type apertusParserState int
@@ -208,6 +210,8 @@ func cleanApertusContent(s string) string {
 	s = strings.ReplaceAll(s, apertusAssistantCloseTag, "")
 	s = strings.ReplaceAll(s, apertusInnerOpenTag, "")
 	s = strings.ReplaceAll(s, apertusInnerCloseTag, "")
+	s = strings.ReplaceAll(s, apertusToolOutputOpenTag, "")
+	s = strings.ReplaceAll(s, apertusToolOutputCloseTag, "")
 	return strings.TrimRightFunc(s, unicode.IsSpace)
 }
 
