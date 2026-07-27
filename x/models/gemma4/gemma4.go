@@ -379,12 +379,13 @@ type DecoderLayer struct {
 
 // Model is the Gemma 4 model (text + optional vision).
 type Model struct {
-	EmbedTokens nn.EmbeddingLayer
-	Layers      []*DecoderLayer
-	Norm        *nn.RMSNorm
-	LMHead      nn.LinearLayer
-	Vision      *VisionModel
-	EmbedVision *MultimodalEmbedder
+	EmbedTokens   nn.EmbeddingLayer
+	Layers        []*DecoderLayer
+	Norm          *nn.RMSNorm
+	LMHead        nn.LinearLayer
+	Vision        *VisionModel
+	UnifiedVision *UnifiedVisionEmbedder
+	EmbedVision   *MultimodalEmbedder
 
 	// PLE model-level components (nil if no PLE).
 	EmbedTokensPerLayer nn.EmbeddingLayer
@@ -749,15 +750,23 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	}
 
 	if m.VisionConfig != nil && hasCompleteGemma4VisionWeights(tensors, m.VisionConfig) {
-		vision, err := loadVisionModel(tensors, m.VisionConfig, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
-		if err != nil {
-			return err
+		if m.VisionConfig.unified() {
+			vision, err := loadUnifiedVisionEmbedder(tensors, m.VisionConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+			if err != nil {
+				return err
+			}
+			m.UnifiedVision = vision
+		} else {
+			vision, err := loadVisionModel(tensors, m.VisionConfig, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+			if err != nil {
+				return err
+			}
+			m.Vision = vision
 		}
 		embedVision, err := loadMultimodalEmbedder(tensors, "embed_vision", m.VisionConfig.RMSNormEps, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 		if err != nil {
 			return err
 		}
-		m.Vision = vision
 		m.EmbedVision = embedVision
 	}
 
@@ -1351,7 +1360,7 @@ func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positio
 		// kernel only handles L < 4 (generation). For prefill, we fall back
 		// to explicit matmul+softmax+matmul on CUDA.
 		var k, v *mlx.Array
-		mask := nn.CausalMask().Intersect(nn.QPaddingMask(b, q.DType()))
+		mask := gemma4AttentionMask(b, isSliding).Intersect(nn.QPaddingMask(b, q.DType()))
 		if kv.history != nil {
 			k, v = kv.history.K(), kv.history.V()
 			mask = kv.history.Mask(mask)
@@ -1381,7 +1390,7 @@ func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positio
 		out = mlx.Reshape(out, B, cfg.NumAttentionHeads, L, headDim)
 	} else {
 		var opt nn.SDPAOption
-		mask := nn.CausalMask()
+		mask := gemma4AttentionMask(b, isSliding)
 		if kv.history != nil {
 			opt = nn.WithKVHistory(kv.history)
 		} else {
@@ -1397,6 +1406,20 @@ func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positio
 		out = mlx.Contiguous(out, false)
 	}
 	return a.OProj.Forward(out), kv
+}
+
+func gemma4AttentionMask(b *batch.Batch, isSliding bool) nn.AttentionMask {
+	mask := nn.CausalMask()
+	// Gemma 4 unified deliberately differs from Gemma 3 here: the official
+	// create_masks_for_vision_model keeps full-attention layers causal and
+	// applies the blockwise visual overlay only to sliding-attention layers.
+	if !isSliding {
+		return mask
+	}
+	for _, span := range b.BidirectionalSpans {
+		mask = mask.Relax(0, span.Start, span.End, span.Start, span.End)
+	}
+	return mask
 }
 
 func (m *MLP) Forward(x *mlx.Array) *mlx.Array {
