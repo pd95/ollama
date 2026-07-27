@@ -20,6 +20,8 @@ import (
 	"github.com/ollama/ollama/x/mlxrunner/sample"
 )
 
+const maxCompletionRequestBytes = 48 << 20
+
 func Execute(args []string) error {
 	slog.SetDefault(logutil.NewLogger(os.Stderr, envconfig.LogLevel()))
 
@@ -87,6 +89,7 @@ func Execute(args []string) error {
 	)
 
 	mux := http.NewServeMux()
+	prepareSlots := make(chan struct{}, 1)
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewEncoder(w).Encode(statusResponse{
 			Status:        0,
@@ -120,6 +123,7 @@ func Execute(args []string) error {
 	mux.HandleFunc("POST /v1/completions", func(w http.ResponseWriter, r *http.Request) {
 		request := Request{Responses: make(chan CompletionResponse)}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxCompletionRequestBytes)
 		if err := json.NewDecoder(r.Body).Decode(&request.CompletionRequest); err != nil {
 			slog.Error("Failed to decode request", "error", err)
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -142,6 +146,14 @@ func Execute(args []string) error {
 			TopLogprobs:      request.TopLogprobs,
 		}
 
+		if len(request.Media) > 0 {
+			select {
+			case <-r.Context().Done():
+				return
+			case prepareSlots <- struct{}{}:
+			}
+			defer func() { <-prepareSlots }()
+		}
 		if err := runner.PrepareContext(r.Context(), &request); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
