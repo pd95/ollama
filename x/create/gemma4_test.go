@@ -164,6 +164,7 @@ func TestGemma4QuantizationType(t *testing.T) {
 		{"vision v_proj int4", transform26B, "model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight", aligned, "int4", ""},
 		{"vision v_proj nvfp4", transform26B, "model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight", aligned, "nvfp4", ""},
 		{"embed_vision int4", transform26B, "model.embed_vision.embedding_projection.weight", aligned, "int4", ""},
+		{"unified vision patch dense", transform26B, "model.vision_embedder.patch_dense.weight", aligned, "nvfp4", ""},
 		// Audio tower down_proj
 		{"audio down_proj int4", transform26B, "model.audio_tower.layers.0.mlp.down_proj.linear.weight", aligned, "int4", ""},
 		{"audio down_proj nvfp4", transform26B, "model.audio_tower.layers.0.mlp.down_proj.linear.weight", aligned, "nvfp4", ""},
@@ -188,6 +189,7 @@ func TestGemma4ImportPlanKeepsVisionAndDropsAudio(t *testing.T) {
 		"model.vision_tower.patch_embedder.input_proj.weight":                  "BF16",
 		"model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight":   "BF16",
 		"model.embed_vision.embedding_projection.weight":                       "BF16",
+		"model.vision_embedder.patch_dense.weight":                             "BF16",
 		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight": "BF16",
 		"model.embed_audio.embedding_projection.weight":                        "BF16",
 	})
@@ -207,6 +209,7 @@ func TestGemma4ImportPlanKeepsVisionAndDropsAudio(t *testing.T) {
 		"model.vision_tower.patch_embedder.input_proj.weight",
 		"model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight",
 		"model.embed_vision.embedding_projection.weight",
+		"model.vision_embedder.patch_dense.weight",
 	} {
 		tensor, ok := got[name]
 		if !ok {
