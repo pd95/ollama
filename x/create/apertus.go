@@ -1,6 +1,9 @@
 package create
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 type apertusImportTransform struct{}
 
@@ -27,4 +30,8 @@ func (apertusImportTransform) quantizationType(name string, shape []int32, quant
 	}
 
 	return base
+}
+
+func isApertus1p5TextTensor(name string) bool {
+	return strings.HasPrefix(name, "model.language_model.") || name == "lm_head.weight"
 }
