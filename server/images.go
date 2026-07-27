@@ -31,6 +31,7 @@ import (
 	"github.com/ollama/ollama/thinking"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/version"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/transfer"
 )
 
@@ -73,6 +74,7 @@ type Model struct {
 	AdapterPaths       []string
 	ProjectorPaths     []string
 	TensorLayerNames   []string
+	Gemma4VisionConfig *gemma4metadata.ConfigFile `json:"-"`
 	System             string
 	License            []string
 	Digest             string
@@ -471,7 +473,7 @@ func suppressGemma4SafetensorsVisionCapability(m *Model) bool {
 		return false
 	}
 
-	return !hasGemma4VisionTensorLayerNames(m.TensorLayerNames)
+	return m.Gemma4VisionConfig == nil || gemma4metadata.ValidateVisionTensors(*m.Gemma4VisionConfig, m.TensorLayerNames) != nil
 }
 
 func suppressAudioCapability(m *Model, arch string) bool {
@@ -499,18 +501,7 @@ func isLocalGemma4SafetensorsConfig(cfg model.ConfigV2) bool {
 		cfg.RemoteModel == ""
 }
 
-var (
-	gemma4VisionPatchTensorLayerNames = []string{
-		"vision_tower.patch_embedder.input_proj.weight",
-		"model.vision_tower.patch_embedder.input_proj.weight",
-	}
-	gemma4VisionProjectorTensorLayerNames = []string{
-		"embed_vision.embedding_projection.weight",
-		"model.embed_vision.embedding_projection.weight",
-	}
-)
-
-func hasGemma4VisionTensorLayers(layers []manifest.Layer) bool {
+func hasGemma4VisionTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifest.Layer) bool {
 	names := make([]string, 0, len(layers))
 	for _, layer := range layers {
 		if layer.MediaType == manifest.MediaTypeImageTensor {
@@ -518,33 +509,7 @@ func hasGemma4VisionTensorLayers(layers []manifest.Layer) bool {
 		}
 	}
 
-	return hasGemma4VisionTensorLayerNames(names)
-}
-
-func hasGemma4VisionTensorLayerNames(names []string) bool {
-	hasVisionTower := hasAnyTensorLayerName(names, gemma4VisionPatchTensorLayerNames...) ||
-		hasTensorLayerNamePart(names, "vision_tower")
-	hasProjector := hasAnyTensorLayerName(names, gemma4VisionProjectorTensorLayerNames...) ||
-		hasTensorLayerNamePart(names, "embed_vision")
-	return hasVisionTower && hasProjector
-}
-
-func hasAnyTensorLayerName(names []string, candidates ...string) bool {
-	for _, candidate := range candidates {
-		if slices.Contains(names, candidate) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasTensorLayerNamePart(names []string, part string) bool {
-	for _, name := range names {
-		if strings.Contains(name, part) {
-			return true
-		}
-	}
-	return false
+	return gemma4metadata.ValidateVisionTensors(cfg, names) == nil
 }
 
 func projectorHasAudio(f *gguf.File) bool {
@@ -738,6 +703,12 @@ func GetModel(name string) (*Model, error) {
 
 		if err := json.NewDecoder(configFile).Decode(&m.Config); err != nil {
 			return nil, err
+		}
+	}
+	if isLocalGemma4SafetensorsConfig(m.Config) {
+		var cfg gemma4metadata.ConfigFile
+		if err := mf.ReadConfigJSON("config.json", &cfg); err == nil {
+			m.Gemma4VisionConfig = &cfg
 		}
 	}
 

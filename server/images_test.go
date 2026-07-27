@@ -15,6 +15,7 @@ import (
 	"github.com/ollama/ollama/manifest"
 	"github.com/ollama/ollama/template"
 	"github.com/ollama/ollama/types/model"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 )
 
 func TestPruneLayersSkipsRecentOrphans(t *testing.T) {
@@ -524,8 +525,9 @@ func TestModelCapabilities(t *testing.T) {
 					Renderer:     gemma4RendererSmall,
 					Capabilities: []string{"vision", "audio"},
 				},
-				TensorLayerNames: []string{"model.vision_tower.patch_embedder.input_proj.weight", "model.embed_vision.embedding_projection.weight"},
-				Template:         chatTemplate,
+				TensorLayerNames:   gemma4VisionTensorNames(2),
+				Gemma4VisionConfig: gemma4VisionConfig(2),
+				Template:           chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
@@ -537,8 +539,9 @@ func TestModelCapabilities(t *testing.T) {
 					Renderer:     gemma4RendererLarge,
 					Capabilities: []string{"vision", "audio"},
 				},
-				TensorLayerNames: []string{"model.vision_tower.patch_embedder.input_proj.weight", "model.embed_vision.embedding_projection.weight"},
-				Template:         chatTemplate,
+				TensorLayerNames:   gemma4VisionTensorNames(2),
+				Gemma4VisionConfig: gemma4VisionConfig(2),
+				Template:           chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
@@ -550,8 +553,9 @@ func TestModelCapabilities(t *testing.T) {
 					Renderer:     gemma4RendererLegacy,
 					Capabilities: []string{"vision", "audio"},
 				},
-				TensorLayerNames: []string{"model.vision_tower.patch_embedder.input_proj.weight", "model.embed_vision.embedding_projection.weight"},
-				Template:         chatTemplate,
+				TensorLayerNames:   gemma4VisionTensorNames(2),
+				Gemma4VisionConfig: gemma4VisionConfig(2),
+				Template:           chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
@@ -635,6 +639,20 @@ func TestGemma4SafetensorsVisionCapabilityRequiresTensorLayers(t *testing.T) {
 	if slices.Contains(caps, model.CapabilityAudio) {
 		t.Fatalf("capabilities = %v, did not expect audio", caps)
 	}
+
+	partialLayers := slices.DeleteFunc(gemma4VisionManifestLayers(t), func(layer manifest.Layer) bool {
+		return layer.MediaType == manifest.MediaTypeImageTensor &&
+			layer.Name != "model.vision_tower.patch_embedder.input_proj.weight" &&
+			layer.Name != "model.embed_vision.embedding_projection.weight"
+	})
+	createSafetensorsTestModel(t, "gemma4-partial-vision", cfg, partialLayers)
+	m, err = GetModel("gemma4-partial-vision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(m.Capabilities(), model.CapabilityVision) {
+		t.Fatalf("partial vision capabilities = %v, did not expect vision", m.Capabilities())
+	}
 }
 
 func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
@@ -642,20 +660,54 @@ func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
 
 	data := []byte("fake-gemma4-vision-tensor")
 	digest := createTestBlob(t, data)
-	return []manifest.Layer{
-		{
+	layers := make([]manifest.Layer, 0, len(gemma4VisionTensorNames(2))+1)
+	for _, name := range gemma4VisionTensorNames(2) {
+		layers = append(layers, manifest.Layer{
 			MediaType: manifest.MediaTypeImageTensor,
 			Digest:    digest,
 			Size:      int64(len(data)),
-			Name:      "model.vision_tower.patch_embedder.input_proj.weight",
-		},
-		{
-			MediaType: manifest.MediaTypeImageTensor,
-			Digest:    digest,
-			Size:      int64(len(data)),
-			Name:      "model.embed_vision.embedding_projection.weight",
-		},
+			Name:      name,
+		})
 	}
+	config := []byte(`{"vision_config":{"num_hidden_layers":2}}`)
+	configDigest := createTestBlob(t, config)
+	layers = append(layers, manifest.Layer{
+		MediaType: "application/vnd.ollama.image.json",
+		Digest:    configDigest,
+		Size:      int64(len(config)),
+		Name:      "config.json",
+	})
+	return layers
+}
+
+func gemma4VisionConfig(layers int) *gemma4metadata.ConfigFile {
+	return &gemma4metadata.ConfigFile{VisionConfig: &gemma4metadata.VisionConfig{NumHiddenLayers: layers}}
+}
+
+func gemma4VisionTensorNames(layers int) []string {
+	names := []string{
+		"model.vision_tower.patch_embedder.input_proj.weight",
+		"model.vision_tower.patch_embedder.position_embedding_table",
+		"model.embed_vision.embedding_projection.weight",
+	}
+	for i := range layers {
+		layer := fmt.Sprintf("model.vision_tower.encoder.layers.%d", i)
+		for _, projection := range []string{
+			".self_attn.q_proj.linear.weight", ".self_attn.k_proj.linear.weight",
+			".self_attn.v_proj.linear.weight", ".self_attn.o_proj.linear.weight",
+			".mlp.gate_proj.linear.weight", ".mlp.up_proj.linear.weight", ".mlp.down_proj.linear.weight",
+		} {
+			names = append(names, layer+projection)
+		}
+		for _, norm := range []string{
+			".self_attn.q_norm.weight", ".self_attn.k_norm.weight",
+			".input_layernorm.weight", ".post_attention_layernorm.weight",
+			".pre_feedforward_layernorm.weight", ".post_feedforward_layernorm.weight",
+		} {
+			names = append(names, layer+norm)
+		}
+	}
+	return names
 }
 
 func TestModelCheckCapabilities(t *testing.T) {

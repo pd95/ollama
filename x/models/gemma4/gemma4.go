@@ -748,7 +748,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		m.LMHead = m.EmbedTokens.AsLinear()
 	}
 
-	if m.VisionConfig != nil && hasGemma4VisionWeights(tensors) {
+	if m.VisionConfig != nil && hasCompleteGemma4VisionWeights(tensors, m.VisionConfig) {
 		vision, err := loadVisionModel(tensors, m.VisionConfig, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 		if err != nil {
 			return err
