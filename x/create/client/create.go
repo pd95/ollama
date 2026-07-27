@@ -763,6 +763,8 @@ func getRendererName(modelDir string) string {
 func rendererNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
+	case strings.Contains(s, "apertus1p5") || strings.Contains(s, "apertus-1.5") || strings.Contains(s, "apertus_1_5"):
+		return "apertus1p5"
 	case strings.Contains(s, "apertus"):
 		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
