@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/ollama/ollama/logutil"
+	"github.com/ollama/ollama/x/mlxrunner/batch"
 	"github.com/ollama/ollama/x/mlxrunner/cache"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
@@ -52,11 +53,12 @@ type cacheSession struct {
 	inputs  []int32
 	outputs []int32
 
-	caches          []cache.Cache
-	remaining       []int32
-	inputEmbeddings *mlx.Array
-	pleInputIDs     []int32
-	cacheable       bool
+	caches             []cache.Cache
+	remaining          []int32
+	inputEmbeddings    *mlx.Array
+	pleInputIDs        []int32
+	bidirectionalSpans []batch.TokenSpan
+	cacheable          bool
 
 	// pendingSnapshots lists offsets where snapshots should be captured
 	// during prefill, sorted by offset. Entries are scheduled on the caches

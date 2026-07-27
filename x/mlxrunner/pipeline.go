@@ -121,7 +121,6 @@ func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) er
 			return errors.New("media prompt preparation did not produce input embeddings")
 		}
 		pleInputIDs = request.Prepared.PLEInputIDs
-		defer pinInputEmbeddings(embeddings)()
 	}
 
 	var session *cacheSession
@@ -132,6 +131,9 @@ func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) er
 	}
 	session.inputEmbeddings = embeddings
 	session.pleInputIDs = pleInputIDs
+	if request.Prepared != nil {
+		session.bidirectionalSpans = request.Prepared.BidirectionalSpans
+	}
 	defer session.close()
 	caches := session.caches
 
@@ -144,6 +146,11 @@ func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) er
 	defer spec.close()
 
 	seed, position, promptEval, err := r.prefill(ctx, session, spec)
+	session.inputEmbeddings = nil
+	if request.Prepared != nil {
+		request.Prepared.InputEmbeddings = nil
+	}
+	mlx.Sweep()
 	if err != nil {
 		return err
 	}
@@ -170,11 +177,18 @@ func pinInputEmbeddings(embeddings *mlx.Array) func() {
 // seed from, and schedules the prompt's periodic snapshots. It returns the
 // seed tokens, the resume position, and the prompt-evaluation duration.
 func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *speculationSession) ([]int32, int, time.Duration, error) {
+	if session.inputEmbeddings != nil {
+		release := pinInputEmbeddings(session.inputEmbeddings)
+		defer release()
+	}
 	start := time.Now()
 	inputs := session.inputs
 	tokens := session.remaining
 	caches := session.caches
 	prefillChunk := prefillChunkSize()
+	if err := validateBidirectionalSpans(session.bidirectionalSpans, len(inputs), prefillChunk); err != nil {
+		return nil, 0, 0, err
+	}
 
 	// Request periodic snapshots during prefill and near the end of the
 	// prompt so that long prompts can be partially restored and
@@ -210,13 +224,17 @@ func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *specu
 			return nil, 0, 0, err
 		}
 
-		n := min(prefillChunk, total-processed-1)
+		n, err := nextPrefillChunk(position, total-processed-1, prefillChunk, session.bidirectionalSpans)
+		if err != nil {
+			return nil, 0, 0, err
+		}
 
 		chunkIDs := mlx.FromValues(tokens[processed:processed+n], 1, n)
 		b := &batch.Batch{
-			InputIDs:     chunkIDs,
-			SeqOffsets:   []int32{int32(position)},
-			SeqQueryLens: []int32{int32(n)},
+			InputIDs:           chunkIDs,
+			SeqOffsets:         []int32{int32(position)},
+			SeqQueryLens:       []int32{int32(n)},
+			BidirectionalSpans: session.bidirectionalSpans,
 		}
 		if session.inputEmbeddings != nil {
 			b.InputEmbeddings = mlx.SliceStartStop(session.inputEmbeddings,
@@ -246,6 +264,39 @@ func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *specu
 	session.attachPrefillSnapshots()
 
 	return tokens[processed:], position, time.Since(start), nil
+}
+
+func validateBidirectionalSpans(spans []batch.TokenSpan, sequenceLength, maxSpan int) error {
+	previousEnd := 0
+	for _, span := range spans {
+		if span.Start < previousEnd || span.Start < 0 || span.End <= span.Start || span.End >= sequenceLength {
+			return fmt.Errorf("invalid bidirectional token span [%d,%d) for sequence length %d", span.Start, span.End, sequenceLength)
+		}
+		if span.End-span.Start > maxSpan {
+			return fmt.Errorf("bidirectional token span length %d exceeds prefill limit %d", span.End-span.Start, maxSpan)
+		}
+		previousEnd = span.End
+	}
+	return nil
+}
+
+func nextPrefillChunk(position, available, normalChunk int, spans []batch.TokenSpan) (int, error) {
+	n := min(available, normalChunk)
+	for _, span := range spans {
+		switch {
+		case position < span.Start:
+			return min(n, span.Start-position), nil
+		case position == span.Start:
+			spanLength := span.End - span.Start
+			if spanLength > available {
+				return 0, fmt.Errorf("bidirectional token span [%d,%d) cannot be processed as one prefill chunk", span.Start, span.End)
+			}
+			return spanLength, nil
+		case position < span.End:
+			return 0, fmt.Errorf("prefill position %d starts inside bidirectional token span [%d,%d)", position, span.Start, span.End)
+		}
+	}
+	return n, nil
 }
 
 // A decoder produces each run of tokens to emit, owning its own dispatch and
