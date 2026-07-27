@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -34,6 +35,8 @@ type mediaPrepareModel struct {
 type mediaPrefillModel struct {
 	mediaRejectModel
 	forwards int
+	chunks   []int
+	offsets  []int32
 	t        *testing.T
 }
 
@@ -43,6 +46,8 @@ func (m *mediaPrefillModel) Forward(b *batch.Batch, _ []cache.Cache) *mlx.Array 
 		m.t.Fatal("prefill input embeddings are invalid")
 	}
 	m.forwards++
+	m.chunks = append(m.chunks, b.InputIDs.Dim(1))
+	m.offsets = append(m.offsets, b.SeqOffsets[0])
 	return b.InputEmbeddings
 }
 
@@ -170,11 +175,7 @@ func TestMediaInputEmbeddingsSurviveChunkedPrefill(t *testing.T) {
 	const tokens = 2050
 	values := make([]float32, tokens)
 	embeddings := mlx.FromValues(values, 1, tokens, 1)
-	release := pinInputEmbeddings(embeddings)
-	defer func() {
-		release()
-		mlx.Sweep()
-	}()
+	defer mlx.Sweep()
 
 	model := &mediaPrefillModel{t: t}
 	inputIDs := make([]int32, tokens)
@@ -189,6 +190,57 @@ func TestMediaInputEmbeddingsSurviveChunkedPrefill(t *testing.T) {
 	}
 	if model.forwards != 2 {
 		t.Fatalf("forward calls = %d, want 2 prefill chunks", model.forwards)
+	}
+}
+
+func TestBidirectionalMediaPrefillChunksAroundCompleteSpan(t *testing.T) {
+	skipIfNoMLX(t)
+
+	const tokens = 2050
+	embeddings := mlx.FromValues(make([]float32, tokens), 1, tokens, 1)
+	defer mlx.Sweep()
+	model := &mediaPrefillModel{t: t}
+	inputIDs := make([]int32, tokens)
+	runner := Runner{Model: model}
+	session := &cacheSession{
+		inputs:             inputIDs,
+		remaining:          inputIDs,
+		inputEmbeddings:    embeddings,
+		bidirectionalSpans: []batch.TokenSpan{{Start: 10, End: 290}},
+	}
+	if _, _, _, err := runner.prefill(context.Background(), session, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := model.chunks, []int{10, 280, 1759}; !slices.Equal(got, want) {
+		t.Fatalf("prefill chunk sizes = %v, want %v", got, want)
+	}
+	if got, want := model.offsets, []int32{0, 10, 290}; !slices.Equal(got, want) {
+		t.Fatalf("prefill offsets = %v, want %v", got, want)
+	}
+}
+
+func TestBidirectionalMediaPrefillRejectsOversizedSpan(t *testing.T) {
+	span := batch.TokenSpan{Start: 1, End: prefillChunkSize() + 2}
+	err := validateBidirectionalSpans([]batch.TokenSpan{span}, span.End+1, prefillChunkSize())
+	if err == nil || !strings.Contains(err.Error(), "exceeds prefill limit") {
+		t.Fatalf("validateBidirectionalSpans() error = %v, want prefill limit", err)
+	}
+}
+
+func TestBidirectionalMediaPrefillKeepsLongTextChunked(t *testing.T) {
+	const total = 5000
+	spans := []batch.TokenSpan{{Start: 3000, End: 3280}}
+	var chunks []int
+	for position := 0; position < total-1; {
+		n, err := nextPrefillChunk(position, total-position-1, prefillChunkSize(), spans)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chunks = append(chunks, n)
+		position += n
+	}
+	if want := []int{2048, 952, 280, 1719}; !slices.Equal(chunks, want) {
+		t.Fatalf("prefill chunk sizes = %v, want %v", chunks, want)
 	}
 }
 
