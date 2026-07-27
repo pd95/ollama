@@ -566,11 +566,11 @@ func gemma4ModelDirHasVisionTensors(modelDir string) bool {
 	if err := json.Unmarshal(inv.RawConfig, &cfg); err != nil {
 		return false
 	}
-	names := make([]string, 0, len(inv.Tensors))
-	for name := range inv.Tensors {
-		names = append(names, name)
+	tensors := make(map[string]gemma4metadata.TensorDescriptor, len(inv.Tensors))
+	for name, tensor := range inv.Tensors {
+		tensors[name] = gemma4metadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: tensor.Shape}
 	}
-	return gemma4metadata.ValidateVisionTensors(cfg, names) == nil
+	return gemma4metadata.ValidateVisionSourceInventory(cfg, tensors) == nil
 }
 
 // readChatTemplate returns the model's chat template, preferring the

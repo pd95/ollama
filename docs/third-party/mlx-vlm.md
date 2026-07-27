@@ -5,8 +5,9 @@ implementation in MLX-VLM:
 
 - Repository: https://github.com/Blaizzy/mlx-vlm
 - Revision: `61990c9054f2bc7bb8f32541e3238b4a58fe64e5`
-- Source paths: `mlx_vlm/models/gemma4/gemma4.py` and
-  `mlx_vlm/models/gemma4/vision.py`
+- Source paths: `mlx_vlm/models/gemma4/gemma4.py`,
+  `mlx_vlm/models/gemma4/vision.py`, and
+  `mlx_vlm/models/gemma4_unified/gemma4_unified.py`
 
 The adapted implementation is distributed under the following license.
 
