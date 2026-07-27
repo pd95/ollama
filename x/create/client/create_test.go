@@ -396,6 +396,16 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 			want: []string{"completion"},
 		},
 		{
+			name: "apertus 1.5 text-only phase",
+			configJSON: `{
+				"architectures": ["Apertus1p5ForConditionalGeneration"],
+				"model_type": "apertus1p5",
+				"vision_tokenizer_config": {"hidden_size": 1024},
+				"audio_tokenizer_config": {"num_mel_bins": 128}
+			}`,
+			want: []string{"completion", "tools", "thinking"},
+		},
+		{
 			name: "model with audio but no vision",
 			configJSON: `{
 				"architectures": ["SomeAudioModel"],
@@ -1024,6 +1034,23 @@ func TestInferSafetensorsCapabilitiesApertusTools(t *testing.T) {
 	}
 }
 
+func TestInferSafetensorsCapabilitiesApertus1p5TextOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{
+		"architectures": ["Apertus1p5ForConditionalGeneration"],
+		"model_type": "apertus1p5",
+		"vision_tokenizer_config": {"hidden_size": 1024},
+		"audio_tokenizer_config": {"num_mel_bins": 128}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := inferSafetensorsCapabilities(dir, "apertus")
+	if !slices.Equal(got, []string{"completion", "tools", "thinking"}) {
+		t.Fatalf("inferSafetensorsCapabilities() = %#v, want completion, tools, and thinking only", got)
+	}
+}
+
 func TestGetParserName(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1083,6 +1110,11 @@ func TestGetParserName(t *testing.T) {
 		{
 			name:       "apertus model",
 			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       "apertus",
+		},
+		{
+			name:       "apertus 1.5 model",
+			configJSON: `{"architectures": ["Apertus1p5ForConditionalGeneration"], "model_type": "apertus1p5"}`,
 			want:       "apertus",
 		},
 		{
@@ -1154,6 +1186,11 @@ func TestGetRendererName(t *testing.T) {
 			name:       "apertus model",
 			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
 			want:       "apertus",
+		},
+		{
+			name:       "apertus 1.5 model",
+			configJSON: `{"architectures": ["Apertus1p5ForConditionalGeneration"], "model_type": "apertus1p5"}`,
+			want:       "apertus1p5",
 		},
 	}
 
