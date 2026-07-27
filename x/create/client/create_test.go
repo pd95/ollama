@@ -1156,6 +1156,11 @@ func TestGetParserName(t *testing.T) {
 			want:       "apertus",
 		},
 		{
+			name:       "apertus 1.5 model",
+			configJSON: `{"architectures": ["Apertus1p5ForConditionalGeneration"], "model_type": "apertus_1_5"}`,
+			want:       "apertus",
+		},
+		{
 			name:       "apertus nested llm config",
 			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"apertus"}}`,
 			want:       "apertus",
@@ -1239,6 +1244,16 @@ func TestGetRendererName(t *testing.T) {
 			name:       "apertus model",
 			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
 			want:       "apertus",
+		},
+		{
+			name:       "apertus 1.5 model",
+			configJSON: `{"architectures": ["Apertus1p5ForConditionalGeneration"], "model_type": "apertus_1_5"}`,
+			want:       "apertus1p5",
+		},
+		{
+			name:       "apertus 1.5 nested llm config",
+			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"apertus-1.5"}}`,
+			want:       "apertus1p5",
 		},
 		{
 			name:       "apertus nested llm config",
