@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -429,7 +430,7 @@ func TestInferSafetensorsCapabilitiesGemma4VisionRequiresTensors(t *testing.T) {
 	configJSON := `{
 		"architectures": ["Gemma4ForConditionalGeneration"],
 		"model_type": "gemma4",
-		"vision_config": {"hidden_size": 1024}
+		"vision_config": {"hidden_size": 1024, "num_hidden_layers": 2}
 	}`
 
 	tests := []struct {
@@ -448,12 +449,17 @@ func TestInferSafetensorsCapabilitiesGemma4VisionRequiresTensors(t *testing.T) {
 			want:    []string{"completion"},
 		},
 		{
-			name: "vision tower and projector",
+			name: "partial vision tower and projector",
 			tensors: []string{
 				"model.vision_tower.patch_embedder.input_proj.weight",
 				"model.embed_vision.embedding_projection.weight",
 			},
-			want: []string{"completion", "vision"},
+			want: []string{"completion"},
+		},
+		{
+			name:    "complete vision tower and projector",
+			tensors: gemma4ClientVisionTensorNames(2),
+			want:    []string{"completion", "vision"},
 		},
 	}
 
@@ -472,6 +478,32 @@ func TestInferSafetensorsCapabilitiesGemma4VisionRequiresTensors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func gemma4ClientVisionTensorNames(layers int) []string {
+	names := []string{
+		"model.vision_tower.patch_embedder.input_proj.weight",
+		"model.vision_tower.patch_embedder.position_embedding_table",
+		"model.embed_vision.embedding_projection.weight",
+	}
+	for i := range layers {
+		layer := fmt.Sprintf("model.vision_tower.encoder.layers.%d", i)
+		for _, projection := range []string{
+			".self_attn.q_proj.linear.weight", ".self_attn.k_proj.linear.weight",
+			".self_attn.v_proj.linear.weight", ".self_attn.o_proj.linear.weight",
+			".mlp.gate_proj.linear.weight", ".mlp.up_proj.linear.weight", ".mlp.down_proj.linear.weight",
+		} {
+			names = append(names, layer+projection)
+		}
+		for _, norm := range []string{
+			".self_attn.q_norm.weight", ".self_attn.k_norm.weight",
+			".input_layernorm.weight", ".post_attention_layernorm.weight",
+			".pre_feedforward_layernorm.weight", ".post_feedforward_layernorm.weight",
+		} {
+			names = append(names, layer+norm)
+		}
+	}
+	return names
 }
 
 func writeClientSafetensors(t *testing.T, dir string, names ...string) {
