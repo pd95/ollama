@@ -31,7 +31,22 @@ type mediaPrepareModel struct {
 	gotMedia  []llm.MediaData
 }
 
-func (m *mediaPrepareModel) PrepareMediaPrompt(prompt string, media []llm.MediaData) (*batch.PreparedInput, error) {
+type mediaPrefillModel struct {
+	mediaRejectModel
+	forwards int
+	t        *testing.T
+}
+
+func (m *mediaPrefillModel) Forward(b *batch.Batch, _ []cache.Cache) *mlx.Array {
+	m.t.Helper()
+	if b.InputEmbeddings == nil || !b.InputEmbeddings.Valid() {
+		m.t.Fatal("prefill input embeddings are invalid")
+	}
+	m.forwards++
+	return b.InputEmbeddings
+}
+
+func (m *mediaPrepareModel) PrepareMediaPrompt(_ context.Context, prompt string, media []llm.MediaData) (*batch.PreparedInput, error) {
 	m.gotPrompt = prompt
 	m.gotMedia = media
 	return &batch.PreparedInput{
@@ -146,6 +161,34 @@ func TestClientCompletionForwardsMedia(t *testing.T) {
 	}
 	if got.Media[0].ID != 7 || string(got.Media[0].Data) != "image-bytes" {
 		t.Fatalf("Media[0] = %#v, want id 7 image bytes", got.Media[0])
+	}
+}
+
+func TestMediaInputEmbeddingsSurviveChunkedPrefill(t *testing.T) {
+	skipIfNoMLX(t)
+
+	const tokens = 2050
+	values := make([]float32, tokens)
+	embeddings := mlx.FromValues(values, 1, tokens, 1)
+	release := pinInputEmbeddings(embeddings)
+	defer func() {
+		release()
+		mlx.Sweep()
+	}()
+
+	model := &mediaPrefillModel{t: t}
+	inputIDs := make([]int32, tokens)
+	runner := Runner{Model: model}
+	session := &cacheSession{
+		inputs:          inputIDs,
+		remaining:       inputIDs,
+		inputEmbeddings: embeddings,
+	}
+	if _, _, _, err := runner.prefill(context.Background(), session, nil); err != nil {
+		t.Fatal(err)
+	}
+	if model.forwards != 2 {
+		t.Fatalf("forward calls = %d, want 2 prefill chunks", model.forwards)
 	}
 }
 

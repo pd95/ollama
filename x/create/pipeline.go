@@ -20,13 +20,13 @@ func Create(modelName, modelDir, quantize string, store BlobStore, writeManifest
 	if err != nil {
 		return fmt.Errorf("read model: %w", err)
 	}
-	class, err := Classify(inv, quantize)
-	if err != nil {
-		return err
-	}
 	policy, err := newTensorImportTransform(inv)
 	if err != nil {
 		return fmt.Errorf("build quantization policy for %q: %w", inv.Config.Architecture(), err)
+	}
+	class, err := Classify(filterInventory(inv, policy), quantize)
+	if err != nil {
+		return err
 	}
 	specs, err := Plan(inv, class, policy)
 	if err != nil {

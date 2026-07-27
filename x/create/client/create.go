@@ -26,6 +26,7 @@ import (
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
 	imagemanifest "github.com/ollama/ollama/x/imagegen/manifest"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/quant"
 )
 
@@ -548,18 +549,15 @@ func gemma4ModelDirHasVisionTensors(modelDir string) bool {
 	if err != nil {
 		return false
 	}
-
-	return hasAnySourceTensor(inv, "vision_tower.patch_embedder.input_proj.weight", "model.vision_tower.patch_embedder.input_proj.weight") &&
-		hasAnySourceTensor(inv, "embed_vision.embedding_projection.weight", "model.embed_vision.embedding_projection.weight")
-}
-
-func hasAnySourceTensor(inv create.Inventory, names ...string) bool {
-	for _, name := range names {
-		if inv.Has(name) {
-			return true
-		}
+	var cfg gemma4metadata.ConfigFile
+	if err := json.Unmarshal(inv.RawConfig, &cfg); err != nil {
+		return false
 	}
-	return false
+	names := make([]string, 0, len(inv.Tensors))
+	for name := range inv.Tensors {
+		names = append(names, name)
+	}
+	return gemma4metadata.ValidateVisionTensors(cfg, names) == nil
 }
 
 // readChatTemplate returns the model's chat template, preferring the
