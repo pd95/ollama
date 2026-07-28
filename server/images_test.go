@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -582,6 +583,7 @@ func TestModelCapabilities(t *testing.T) {
 				},
 				TensorLayerNames:  gemma4AudioTensorNames(1),
 				Gemma4AudioConfig: gemma4AudioConfig(1),
+				Gemma4AudioReady:  true,
 				Template:          chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityAudio},
@@ -682,6 +684,47 @@ func TestGemma4SafetensorsVisionCapabilityRequiresTensorLayers(t *testing.T) {
 	}
 }
 
+func TestGemma4SafetensorsAudioCapabilityRequiresRuntimeMetadataAndTensors(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	cfg := model.ConfigV2{
+		ModelFormat:  "safetensors",
+		Renderer:     gemma4RendererSmall,
+		Capabilities: []string{"completion", "audio"},
+	}
+
+	complete := gemma4AudioManifestLayers(t, true)
+	createSafetensorsTestModel(t, "gemma4-audio-complete", cfg, complete)
+	m, err := GetModel("gemma4-audio-complete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(m.Capabilities(), model.CapabilityAudio) {
+		t.Fatalf("complete audio capabilities = %v, want audio", m.Capabilities())
+	}
+
+	withoutProcessor := slices.DeleteFunc(slices.Clone(complete), func(layer manifest.Layer) bool {
+		return layer.Name == "processor_config.json"
+	})
+	createSafetensorsTestModel(t, "gemma4-audio-no-processor", cfg, withoutProcessor)
+	m, err = GetModel("gemma4-audio-no-processor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(m.Capabilities(), model.CapabilityAudio) {
+		t.Fatalf("missing-processor capabilities = %v, did not expect audio", m.Capabilities())
+	}
+
+	partial := gemma4AudioManifestLayers(t, false)
+	createSafetensorsTestModel(t, "gemma4-audio-partial", cfg, partial)
+	m, err = GetModel("gemma4-audio-partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(m.Capabilities(), model.CapabilityAudio) {
+		t.Fatalf("partial audio capabilities = %v, did not expect audio", m.Capabilities())
+	}
+}
+
 func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
 	t.Helper()
 
@@ -739,7 +782,8 @@ func gemma4VisionTensorNames(layers int) []string {
 
 func gemma4AudioConfig(layers int) *gemma4metadata.ConfigFile {
 	return &gemma4metadata.ConfigFile{
-		TextConfig: gemma4metadata.TextConfig{HiddenSize: 5},
+		TextConfig:   gemma4metadata.TextConfig{HiddenSize: 5, VocabSize: 32},
+		AudioTokenID: 7,
 		AudioConfig: &gemma4metadata.AudioConfig{
 			AttentionChunkSize: 2, AttentionContextLeft: 2,
 			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
@@ -747,6 +791,36 @@ func gemma4AudioConfig(layers int) *gemma4metadata.ConfigFile {
 			SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
 		},
 	}
+}
+
+func gemma4AudioManifestLayers(t *testing.T, complete bool) []manifest.Layer {
+	t.Helper()
+	data := []byte("fake-gemma4-audio-tensor")
+	digest := createTestBlob(t, data)
+	names := gemma4AudioTensorNames(1)
+	if !complete {
+		names = slices.DeleteFunc(names, func(name string) bool {
+			return name == "model.audio_tower.layers.0.self_attn.q_proj.input_max"
+		})
+	}
+	layers := make([]manifest.Layer, 0, len(names)+3)
+	for _, name := range names {
+		layers = append(layers, manifest.Layer{MediaType: manifest.MediaTypeImageTensor, Digest: digest, Size: int64(len(data)), Name: name})
+	}
+	config, err := json.Marshal(gemma4AudioConfig(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configs := map[string][]byte{
+		"config.json":           config,
+		"processor_config.json": []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`),
+		"tokenizer_config.json": []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`),
+	}
+	for name, contents := range configs {
+		configDigest := createTestBlob(t, contents)
+		layers = append(layers, manifest.Layer{MediaType: "application/vnd.ollama.image.json", Digest: configDigest, Size: int64(len(contents)), Name: name})
+	}
+	return layers
 }
 
 func gemma4AudioTensorNames(layers int) []string {

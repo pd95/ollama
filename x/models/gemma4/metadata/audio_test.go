@@ -7,7 +7,8 @@ import (
 
 func releasedAudioConfig(layers int) ConfigFile {
 	return ConfigFile{
-		TextConfig: TextConfig{HiddenSize: 2560},
+		TextConfig:   TextConfig{HiddenSize: 2560, VocabSize: 262144},
+		AudioTokenID: 258881,
 		AudioConfig: &AudioConfig{
 			AttentionChunkSize: 12, AttentionContextLeft: 13,
 			ConvKernelSize: 5, HiddenSize: 1024, NumAttentionHeads: 8,
@@ -64,6 +65,9 @@ func TestValidateAudioConfig(t *testing.T) {
 		{"conv channels", func(cfg *ConfigFile) { cfg.AudioConfig.SubsamplingConvChannels = []int{128} }},
 		{"even kernel", func(cfg *ConfigFile) { cfg.AudioConfig.ConvKernelSize = 4 }},
 		{"text hidden", func(cfg *ConfigFile) { cfg.TextConfig.HiddenSize = 0 }},
+		{"excessive layers", func(cfg *ConfigFile) { cfg.AudioConfig.NumHiddenLayers = maxAudioLayers + 1 }},
+		{"excessive hidden", func(cfg *ConfigFile) { cfg.AudioConfig.HiddenSize = maxAudioHiddenSize + 1 }},
+		{"excessive channels", func(cfg *ConfigFile) { cfg.AudioConfig.SubsamplingConvChannels[0] = maxAudioConvChannels + 1 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -71,6 +75,45 @@ func TestValidateAudioConfig(t *testing.T) {
 			tt.edit(&cfg)
 			if err := ValidateAudioTensors(cfg, nil); err == nil {
 				t.Fatal("ValidateAudioTensors() error = nil")
+			}
+		})
+	}
+}
+
+func TestValidateAudioRuntimeMetadata(t *testing.T) {
+	processor := []byte(`{
+		"audio_seq_length":750,
+		"feature_extractor":{
+			"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,
+			"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,
+			"padding_side":"right","sampling_rate":16000
+		}
+	}`)
+	tokens := []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`)
+	cfg := releasedAudioConfig(12)
+	if err := ValidateAudioRuntimeMetadata(cfg, processor, tokens); err != nil {
+		t.Fatalf("ValidateAudioRuntimeMetadata() error = %v", err)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		processor []byte
+		tokens    []byte
+		edit      func(*ConfigFile)
+	}{
+		{"missing processor", nil, tokens, nil},
+		{"unsupported processor", []byte(`{"audio_seq_length":749}`), tokens, nil},
+		{"missing tokens", processor, nil, nil},
+		{"incomplete tokens", processor, []byte(`{"audio_token":"<|audio|>"}`), nil},
+		{"invalid token id", processor, tokens, func(cfg *ConfigFile) { cfg.AudioTokenID = cfg.TextConfig.VocabSize }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := releasedAudioConfig(12)
+			if tt.edit != nil {
+				tt.edit(&candidate)
+			}
+			if err := ValidateAudioRuntimeMetadata(candidate, tt.processor, tt.tokens); err == nil {
+				t.Fatal("ValidateAudioRuntimeMetadata() error = nil")
 			}
 		})
 	}

@@ -400,7 +400,7 @@ func buildModelListSummary(name model.Name, mf *manifest.Manifest) (modelListSum
 				return c == model.CapabilityVision
 			})
 		}
-		if configErr != nil || !hasGemma4AudioTensorLayers(gemma4cfg, mf.Layers) {
+		if configErr != nil || !hasGemma4AudioRuntimeMetadata(gemma4cfg, mf) || !hasGemma4AudioTensorLayers(gemma4cfg, mf.Layers) {
 			summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
 				return c == model.CapabilityAudio
 			})
