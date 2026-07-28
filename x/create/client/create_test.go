@@ -596,6 +596,22 @@ func TestInferSafetensorsCapabilitiesGemma4AudioRequiresCompleteTensors(t *testi
 		}
 	})
 
+	t.Run("float32 overflow", func(t *testing.T) {
+		dir := t.TempDir()
+		overflowConfig := []byte(strings.Replace(string(configJSON), `"gradient_clipping":10000000000`, `"gradient_clipping":1e39`, 1))
+		if string(overflowConfig) == string(configJSON) {
+			t.Fatal("failed to construct float32-overflow audio config")
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), overflowConfig, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeGemma4AudioRuntimeConfigs(t, dir)
+		writeClientSafetensorsWithShapes(t, dir, shapes)
+		if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion"}; !slices.Equal(got, want) {
+			t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+		}
+	})
+
 	t.Run("partial", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
