@@ -1,9 +1,10 @@
 package gemma4
 
-// The Gemma 4 audio encoder follows the Universal Speech Model Conformer used
-// by the released checkpoint. The MLX layout and execution structure are
-// adapted from MLX-VLM's MIT-licensed implementation pinned in
-// docs/third-party/mlx-vlm.md and cross-checked against Transformers.
+// Gemma 4 E2B/E4B use a Universal Speech Model Conformer. The unified 12B
+// architecture instead projects raw 640-sample waveform blocks directly into
+// the language model. Both paths are adapted from the MIT-licensed MLX-VLM
+// implementation pinned in docs/third-party/mlx-vlm.md and cross-checked
+// against Transformers.
 
 import (
 	"encoding/json"
@@ -18,6 +19,9 @@ import (
 )
 
 type AudioConfig struct {
+	ModelType               string  `json:"model_type"`
+	AudioEmbedDim           int32   `json:"audio_embed_dim"`
+	AudioSamplesPerToken    int32   `json:"audio_samples_per_token"`
 	AttentionChunkSize      int32   `json:"attention_chunk_size"`
 	AttentionContextLeft    int32   `json:"attention_context_left"`
 	AttentionContextRight   int32   `json:"attention_context_right"`
@@ -46,6 +50,13 @@ func parseAudioConfig(configData []byte) (*AudioConfig, error) {
 		return nil, nil
 	}
 	cfg := wrapped.AudioConfig
+	if cfg.unified() {
+		if cfg.AudioEmbedDim != 640 || cfg.AudioSamplesPerToken != 640 || cfg.HiddenSize != 640 ||
+			cfg.OutputProjDims != 640 || cfg.RMSNormEps <= 0 {
+			return nil, errors.New("invalid Gemma4 unified audio configuration")
+		}
+		return cfg, nil
+	}
 	if cfg.HiddenSize <= 0 || cfg.NumHiddenLayers <= 0 || cfg.NumAttentionHeads <= 0 ||
 		cfg.HiddenSize%cfg.NumAttentionHeads != 0 || cfg.OutputProjDims <= 0 ||
 		cfg.AttentionChunkSize <= 0 || cfg.AttentionContextLeft <= 0 || cfg.AttentionContextRight < 0 ||
@@ -56,6 +67,10 @@ func parseAudioConfig(configData []byte) (*AudioConfig, error) {
 		return nil, errors.New("invalid Gemma4 audio configuration")
 	}
 	return cfg, nil
+}
+
+func (c *AudioConfig) unified() bool {
+	return c != nil && c.ModelType == "gemma4_unified_audio"
 }
 
 type audioConvBlock struct {
@@ -123,7 +138,9 @@ func audioMetadataConfig(cfg *AudioConfig, textHidden int32) gemma4metadata.Conf
 	return gemma4metadata.ConfigFile{
 		TextConfig: gemma4metadata.TextConfig{HiddenSize: int(textHidden)},
 		AudioConfig: &gemma4metadata.AudioConfig{
-			AttentionChunkSize: int(cfg.AttentionChunkSize), AttentionContextLeft: int(cfg.AttentionContextLeft),
+			ModelType: cfg.ModelType, AudioEmbedDim: int(cfg.AudioEmbedDim),
+			AudioSamplesPerToken: int(cfg.AudioSamplesPerToken),
+			AttentionChunkSize:   int(cfg.AttentionChunkSize), AttentionContextLeft: int(cfg.AttentionContextLeft),
 			AttentionContextRight: int(cfg.AttentionContextRight), AttentionInvalidLogit: cfg.AttentionInvalidLogit,
 			AttentionLogitCap: cfg.AttentionLogitCap, ConvKernelSize: int(cfg.ConvKernelSize),
 			GradientClipping: cfg.GradientClipping,
