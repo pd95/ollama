@@ -75,6 +75,7 @@ type Model struct {
 	ProjectorPaths     []string
 	TensorLayerNames   []string
 	Gemma4VisionConfig *gemma4metadata.ConfigFile `json:"-"`
+	Gemma4AudioConfig  *gemma4metadata.ConfigFile `json:"-"`
 	System             string
 	License            []string
 	Digest             string
@@ -478,7 +479,11 @@ func suppressGemma4SafetensorsVisionCapability(m *Model) bool {
 
 func suppressAudioCapability(m *Model, arch string) bool {
 	if isGemma4Renderer(m.Config.Renderer) && m.Config.ModelFormat == "safetensors" {
-		return true
+		if !isLocalGemma4SafetensorsConfig(m.Config) {
+			return true
+		}
+		return m.Gemma4AudioConfig == nil ||
+			gemma4metadata.ValidateAudioTensors(*m.Gemma4AudioConfig, m.TensorLayerNames) != nil
 	}
 
 	if arch == "nemotron_h_omni" ||
@@ -507,6 +512,17 @@ func hasGemma4VisionTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifes
 	}
 
 	return gemma4metadata.ValidateVisionTensors(cfg, names) == nil
+}
+
+func hasGemma4AudioTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifest.Layer) bool {
+	names := make([]string, 0, len(layers))
+	for _, layer := range layers {
+		if layer.MediaType == manifest.MediaTypeImageTensor {
+			names = append(names, layer.Name)
+		}
+	}
+
+	return gemma4metadata.ValidateAudioTensors(cfg, names) == nil
 }
 
 func projectorHasAudio(f *gguf.File) bool {
@@ -576,6 +592,9 @@ func (m *Model) CheckCapabilities(want ...model.Capability) error {
 
 	if slices.Contains(errs, errCapabilityVision) && suppressGemma4SafetensorsVisionCapability(m) {
 		return fmt.Errorf("%w. Recreate or pull the model so it includes Gemma 4 vision tensor layers", err)
+	}
+	if slices.Contains(errs, errCapabilityAudio) && isLocalGemma4SafetensorsConfig(m.Config) && suppressAudioCapability(m, "") {
+		return fmt.Errorf("%w. Recreate or pull the model so it includes Gemma 4 audio tensor layers", err)
 	}
 
 	return err
@@ -706,6 +725,7 @@ func GetModel(name string) (*Model, error) {
 		var cfg gemma4metadata.ConfigFile
 		if err := mf.ReadConfigJSON("config.json", &cfg); err == nil {
 			m.Gemma4VisionConfig = &cfg
+			m.Gemma4AudioConfig = &cfg
 		}
 	}
 
