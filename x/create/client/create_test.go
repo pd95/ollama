@@ -591,6 +591,51 @@ func TestInferSafetensorsCapabilitiesGemma4AudioRequiresCompleteTensors(t *testi
 	})
 }
 
+func TestInferSafetensorsCapabilitiesGemma4UnifiedAudio(t *testing.T) {
+	cfg := gemma4metadata.ConfigFile{
+		Architectures: []string{"Gemma4UnifiedForConditionalGeneration"},
+		ModelType:     "gemma4_unified",
+		TextConfig:    gemma4metadata.TextConfig{HiddenSize: 3840, VocabSize: 262144},
+		AudioTokenID:  258881,
+		AudioConfig: &gemma4metadata.AudioConfig{
+			ModelType: "gemma4_unified_audio", AudioEmbedDim: 640,
+			AudioSamplesPerToken: 640, HiddenSize: 640, OutputProjDims: 640, RMSNormEps: 1e-6,
+		},
+	}
+	configJSON, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes, err := gemma4metadata.RequiredAudioTensorShapes(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	processor := `{"audio_seq_length":750,"feature_extractor":{"audio_samples_per_token":640,"feature_extractor_type":"Gemma4UnifiedAudioFeatureExtractor","feature_size":640,"padding_side":"right","sampling_rate":16000}}`
+	tokens := `{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`
+	tokenizerData := `{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":258881,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`
+	for name, data := range map[string]string{"processor_config.json": processor, "tokenizer_config.json": tokens, "tokenizer.json": tokenizerData} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeClientSafetensorsWithShapes(t, dir, shapes)
+	if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion", "audio"}; !slices.Equal(got, want) {
+		t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+	}
+
+	writeClientSafetensorsWithShapes(t, dir, map[string][]int32{
+		"model.embed_audio.embedding_projection.weight": {3840, 639},
+	})
+	if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion"}; !slices.Equal(got, want) {
+		t.Fatalf("bad projector capabilities = %#v, want %#v", got, want)
+	}
+}
+
 func writeGemma4AudioRuntimeConfigs(t *testing.T, dir string) {
 	t.Helper()
 	processor := `{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`

@@ -2,6 +2,7 @@ package gemma4
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,6 +56,32 @@ func TestParseReleasedAudioConfig(t *testing.T) {
 	bad := strings.Replace(releasedGemma4AudioConfig, `"num_attention_heads": 8`, `"num_attention_heads": 7`, 1)
 	if _, err := parseAudioConfig([]byte(bad)); err == nil {
 		t.Fatal("non-divisible head count: error = nil")
+	}
+}
+
+func TestParseReleasedUnifiedAudioConfig(t *testing.T) {
+	cfg, err := parseAudioConfig([]byte(`{
+		"audio_config":{
+			"model_type":"gemma4_unified_audio",
+			"audio_embed_dim":640,"audio_samples_per_token":640,
+			"hidden_size":640,"output_proj_dims":640,"rms_norm_eps":0.000001
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.unified() || cfg.AudioSamplesPerToken != 640 || cfg.OutputProjDims != 640 {
+		t.Fatalf("unified audio config = %+v", cfg)
+	}
+
+	bad := *cfg
+	bad.AudioSamplesPerToken = 320
+	data, err := json.Marshal(map[string]any{"audio_config": bad})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseAudioConfig(data); err == nil {
+		t.Fatal("invalid unified audio config: error = nil")
 	}
 }
 
@@ -163,6 +190,33 @@ func TestPrepareAudioMediaEmbeddingsRejectsMissingWeights(t *testing.T) {
 	}
 	if err := m.PrepareMediaEmbeddings(prepared); err == nil || !strings.Contains(err.Error(), "audio weights are not loaded") {
 		t.Fatalf("PrepareMediaEmbeddings() error = %v", err)
+	}
+}
+
+func TestPrepareUnifiedAudioMediaEmbeddings(t *testing.T) {
+	skipIfNoMLX(t)
+	m := &Model{
+		TextConfig:  &TextConfig{EmbedScale: 1},
+		AudioConfig: &AudioConfig{ModelType: "gemma4_unified_audio"},
+		EmbedTokens: nn.NewEmbedding(mlx.FromValues([]float32{0, 0, 1, 1, 2, 2}, 3, 2)),
+		EmbedAudio: &MultimodalEmbedder{
+			Projection: nn.NewLinear(mlx.FromValues([]float32{1, 0, 0, 1}, 2, 2), nil),
+			Eps:        1e-6,
+		},
+	}
+	prepared := &batch.PreparedInput{
+		Tokens: []int32{0, 1, 2},
+		Payload: &gemma4MediaPayload{
+			Audio:      &gemma4AudioInput{Features: []float32{3, 4}, FeatureSize: 2, Frames: 1, SoftTokens: 1},
+			AudioStart: 1,
+			AudioEnd:   2,
+		},
+	}
+	if err := m.PrepareMediaEmbeddings(prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.InputEmbeddings == nil || prepared.InputEmbeddings.Dim(1) != 3 || prepared.InputEmbeddings.Dim(2) != 2 {
+		t.Fatalf("input embeddings = %#v", prepared.InputEmbeddings)
 	}
 }
 
