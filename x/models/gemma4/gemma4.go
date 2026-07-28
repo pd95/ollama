@@ -664,17 +664,14 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	audioConfig, err := parseAudioConfig(configData)
-	if err != nil {
-		return nil, err
+	audioConfig, audioConfigErr := parseAudioConfig(configData)
+	if audioConfigErr != nil {
+		audioConfig = nil
 	}
 	var audioProcessorConfig *AudioProcessorConfig
 	if audioConfig != nil {
 		if processorData, readErr := root.Manifest.ReadConfig("processor_config.json"); readErr == nil {
-			audioProcessorConfig, err = parseAudioProcessorConfig(processorData)
-			if err != nil {
-				return nil, err
-			}
+			audioProcessorConfig, _ = parseAudioProcessorConfig(processorData)
 		}
 	}
 
@@ -709,6 +706,11 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse tokenizer: %w", err)
 	}
+	if audioConfig != nil && audioProcessorConfig != nil &&
+		!validGemma4AudioTokenizer(tok, mediaTokens, cfg.AudioTokenIDValue) {
+		audioConfig = nil
+		audioProcessorConfig = nil
+	}
 
 	m := &Model{
 		Layers:               make([]*DecoderLayer, cfg.NumHiddenLayers),
@@ -735,6 +737,13 @@ func newModel(root *model.Root) (base.Model, error) {
 	}
 
 	return m, nil
+}
+
+func validGemma4AudioTokenizer(tok *tokenizer.Tokenizer, tokens gemma4MediaTokens, audioTokenID int32) bool {
+	boa := tok.Encode(tokens.BOA, false)
+	audio := tok.Encode(tokens.Audio, false)
+	eoa := tok.Encode(tokens.EOA, false)
+	return len(boa) == 1 && len(audio) == 1 && len(eoa) == 1 && audio[0] == audioTokenID
 }
 
 // LoadWeights receives all tensors loaded from the manifest and assigns them
