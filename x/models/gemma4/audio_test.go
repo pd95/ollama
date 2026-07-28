@@ -167,7 +167,7 @@ func TestPrepareAudioMediaEmbeddingsRejectsMissingWeights(t *testing.T) {
 }
 
 func TestNewModelDisablesMalformedAudioMetadata(t *testing.T) {
-	config := []byte(`{
+	config := `{
 		"architectures":["Gemma4ForConditionalGeneration"],
 		"audio_token_id":1,
 		"text_config":{
@@ -193,12 +193,12 @@ func TestNewModelDisablesMalformedAudioMetadata(t *testing.T) {
 			"num_attention_heads":8,
 			"num_hidden_layers":12,
 			"output_proj_dims":1536,
-			"residual_weight":0,
+			"residual_weight":0.5,
 			"rms_norm_eps":0.000001,
 			"subsampling_conv_channels":[128,32],
 			"use_clipped_linears":true
 		}
-	}`)
+	}`
 	tokenizerData := []byte(`{
 		"model":{"type":"BPE","vocab":{"<|audio>":0,"<|audio|>":1,"<audio|>":2},"merges":[]},
 		"added_tokens":[
@@ -207,27 +207,45 @@ func TestNewModelDisablesMalformedAudioMetadata(t *testing.T) {
 			{"id":2,"content":"<audio|>","special":true}
 		]
 	}`)
-	root := testGemma4Root(t, config, tokenizerData, map[string][]byte{
-		"processor_config.json": []byte(`{
-			"feature_size":128,"sampling_rate":16000,"padding_value":0,
-			"return_attention_mask":true,"num_mel_bins":128,"n_fft":512,
-			"hop_length":160,"win_length":400,"max_length_seconds":30
-		}`),
-		"tokenizer_config.json": []byte(`{
-			"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"
-		}`),
-	})
+	for _, tt := range []struct {
+		name      string
+		config    string
+		tokenizer []byte
+	}{
+		{"invalid residual", strings.Replace(config, `"residual_weight":0.5`, `"residual_weight":0`, 1), tokenizerData},
+		{"float32 overflow", strings.Replace(config, `"gradient_clipping":10000000000.0`, `"gradient_clipping":1e39`, 1), tokenizerData},
+		{"vocab token is not singleton encoding", config, []byte(`{
+			"model":{"type":"BPE","vocab":{"<|audio>":0,"<|audio|>":1,"<audio|>":2},"merges":[]},
+			"added_tokens":[]
+		}`)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := testGemma4Root(t, []byte(tt.config), tt.tokenizer, map[string][]byte{
+				"processor_config.json": []byte(`{
+					"audio_seq_length":750,
+					"feature_extractor":{
+						"feature_size":128,"fft_length":512,"frame_length":320,
+						"hop_length":160,"input_scale_factor":1,"max_frequency":8000,
+						"mel_floor":0.001,"padding_side":"right","sampling_rate":16000
+					}
+				}`),
+				"tokenizer_config.json": []byte(`{
+					"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"
+				}`),
+			})
 
-	loaded, err := newModel(root)
-	if err != nil {
-		t.Fatalf("newModel() error = %v", err)
-	}
-	m := loaded.(*Model)
-	if m.AudioConfig != nil || m.AudioProcessorConfig != nil {
-		t.Fatalf("audio runtime = (%+v, %+v), want disabled", m.AudioConfig, m.AudioProcessorConfig)
-	}
-	if m.TextConfig == nil || m.Tokenizer() == nil {
-		t.Fatal("text runtime was not preserved")
+			loaded, err := newModel(root)
+			if err != nil {
+				t.Fatalf("newModel() error = %v", err)
+			}
+			m := loaded.(*Model)
+			if m.AudioConfig != nil || m.AudioProcessorConfig != nil {
+				t.Fatalf("audio runtime = (%+v, %+v), want disabled", m.AudioConfig, m.AudioProcessorConfig)
+			}
+			if m.TextConfig == nil || m.Tokenizer() == nil {
+				t.Fatal("text runtime was not preserved")
+			}
+		})
 	}
 }
 
