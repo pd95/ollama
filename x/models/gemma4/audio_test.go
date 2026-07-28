@@ -1,9 +1,14 @@
 package gemma4
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ollama/ollama/x/imagegen/manifest"
+	mlxmodel "github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
 )
 
@@ -140,4 +145,105 @@ func TestPrepareAudioMediaRejectsMissingWeights(t *testing.T) {
 
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func TestNewModelDisablesMalformedAudioMetadata(t *testing.T) {
+	config := []byte(`{
+		"architectures":["Gemma4ForConditionalGeneration"],
+		"audio_token_id":1,
+		"text_config":{
+			"hidden_size":8,
+			"num_hidden_layers":1,
+			"intermediate_size":16,
+			"num_attention_heads":1,
+			"num_key_value_heads":1,
+			"head_dim":8,
+			"global_head_dim":8,
+			"vocab_size":3,
+			"rms_norm_eps":0.000001
+		},
+		"audio_config":{
+			"attention_chunk_size":12,
+			"attention_context_left":13,
+			"attention_context_right":0,
+			"attention_invalid_logits_value":-1000000000.0,
+			"attention_logit_cap":50.0,
+			"conv_kernel_size":5,
+			"gradient_clipping":10000000000.0,
+			"hidden_size":1024,
+			"num_attention_heads":8,
+			"num_hidden_layers":12,
+			"output_proj_dims":1536,
+			"residual_weight":0,
+			"rms_norm_eps":0.000001,
+			"subsampling_conv_channels":[128,32],
+			"use_clipped_linears":true
+		}
+	}`)
+	tokenizerData := []byte(`{
+		"model":{"type":"BPE","vocab":{"<|audio>":0,"<|audio|>":1,"<audio|>":2},"merges":[]},
+		"added_tokens":[
+			{"id":0,"content":"<|audio>","special":true},
+			{"id":1,"content":"<|audio|>","special":true},
+			{"id":2,"content":"<audio|>","special":true}
+		]
+	}`)
+	root := testGemma4Root(t, config, tokenizerData, map[string][]byte{
+		"processor_config.json": []byte(`{
+			"feature_size":128,"sampling_rate":16000,"padding_value":0,
+			"return_attention_mask":true,"num_mel_bins":128,"n_fft":512,
+			"hop_length":160,"win_length":400,"max_length_seconds":30
+		}`),
+		"tokenizer_config.json": []byte(`{
+			"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"
+		}`),
+	})
+
+	loaded, err := newModel(root)
+	if err != nil {
+		t.Fatalf("newModel() error = %v", err)
+	}
+	m := loaded.(*Model)
+	if m.AudioConfig != nil || m.AudioProcessorConfig != nil {
+		t.Fatalf("audio runtime = (%+v, %+v), want disabled", m.AudioConfig, m.AudioProcessorConfig)
+	}
+	if m.TextConfig == nil || m.Tokenizer() == nil {
+		t.Fatal("text runtime was not preserved")
+	}
+}
+
+func testGemma4Root(t *testing.T, configData, tokenizerData []byte, extra map[string][]byte) *mlxmodel.Root {
+	t.Helper()
+
+	blobDir := filepath.Join(t.TempDir(), "blobs")
+	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	layers := make([]manifest.ManifestLayer, 0, len(extra)+2)
+	writeConfig := func(name string, data []byte) {
+		digest := fmt.Sprintf("sha256:config-%d", len(layers))
+		path := filepath.Join(blobDir, strings.Replace(digest, ":", "-", 1))
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		layers = append(layers, manifest.ManifestLayer{
+			MediaType: "application/vnd.ollama.image.json",
+			Digest:    digest,
+			Name:      name,
+		})
+	}
+	writeConfig("config.json", configData)
+	writeConfig("tokenizer.json", tokenizerData)
+	for name, data := range extra {
+		writeConfig(name, data)
+	}
+
+	return &mlxmodel.Root{Manifest: &manifest.ModelManifest{
+		Manifest: &manifest.Manifest{
+			SchemaVersion: 2,
+			MediaType:     "application/vnd.ollama.image.model",
+			Layers:        layers,
+		},
+		BlobDir: blobDir,
+	}}
 }
