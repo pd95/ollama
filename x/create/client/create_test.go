@@ -14,6 +14,7 @@ import (
 	"github.com/ollama/ollama/parser"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/safetensors"
 )
 
@@ -432,7 +433,7 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 				"vision_config": {"hidden_size": 1024},
 				"audio_config": {"num_mel_bins": 128}
 			}`,
-			want: []string{"completion", "audio"},
+			want: []string{"completion"},
 		},
 		{
 			name: "model with audio but no vision",
@@ -556,6 +557,51 @@ func TestInferSafetensorsCapabilitiesGemma4UnifiedVision(t *testing.T) {
 	if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion", "vision"}; !slices.Equal(got, want) {
 		t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
 	}
+}
+
+func TestInferSafetensorsCapabilitiesGemma4AudioRequiresCompleteTensors(t *testing.T) {
+	cfg := gemma4metadata.ConfigFile{
+		Architectures: []string{"Gemma4ForConditionalGeneration"},
+		ModelType:     "gemma4",
+		TextConfig:    gemma4metadata.TextConfig{HiddenSize: 5},
+		AudioConfig: &gemma4metadata.AudioConfig{
+			AttentionChunkSize: 2, AttentionContextLeft: 2,
+			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
+			NumHiddenLayers: 1, OutputProjDims: 3,
+			SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
+		},
+	}
+	configJSON, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes, err := gemma4metadata.RequiredAudioTensorShapes(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("complete", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeClientSafetensorsWithShapes(t, dir, shapes)
+		if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion", "audio"}; !slices.Equal(got, want) {
+			t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("partial", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		delete(shapes, "model.audio_tower.layers.0.self_attn.q_proj.input_max")
+		writeClientSafetensorsWithShapes(t, dir, shapes)
+		if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion"}; !slices.Equal(got, want) {
+			t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+		}
+	})
 }
 
 func gemma4ClientVisionTensorNames(layers int) []string {

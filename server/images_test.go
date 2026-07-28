@@ -572,6 +572,20 @@ func TestModelCapabilities(t *testing.T) {
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
+		{
+			name: "gemma4 safetensors exposes complete audio",
+			model: Model{
+				Config: model.ConfigV2{
+					ModelFormat:  "safetensors",
+					Renderer:     gemma4RendererSmall,
+					Capabilities: []string{"audio"},
+				},
+				TensorLayerNames:  gemma4AudioTensorNames(1),
+				Gemma4AudioConfig: gemma4AudioConfig(1),
+				Template:          chatTemplate,
+			},
+			expectedCaps: []model.Capability{model.CapabilityAudio},
+		},
 	}
 
 	// compare two slices of model.Capability regardless of order
@@ -719,6 +733,30 @@ func gemma4VisionTensorNames(layers int) []string {
 		} {
 			names = append(names, layer+norm)
 		}
+	}
+	return names
+}
+
+func gemma4AudioConfig(layers int) *gemma4metadata.ConfigFile {
+	return &gemma4metadata.ConfigFile{
+		TextConfig: gemma4metadata.TextConfig{HiddenSize: 5},
+		AudioConfig: &gemma4metadata.AudioConfig{
+			AttentionChunkSize: 2, AttentionContextLeft: 2,
+			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
+			NumHiddenLayers: layers, OutputProjDims: 3,
+			SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
+		},
+	}
+}
+
+func gemma4AudioTensorNames(layers int) []string {
+	shapes, err := gemma4metadata.RequiredAudioTensorShapes(*gemma4AudioConfig(layers))
+	if err != nil {
+		panic(err)
+	}
+	names := make([]string, 0, len(shapes))
+	for name := range shapes {
+		names = append(names, name)
 	}
 	return names
 }
