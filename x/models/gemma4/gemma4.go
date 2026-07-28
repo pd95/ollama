@@ -798,15 +798,17 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		m.EmbedVision = embedVision
 	}
 	if m.AudioConfig != nil && m.AudioProcessorConfig != nil && hasCompleteGemma4AudioWeights(tensors, m.AudioConfig, m.HiddenSize) {
-		audio, err := loadAudioModel(tensors, m.AudioConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
-		if err != nil {
-			return err
+		if !m.AudioConfig.unified() {
+			audio, err := loadAudioModel(tensors, m.AudioConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+			if err != nil {
+				return err
+			}
+			m.Audio = audio
 		}
 		embedAudio, err := loadMultimodalEmbedder(tensors, "embed_audio", m.AudioConfig.RMSNormEps, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 		if err != nil {
 			return err
 		}
-		m.Audio = audio
 		m.EmbedAudio = embedAudio
 	}
 

@@ -34,6 +34,59 @@ func TestParseReleasedAudioProcessorConfig(t *testing.T) {
 	}
 }
 
+func TestParseReleasedUnifiedAudioProcessorConfig(t *testing.T) {
+	data := []byte(`{
+		"audio_seq_length":750,
+		"feature_extractor":{
+			"audio_samples_per_token":640,
+			"feature_extractor_type":"Gemma4UnifiedAudioFeatureExtractor",
+			"feature_size":640,"padding_side":"right","padding_value":0,
+			"return_attention_mask":true,"sampling_rate":16000
+		}
+	}`)
+	cfg, err := parseAudioProcessorConfig(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FeatureExtractor.AudioSamplesPerToken != 640 || cfg.FeatureExtractor.FeatureSize != 640 {
+		t.Fatalf("processor config = %#v", cfg)
+	}
+
+	bad := bytes.Replace(data, []byte(`"audio_samples_per_token":640`), []byte(`"audio_samples_per_token":320`), 1)
+	if _, err := parseAudioProcessorConfig(bad); err == nil {
+		t.Fatal("invalid unified processor: error = nil")
+	}
+}
+
+func TestPreprocessUnifiedAudioFrames(t *testing.T) {
+	data := []byte(`{
+		"audio_seq_length":750,
+		"feature_extractor":{
+			"audio_samples_per_token":640,
+			"feature_extractor_type":"Gemma4UnifiedAudioFeatureExtractor",
+			"feature_size":640,"padding_side":"right","sampling_rate":16000
+		}
+	}`)
+	cfg, err := parseAudioProcessorConfig(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := make([][]float64, 641)
+	for i := range frames {
+		frames[i] = []float64{0.25}
+	}
+	input, err := preprocessGemma4Audio(context.Background(), makeTestWAV(t, 1, 16, 16000, frames), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.SoftTokens != 2 || input.Frames != 2 || input.FeatureSize != 640 || len(input.Features) != 1280 {
+		t.Fatalf("unified input = %+v, feature count %d", input, len(input.Features))
+	}
+	if input.Features[640] != 0.25 || input.Features[641] != 0 {
+		t.Fatalf("second frame values = %v, %v; want 0.25, 0", input.Features[640], input.Features[641])
+	}
+}
+
 func TestGemma4LogMelReference(t *testing.T) {
 	cfg := defaultAudioProcessorConfig()
 	samples := make([]float32, 4000)
