@@ -180,6 +180,83 @@ func TestGemma4AudioInputFailures(t *testing.T) {
 	}
 }
 
+func TestGemma4WAVValidationLimits(t *testing.T) {
+	if _, err := decodeGemma4WAV(context.Background(), make([]byte, maxGemma4AudioBytes+1), 16000); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("oversized WAV error = %v", err)
+	}
+
+	tooManyChannels := makeTestWAV(t, 1, 16, 16000, [][]float64{make([]float64, maxGemma4AudioChannels+1)})
+	if _, err := decodeGemma4WAV(context.Background(), tooManyChannels, 16000); err == nil || !strings.Contains(err.Error(), "channel count") {
+		t.Fatalf("channel-limit error = %v", err)
+	}
+	badRate := makeTestWAV(t, 1, 16, minGemma4AudioSampleRate-1, [][]float64{{0}})
+	if _, err := decodeGemma4WAV(context.Background(), badRate, 16000); err == nil || !strings.Contains(err.Error(), "sample rate") {
+		t.Fatalf("sample-rate error = %v", err)
+	}
+	badAlignment := makeTestWAV(t, 1, 16, 16000, [][]float64{{0}})
+	binary.LittleEndian.PutUint16(badAlignment[32:34], 1)
+	if _, err := decodeGemma4WAV(context.Background(), badAlignment, 16000); err == nil || !strings.Contains(err.Error(), "block alignment") {
+		t.Fatalf("block-alignment error = %v", err)
+	}
+	nonFinite := makeTestWAV(t, 3, 32, 16000, [][]float64{{math.NaN()}})
+	if _, err := decodeGemma4WAV(context.Background(), nonFinite, 16000); err == nil || !strings.Contains(err.Error(), "non-finite") {
+		t.Fatalf("non-finite error = %v", err)
+	}
+}
+
+func TestGemma4WAVExtensibleValidation(t *testing.T) {
+	pcmGUID := [16]byte{1, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71}
+	valid := makeTestExtensibleWAV(t, 16, pcmGUID)
+	if samples, err := decodeGemma4WAV(context.Background(), valid, 16000); err != nil || len(samples) != 400 {
+		t.Fatalf("valid extensible WAV = %d samples, %v", len(samples), err)
+	}
+
+	badGUID := pcmGUID
+	badGUID[15] ^= 1
+	if _, err := decodeGemma4WAV(context.Background(), makeTestExtensibleWAV(t, 16, badGUID), 16000); err == nil || !strings.Contains(err.Error(), "subformat") {
+		t.Fatalf("extensible GUID error = %v", err)
+	}
+	badSize := valid
+	binary.LittleEndian.PutUint16(badSize[36:38], 21)
+	if _, err := decodeGemma4WAV(context.Background(), badSize, 16000); err == nil || !strings.Contains(err.Error(), "fmt size") {
+		t.Fatalf("extensible size error = %v", err)
+	}
+	badBits := makeTestExtensibleWAV(t, 16, pcmGUID)
+	binary.LittleEndian.PutUint16(badBits[38:40], 12)
+	if _, err := decodeGemma4WAV(context.Background(), badBits, 16000); err == nil || !strings.Contains(err.Error(), "valid bits") {
+		t.Fatalf("extensible valid-bits error = %v", err)
+	}
+}
+
+func makeTestExtensibleWAV(t *testing.T, bits uint16, subformat [16]byte) []byte {
+	t.Helper()
+	frames := make([][]float64, 400)
+	for i := range frames {
+		frames[i] = []float64{0}
+	}
+	base := makeTestWAV(t, 1, bits, 16000, frames)
+	data := base[44:]
+	var out bytes.Buffer
+	out.WriteString("RIFF")
+	_ = binary.Write(&out, binary.LittleEndian, uint32(60+len(data)))
+	out.WriteString("WAVEfmt ")
+	_ = binary.Write(&out, binary.LittleEndian, uint32(40))
+	_ = binary.Write(&out, binary.LittleEndian, uint16(0xfffe))
+	_ = binary.Write(&out, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&out, binary.LittleEndian, uint32(16000))
+	_ = binary.Write(&out, binary.LittleEndian, uint32(16000*int(bits/8)))
+	_ = binary.Write(&out, binary.LittleEndian, bits/8)
+	_ = binary.Write(&out, binary.LittleEndian, bits)
+	_ = binary.Write(&out, binary.LittleEndian, uint16(22))
+	_ = binary.Write(&out, binary.LittleEndian, bits)
+	_ = binary.Write(&out, binary.LittleEndian, uint32(0))
+	out.Write(subformat[:])
+	out.WriteString("data")
+	_ = binary.Write(&out, binary.LittleEndian, uint32(len(data)))
+	out.Write(data)
+	return out.Bytes()
+}
+
 func makeTestWAV(t *testing.T, format, bits uint16, sampleRate uint32, frames [][]float64) []byte {
 	t.Helper()
 	channels := 1
