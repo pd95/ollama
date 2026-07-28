@@ -155,14 +155,15 @@ func TestPrepareAudioMediaPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload, ok := prepared.Payload.(*gemma4MediaPayload)
-	if !ok || payload.Audio == nil {
+	if !ok || len(payload.Items) != 1 || payload.Items[0].Audio == nil {
 		t.Fatalf("payload = %#v, want audio", prepared.Payload)
 	}
-	if got := payload.AudioEnd - payload.AudioStart; got != payload.Audio.SoftTokens {
-		t.Fatalf("audio span = %d, want %d", got, payload.Audio.SoftTokens)
+	item := payload.Items[0]
+	if got := item.Span.End - item.Span.Start; got != item.Audio.SoftTokens {
+		t.Fatalf("audio span = %d, want %d", got, item.Audio.SoftTokens)
 	}
 	for i, id := range prepared.PLEInputIDs {
-		if i >= payload.AudioStart && i < payload.AudioEnd {
+		if i >= item.Span.Start && i < item.Span.End {
 			if id != 0 {
 				t.Fatalf("PLEInputIDs[%d] = %d, want 0", i, id)
 			}
@@ -174,8 +175,15 @@ func TestPrepareAudioMediaPrompt(t *testing.T) {
 	if _, err := m.PrepareMediaPrompt(context.Background(), "missing", media); err == nil || !strings.Contains(err.Error(), "marker") {
 		t.Fatalf("missing marker error = %v", err)
 	}
-	if _, err := m.PrepareMediaPrompt(context.Background(), "[img-7]", append(media, media[0])); err == nil || !strings.Contains(err.Error(), "exactly one") {
-		t.Fatalf("multiple media error = %v", err)
+	second := media[0]
+	second.ID = 9
+	multiple, err := m.PrepareMediaPrompt(context.Background(), "[img-7][img-9]", append(media, second))
+	if err != nil {
+		t.Fatalf("multiple audio error = %v", err)
+	}
+	multiplePayload := multiple.Payload.(*gemma4MediaPayload)
+	if len(multiplePayload.Items) != 2 || multiplePayload.Items[0].Kind != llm.MediaKindAudio || multiplePayload.Items[1].Kind != llm.MediaKindAudio {
+		t.Fatalf("multiple audio payload = %#v", multiplePayload)
 	}
 }
 
@@ -188,12 +196,38 @@ func TestPrepareAudioMediaEmbeddingsRejectsMissingWeights(t *testing.T) {
 	prepared := &batch.PreparedInput{
 		Tokens: []int32{0, 1, 2},
 		Payload: &gemma4MediaPayload{
-			Audio:      &gemma4AudioInput{SoftTokens: 1},
-			AudioStart: 1,
-			AudioEnd:   2,
+			Items: []gemma4MediaItem{{
+				ID:    0,
+				Kind:  llm.MediaKindAudio,
+				Audio: &gemma4AudioInput{Features: make([]float32, 128), FeatureMask: []bool{true}, FeatureSize: 128, Frames: 1, SoftTokens: 1},
+				Span:  batch.TokenSpan{Start: 1, End: 2},
+			}},
 		},
 	}
-	if err := m.PrepareMediaEmbeddings(prepared); err == nil || !strings.Contains(err.Error(), "audio weights are not loaded") {
+	if err := m.PrepareMediaEmbeddings(context.Background(), prepared); err == nil || !strings.Contains(err.Error(), "audio weights are not loaded") {
+		t.Fatalf("PrepareMediaEmbeddings() error = %v", err)
+	}
+}
+
+func TestPrepareAudioMediaEmbeddingsRejectsMissingConfig(t *testing.T) {
+	skipIfNoMLX(t)
+	m := &Model{
+		TextConfig: &TextConfig{EmbedScale: 1},
+		EmbedTokens: nn.NewEmbedding(mlx.FromValues([]float32{
+			0, 0, 1, 1, 2, 2,
+		}, 3, 2)),
+		EmbedAudio: &MultimodalEmbedder{},
+	}
+	prepared := &batch.PreparedInput{
+		Tokens: []int32{0, 1, 2},
+		Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{{
+			ID:    0,
+			Kind:  llm.MediaKindAudio,
+			Audio: &gemma4AudioInput{Features: []float32{1}, FeatureMask: []bool{true}, FeatureSize: 1, Frames: 1, SoftTokens: 1},
+			Span:  batch.TokenSpan{Start: 1, End: 2},
+		}}},
+	}
+	if err := m.PrepareMediaEmbeddings(context.Background(), prepared); err == nil || !strings.Contains(err.Error(), "audio configuration") {
 		t.Fatalf("PrepareMediaEmbeddings() error = %v", err)
 	}
 }
@@ -212,17 +246,70 @@ func TestPrepareUnifiedAudioMediaEmbeddings(t *testing.T) {
 	prepared := &batch.PreparedInput{
 		Tokens: []int32{0, 1, 2},
 		Payload: &gemma4MediaPayload{
-			Audio:      &gemma4AudioInput{Features: []float32{3, 4}, FeatureSize: 2, Frames: 1, SoftTokens: 1},
-			AudioStart: 1,
-			AudioEnd:   2,
+			Items: []gemma4MediaItem{{
+				ID:    0,
+				Kind:  llm.MediaKindAudio,
+				Audio: &gemma4AudioInput{Features: []float32{3, 4}, FeatureMask: []bool{true}, FeatureSize: 2, Frames: 1, SoftTokens: 1},
+				Span:  batch.TokenSpan{Start: 1, End: 2},
+			}},
 		},
 	}
-	if err := m.PrepareMediaEmbeddings(prepared); err != nil {
+	if err := m.PrepareMediaEmbeddings(context.Background(), prepared); err != nil {
 		t.Fatal(err)
 	}
 	if prepared.InputEmbeddings == nil || prepared.InputEmbeddings.Dim(1) != 3 || prepared.InputEmbeddings.Dim(2) != 2 {
 		t.Fatalf("input embeddings = %#v", prepared.InputEmbeddings)
 	}
+}
+
+func TestPrepareMultipleUnifiedAudioMediaEmbeddings(t *testing.T) {
+	skipIfNoMLX(t)
+	m := &Model{
+		TextConfig:  &TextConfig{EmbedScale: 1},
+		AudioConfig: &AudioConfig{ModelType: "gemma4_unified_audio"},
+		EmbedTokens: nn.NewEmbedding(mlx.FromValues([]float32{
+			0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5,
+		}, 6, 2)),
+		EmbedAudio: &MultimodalEmbedder{
+			Projection: nn.NewLinear(mlx.FromValues([]float32{1, 0, 0, 1}, 2, 2), nil),
+			Eps:        1e-6,
+		},
+	}
+	prepared := &batch.PreparedInput{
+		Tokens: []int32{0, 1, 2, 3, 4, 5},
+		Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{
+			{
+				ID: 1, Kind: llm.MediaKindAudio,
+				Audio: &gemma4AudioInput{Features: []float32{3, 4}, FeatureMask: []bool{true}, FeatureSize: 2, Frames: 1, SoftTokens: 1},
+				Span:  batch.TokenSpan{Start: 1, End: 2},
+			},
+			{
+				ID: 0, Kind: llm.MediaKindAudio,
+				Audio: &gemma4AudioInput{Features: []float32{5, 12}, FeatureMask: []bool{true}, FeatureSize: 2, Frames: 1, SoftTokens: 1},
+				Span:  batch.TokenSpan{Start: 4, End: 5},
+			},
+		}},
+	}
+	if err := m.PrepareMediaEmbeddings(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	mlx.Eval(prepared.InputEmbeddings)
+	if prepared.InputEmbeddings == nil || prepared.InputEmbeddings.Dim(1) != 6 || prepared.InputEmbeddings.Dim(2) != 2 {
+		t.Fatalf("input embeddings = %#v", prepared.InputEmbeddings)
+	}
+	values := prepared.InputEmbeddings.Floats()
+	if values[2] == 1 && values[3] == 1 || values[8] == 4 && values[9] == 4 {
+		t.Fatalf("audio spans were not replaced: %v", values)
+	}
+	if values[2] == values[8] && values[3] == values[9] {
+		t.Fatalf("distinct audio inputs produced identical replacements: %v", values)
+	}
+	mlx.Pin(prepared.InputEmbeddings)
+	mlx.Sweep()
+	if !prepared.InputEmbeddings.Valid() {
+		t.Fatal("prepared input embeddings did not survive sequential media sweeps")
+	}
+	mlx.Unpin(prepared.InputEmbeddings)
 }
 
 func TestNewModelDisablesMalformedAudioMetadata(t *testing.T) {
