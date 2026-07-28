@@ -148,6 +148,35 @@ func TestModelListSummaryGemma4SafetensorsVisionRequiresTensorLayers(t *testing.
 	}
 }
 
+func TestModelListSummaryGemma4AudioRequiresRuntimeMetadataAndTensors(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	cfg := model.ConfigV2{ModelFormat: "safetensors", Renderer: gemma4RendererSmall, Capabilities: []string{"completion", "audio"}}
+	for _, tt := range []struct {
+		name      string
+		layers    []manifest.Layer
+		wantAudio bool
+	}{
+		{"complete", gemma4AudioManifestLayers(t, true), true},
+		{"partial", gemma4AudioManifestLayers(t, false), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			modelName := "list-gemma4-audio-" + tt.name
+			createSafetensorsTestModel(t, modelName, cfg, tt.layers)
+			mf, err := manifest.ParseNamedManifest(model.ParseName(modelName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			summary, err := buildModelListSummary(model.ParseName(modelName), mf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(summary.Capabilities, model.CapabilityAudio); got != tt.wantAudio {
+				t.Fatalf("audio capability = %v, want %v (%v)", got, tt.wantAudio, summary.Capabilities)
+			}
+		})
+	}
+}
+
 func TestModelListCacheMutationHooks(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	setTestHome(t, t.TempDir())

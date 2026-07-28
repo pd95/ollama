@@ -1,8 +1,15 @@
 package gemma4
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/ollama/ollama/llm"
+	"github.com/ollama/ollama/x/mlxrunner/batch"
+	"github.com/ollama/ollama/x/mlxrunner/mlx"
+	"github.com/ollama/ollama/x/models/nn"
+	"github.com/ollama/ollama/x/tokenizer"
 )
 
 const releasedGemma4AudioConfig = `{
@@ -89,4 +96,84 @@ func TestMediaTokenSpanAudio(t *testing.T) {
 	if err != nil || start != 1 || end != 3 {
 		t.Fatalf("mediaTokenSpan() = %d, %d, %v; want 1, 3, nil", start, end, err)
 	}
+}
+
+func TestPrepareAudioMediaPrompt(t *testing.T) {
+	tok := testGemma4AudioTokenizer(t)
+	cfg := defaultAudioProcessorConfig()
+	frames := make([][]float64, 16000)
+	for i := range frames {
+		frames[i] = []float64{0.25}
+	}
+	m := &Model{
+		TextConfig:           &TextConfig{AudioTokenIDValue: 1},
+		AudioConfig:          &AudioConfig{},
+		AudioProcessorConfig: &cfg,
+		tok:                  tok,
+		mediaTokens:          defaultGemma4MediaTokens(),
+	}
+	media := []llm.MediaData{{ID: 7, Kind: llm.MediaKindAudio, Data: makeTestWAV(t, 1, 16, 16000, frames)}}
+	prepared, err := m.PrepareMediaPrompt(context.Background(), "[img-7]", media)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := prepared.Payload.(*gemma4MediaPayload)
+	if !ok || payload.Audio == nil {
+		t.Fatalf("payload = %#v, want audio", prepared.Payload)
+	}
+	if got := payload.AudioEnd - payload.AudioStart; got != payload.Audio.SoftTokens {
+		t.Fatalf("audio span = %d, want %d", got, payload.Audio.SoftTokens)
+	}
+	for i, id := range prepared.PLEInputIDs {
+		if i >= payload.AudioStart && i < payload.AudioEnd {
+			if id != 0 {
+				t.Fatalf("PLEInputIDs[%d] = %d, want 0", i, id)
+			}
+		}
+	}
+	if len(prepared.BidirectionalSpans) != 0 {
+		t.Fatalf("audio bidirectional spans = %v, want none", prepared.BidirectionalSpans)
+	}
+	if _, err := m.PrepareMediaPrompt(context.Background(), "missing", media); err == nil || !strings.Contains(err.Error(), "marker") {
+		t.Fatalf("missing marker error = %v", err)
+	}
+	if _, err := m.PrepareMediaPrompt(context.Background(), "[img-7]", append(media, media[0])); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("multiple media error = %v", err)
+	}
+}
+
+func TestPrepareAudioMediaEmbeddingsRejectsMissingWeights(t *testing.T) {
+	skipIfNoMLX(t)
+	m := &Model{
+		TextConfig:  &TextConfig{EmbedScale: 1},
+		EmbedTokens: nn.NewEmbedding(mlx.FromValues([]float32{0, 0, 1, 1, 2, 2}, 3, 2)),
+	}
+	prepared := &batch.PreparedInput{
+		Tokens: []int32{0, 1, 2},
+		Payload: &gemma4MediaPayload{
+			Audio:      &gemma4AudioInput{SoftTokens: 1},
+			AudioStart: 1,
+			AudioEnd:   2,
+		},
+	}
+	if err := m.PrepareMediaEmbeddings(prepared); err == nil || !strings.Contains(err.Error(), "audio weights are not loaded") {
+		t.Fatalf("PrepareMediaEmbeddings() error = %v", err)
+	}
+}
+
+func testGemma4AudioTokenizer(t *testing.T) *tokenizer.Tokenizer {
+	t.Helper()
+	data := []byte(`{
+		"model":{"type":"BPE","vocab":{"<|audio>":0,"<|audio|>":1,"<audio|>":2},"merges":[]},
+		"added_tokens":[
+			{"id":0,"content":"<|audio>","special":true},
+			{"id":1,"content":"<|audio|>","special":true},
+			{"id":2,"content":"<audio|>","special":true}
+		]
+	}`)
+	tok, err := tokenizer.LoadFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
 }

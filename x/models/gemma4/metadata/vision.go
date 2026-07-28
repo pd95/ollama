@@ -18,10 +18,12 @@ type ConfigFile struct {
 	TextConfig    TextConfig    `json:"text_config"`
 	VisionConfig  *VisionConfig `json:"vision_config"`
 	AudioConfig   *AudioConfig  `json:"audio_config"`
+	AudioTokenID  int           `json:"audio_token_id"`
 }
 
 type TextConfig struct {
 	HiddenSize int `json:"hidden_size"`
+	VocabSize  int `json:"vocab_size"`
 }
 
 type VisionConfig struct {
