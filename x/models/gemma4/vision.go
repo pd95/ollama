@@ -33,6 +33,9 @@ const (
 	defaultGemma4BOIToken   = "<|image>"
 	defaultGemma4ImageToken = "<|image|>"
 	defaultGemma4EOIToken   = "<image|>"
+	defaultGemma4BOAToken   = "<|audio>"
+	defaultGemma4AudioToken = "<|audio|>"
+	defaultGemma4EOAToken   = "<audio|>"
 
 	maxGemma4ImageBytes     = 32 << 20
 	maxGemma4ImageDimension = 16_384
@@ -77,6 +80,9 @@ type gemma4MediaTokens struct {
 	BOI   string
 	Image string
 	EOI   string
+	BOA   string
+	Audio string
+	EOA   string
 }
 
 type gemma4ImageInput struct {
@@ -91,9 +97,12 @@ type gemma4ImageInput struct {
 }
 
 type gemma4MediaPayload struct {
-	Image      gemma4ImageInput
+	Image      *gemma4ImageInput
+	Audio      *gemma4AudioInput
 	ImageStart int
 	ImageEnd   int
+	AudioStart int
+	AudioEnd   int
 }
 
 type gemma4MediaLayout struct {
@@ -247,6 +256,9 @@ func defaultGemma4MediaTokens() gemma4MediaTokens {
 		BOI:   defaultGemma4BOIToken,
 		Image: defaultGemma4ImageToken,
 		EOI:   defaultGemma4EOIToken,
+		BOA:   defaultGemma4BOAToken,
+		Audio: defaultGemma4AudioToken,
+		EOA:   defaultGemma4EOAToken,
 	}
 }
 
@@ -255,6 +267,9 @@ func parseGemma4MediaTokens(data []byte, fallback gemma4MediaTokens) gemma4Media
 		BOIToken   string `json:"boi_token"`
 		ImageToken string `json:"image_token"`
 		EOIToken   string `json:"eoi_token"`
+		BOAToken   string `json:"boa_token"`
+		AudioToken string `json:"audio_token"`
+		EOAToken   string `json:"eoa_token"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fallback
@@ -267,6 +282,15 @@ func parseGemma4MediaTokens(data []byte, fallback gemma4MediaTokens) gemma4Media
 	}
 	if cfg.EOIToken != "" {
 		fallback.EOI = cfg.EOIToken
+	}
+	if cfg.BOAToken != "" {
+		fallback.BOA = cfg.BOAToken
+	}
+	if cfg.AudioToken != "" {
+		fallback.Audio = cfg.AudioToken
+	}
+	if cfg.EOAToken != "" {
+		fallback.EOA = cfg.EOAToken
 	}
 	return fallback
 }
@@ -479,8 +503,8 @@ func (m *MultimodalEmbedder) Forward(x *mlx.Array) *mlx.Array {
 	return m.Projection.Forward(mlx.RMSNormFn(x, nil, m.Eps))
 }
 
-// PrepareMedia implements the runner's media contract. Each image is expanded
-// in stream order and remains a separate cache-identity item.
+// PrepareMedia implements the runner's ordered media contract. Each image or
+// audio segment remains a separate cache-identity item.
 func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
 	prepared := &base.PreparedRequest{}
 	var layout gemma4MediaLayout
@@ -489,46 +513,66 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 			prepared.Tokens = append(prepared.Tokens, seg.Tokens...)
 			continue
 		}
-		if m.VisionConfig == nil || (m.Vision == nil && m.UnifiedVision == nil) || m.EmbedVision == nil {
-			return nil, fmt.Errorf("this model does not support %s input", seg.Kind)
-		}
-		if seg.Kind != "image" {
-			return nil, fmt.Errorf("gemma4 does not support %s input", seg.Kind)
-		}
-
-		img, err := preprocessGemma4Image(context.Background(), seg.Data, m.VisionConfig, int(m.VisionSoftTokens))
-		if err != nil {
-			return nil, err
-		}
 		start := len(prepared.Tokens)
-		prepared.Tokens = append(prepared.Tokens, m.BOITokenIDValue)
-		imageStart := len(prepared.Tokens) - start
-		for range img.SoftTokens {
-			prepared.Tokens = append(prepared.Tokens, m.ImageTokenIDValue)
-		}
-		imageEnd := len(prepared.Tokens) - start
-		prepared.Tokens = append(prepared.Tokens, m.EOITokenIDValue)
-
-		geom := *img
-		mediaData := geom.Pixels
-		dims := []int{1, 3, geom.Height, geom.Width}
-		geom.Pixels = nil
-		if m.UnifiedVision != nil {
-			mediaData = geom.Patches
-			dims = []int{1, geom.SoftTokens, int(m.UnifiedVision.PatchDim)}
-			geom.Patches = nil
-			layout.ImageSpans = append(layout.ImageSpans, [2]int{start + imageStart, start + imageEnd})
+		var payload gemma4MediaPayload
+		var mediaData []float32
+		var dims []int
+		switch seg.Kind {
+		case "image":
+			if m.VisionConfig == nil || (m.Vision == nil && m.UnifiedVision == nil) || m.EmbedVision == nil {
+				return nil, fmt.Errorf("this model does not support image input")
+			}
+			img, err := preprocessGemma4Image(context.Background(), seg.Data, m.VisionConfig, int(m.VisionSoftTokens))
+			if err != nil {
+				return nil, err
+			}
+			prepared.Tokens = append(prepared.Tokens, m.BOITokenIDValue)
+			payload.ImageStart = len(prepared.Tokens) - start
+			for range img.SoftTokens {
+				prepared.Tokens = append(prepared.Tokens, m.ImageTokenIDValue)
+			}
+			payload.ImageEnd = len(prepared.Tokens) - start
+			prepared.Tokens = append(prepared.Tokens, m.EOITokenIDValue)
+			geom := *img
+			mediaData = geom.Pixels
+			dims = []int{1, 3, geom.Height, geom.Width}
+			geom.Pixels = nil
+			if m.UnifiedVision != nil {
+				mediaData = geom.Patches
+				dims = []int{1, geom.SoftTokens, int(m.UnifiedVision.PatchDim)}
+				geom.Patches = nil
+				layout.ImageSpans = append(layout.ImageSpans, [2]int{start + payload.ImageStart, start + payload.ImageEnd})
+			}
+			payload.Image = &geom
+		case "audio":
+			if m.AudioConfig == nil || m.AudioProcessorConfig == nil || m.Audio == nil || m.EmbedAudio == nil {
+				return nil, fmt.Errorf("this model does not support audio input")
+			}
+			audio, err := preprocessGemma4Audio(context.Background(), seg.Data, m.AudioProcessorConfig)
+			if err != nil {
+				return nil, err
+			}
+			prepared.Tokens = append(prepared.Tokens, m.BOATokenIDValue)
+			payload.AudioStart = len(prepared.Tokens) - start
+			for range audio.SoftTokens {
+				prepared.Tokens = append(prepared.Tokens, m.AudioTokenIDValue)
+			}
+			payload.AudioEnd = len(prepared.Tokens) - start
+			prepared.Tokens = append(prepared.Tokens, m.EOATokenIDValue)
+			geom := *audio
+			mediaData = geom.Features
+			dims = []int{1, geom.Frames, 128}
+			geom.Features = nil
+			payload.Audio = &geom
+		default:
+			return nil, fmt.Errorf("gemma4 does not support %s input", seg.Kind)
 		}
 		prepared.Items = append(prepared.Items, base.PreparedItem{
 			Range:     [2]int{start, len(prepared.Tokens)},
 			Source:    source,
 			MediaData: mediaData,
 			Dims:      dims,
-			Opaque: gemma4MediaPayload{
-				Image:      geom,
-				ImageStart: imageStart,
-				ImageEnd:   imageEnd,
-			},
+			Opaque:    payload,
 		})
 	}
 	if len(layout.ImageSpans) > 0 {
@@ -537,24 +581,31 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 	return prepared, nil
 }
 
-// EncodeMedia builds the lazy image feature graph. The runner owns and frees
-// MediaData, so pixels are always read from data rather than Opaque.
+// EncodeMedia builds one lazy image or audio feature graph from runner-owned
+// MediaData.
 func (m *Model) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
 	payload := item.Opaque.(gemma4MediaPayload)
+	if payload.Audio != nil {
+		features := m.EmbedAudio.Forward(m.Audio.Forward(data, payload.Audio))
+		return mlx.Squeeze(features, 0)
+	}
 	var encoded *mlx.Array
 	if m.UnifiedVision != nil {
 		patches := mlx.Reshape(data, 1, int32(payload.Image.SoftTokens), m.UnifiedVision.PatchDim)
-		encoded = m.UnifiedVision.Forward(patches, &payload.Image)
+		encoded = m.UnifiedVision.Forward(patches, payload.Image)
 	} else {
 		pixels := mlx.Reshape(data, 1, 3, int32(payload.Image.Height), int32(payload.Image.Width))
-		encoded = m.Vision.Forward(pixels, &payload.Image)
+		encoded = m.Vision.Forward(pixels, payload.Image)
 	}
 	features := m.EmbedVision.Forward(encoded)
 	return mlx.Squeeze(features, 0)
 }
 
-func gemma4ImageRun(item batch.MediaItem) (start, end int) {
+func gemma4MediaRun(item batch.MediaItem) (start, end int) {
 	payload := item.Opaque.(gemma4MediaPayload)
+	if payload.Audio != nil {
+		return item.Pos + payload.AudioStart, item.Pos + payload.AudioEnd
+	}
 	return item.Pos + payload.ImageStart, item.Pos + payload.ImageEnd
 }
 
@@ -563,7 +614,7 @@ func (m *Model) scatterMedia(h *mlx.Array, b *batch.Batch) *mlx.Array {
 		if item.Features == nil {
 			continue
 		}
-		start, end := gemma4ImageRun(item)
+		start, end := gemma4MediaRun(item)
 		base := int(b.SeqOffsets[item.Seq])
 		lo := max(start, base)
 		hi := min(end, base+int(b.SeqQueryLens[item.Seq]))
@@ -577,11 +628,11 @@ func (m *Model) scatterMedia(h *mlx.Array, b *batch.Batch) *mlx.Array {
 	return h
 }
 
-// pleTokens masks feature-bearing image tokens from PLE exactly where the
+// pleTokens masks feature-bearing media tokens from PLE exactly where the
 // same prepared items are scattered into the token embeddings.
 func gemma4PLETokens(tokens *mlx.Array, b *batch.Batch) *mlx.Array {
 	for _, item := range b.Media {
-		start, end := gemma4ImageRun(item)
+		start, end := gemma4MediaRun(item)
 		base := int(b.SeqOffsets[item.Seq])
 		lo := max(start, base)
 		hi := min(end, base+int(b.SeqQueryLens[item.Seq]))
@@ -860,10 +911,10 @@ func imageToCHWFloat32Context(ctx context.Context, img image.Image) ([]float32, 
 	return out, nil
 }
 
-func imageTokenSpan(tokens []int32, imageTokenID int32) (int, int, error) {
+func mediaTokenSpan(tokens []int32, mediaTokenID int32) (int, int, error) {
 	start, end := -1, -1
 	for i, tok := range tokens {
-		if tok != imageTokenID {
+		if tok != mediaTokenID {
 			continue
 		}
 		if start == -1 {
@@ -872,14 +923,18 @@ func imageTokenSpan(tokens []int32, imageTokenID int32) (int, int, error) {
 		end = i + 1
 	}
 	if start == -1 {
-		return 0, 0, fmt.Errorf("Gemma4 prompt contains no image token id %d", imageTokenID)
+		return 0, 0, fmt.Errorf("Gemma4 prompt contains no media token id %d", mediaTokenID)
 	}
 	for i := start; i < end; i++ {
-		if tokens[i] != imageTokenID {
-			return 0, 0, errors.New("Gemma4 image tokens are not contiguous")
+		if tokens[i] != mediaTokenID {
+			return 0, 0, errors.New("Gemma4 media tokens are not contiguous")
 		}
 	}
 	return start, end, nil
+}
+
+func imageTokenSpan(tokens []int32, imageTokenID int32) (int, int, error) {
+	return mediaTokenSpan(tokens, imageTokenID)
 }
 
 func (m *VisionModel) Forward(pixels *mlx.Array, img *gemma4ImageInput) *mlx.Array {

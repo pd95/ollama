@@ -299,3 +299,43 @@ func TestPrepareMediaUnifiedUsesPatchDataAndLayout(t *testing.T) {
 		t.Fatalf("unified layout = %#v", got.Layout)
 	}
 }
+
+func TestPrepareMediaAudioUsesFeatureData(t *testing.T) {
+	frames := make([][]float64, 1600)
+	for i := range frames {
+		frames[i] = []float64{0.1 * math.Sin(2*math.Pi*440*float64(i)/16000)}
+	}
+	processor := defaultAudioProcessorConfig()
+	m := &Model{
+		TextConfig: &TextConfig{
+			AudioTokenIDValue: 20, BOATokenIDValue: 21, EOATokenIDValue: 22,
+		},
+		AudioConfig:          &AudioConfig{},
+		AudioProcessorConfig: &processor,
+		Audio:                &AudioModel{},
+		EmbedAudio:           &MultimodalEmbedder{},
+	}
+	got, err := m.PrepareMedia([]base.Segment{
+		{Tokens: []int32{1}},
+		{Kind: "audio", Data: makeTestWAV(t, 1, 16, 16000, frames)},
+		{Tokens: []int32{2}},
+	})
+	if err != nil {
+		t.Fatalf("PrepareMedia() error = %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("audio item count = %d, want 1", len(got.Items))
+	}
+	item := got.Items[0]
+	payload := item.Opaque.(gemma4MediaPayload)
+	if payload.Audio == nil || payload.Audio.Features != nil || item.Dims[2] != 128 {
+		t.Fatalf("audio payload/dims = %#v/%v", payload.Audio, item.Dims)
+	}
+	wantRange := [2]int{1, len(got.Tokens) - 1}
+	if item.Range != wantRange || got.Tokens[1] != 21 || got.Tokens[len(got.Tokens)-2] != 22 {
+		t.Fatalf("audio range/tokens = %v/%v", item.Range, got.Tokens)
+	}
+	if got.Tokens[payload.AudioStart+item.Range[0]] != 20 {
+		t.Fatalf("audio feature token missing: %v", got.Tokens)
+	}
+}
