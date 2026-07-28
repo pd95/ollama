@@ -81,7 +81,8 @@ func parseAudioProcessorConfig(data []byte) (*AudioProcessorConfig, error) {
 		}
 		return &cfg, nil
 	}
-	if cfg.AudioSequenceLength != 750 || f.FeatureSize != 128 || f.SamplingRate != 16000 ||
+	if f.Type != "Gemma4AudioFeatureExtractor" || cfg.AudioSequenceLength != 750 ||
+		f.FeatureSize != 128 || f.SamplingRate != 16000 ||
 		f.FrameLength != 320 || f.HopLength != 160 || f.FFTLength != 512 || f.FFTOverdrive ||
 		f.Dither != 0 || f.InputScaleFactor != 1 || f.MinFrequency != 0 || f.MaxFrequency != 8000 ||
 		f.MelFloor != 1e-3 || f.Preemphasis != 0 || f.PaddingSide != "right" ||
