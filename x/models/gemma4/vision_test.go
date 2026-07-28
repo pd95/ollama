@@ -12,6 +12,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ollama/ollama/llm"
+	"github.com/ollama/ollama/x/mlxrunner/batch"
+	"github.com/ollama/ollama/x/mlxrunner/mlx"
+	"github.com/ollama/ollama/x/tokenizer"
 )
 
 func TestParseVisionConfigDefaults(t *testing.T) {
@@ -200,4 +205,235 @@ func TestPreprocessGemma4ImageSoftTokenBudget(t *testing.T) {
 	if len(img.Pixels) != 3*48*48 {
 		t.Fatalf("pixel count = %d, want %d", len(img.Pixels), 3*48*48)
 	}
+}
+
+func TestBindGemma4MediaPreservesMarkerIdentity(t *testing.T) {
+	media := []llm.MediaData{
+		{ID: 0, Kind: llm.MediaKindImage, Data: []byte("image")},
+		{ID: 1, Kind: llm.MediaKindAudio, Data: []byte("audio")},
+	}
+	bindings, err := bindGemma4Media("before [img-1] middle [img-0] after", media)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 2 || bindings[0].Media.ID != 1 || bindings[1].Media.ID != 0 {
+		t.Fatalf("binding order = %#v, want media IDs 1, 0", bindings)
+	}
+}
+
+func TestBindGemma4MediaRejectsInvalidMappings(t *testing.T) {
+	image := llm.MediaData{ID: 0, Kind: llm.MediaKindImage, Data: []byte("image")}
+	tests := []struct {
+		name   string
+		prompt string
+		media  []llm.MediaData
+		want   string
+	}{
+		{name: "no media", prompt: "text", want: "no media"},
+		{name: "unnumbered", prompt: "[img]", media: []llm.MediaData{image}, want: "unnumbered"},
+		{name: "missing", prompt: "text", media: []llm.MediaData{image}, want: "expected one"},
+		{name: "unknown", prompt: "[img-1]", media: []llm.MediaData{image}, want: "no matching media"},
+		{name: "duplicate marker", prompt: "[img-0][img-0]", media: []llm.MediaData{image}, want: "multiple"},
+		{name: "duplicate id", prompt: "[img-0]", media: []llm.MediaData{image, image}, want: "duplicate"},
+		{name: "noncanonical", prompt: "[img-00]", media: []llm.MediaData{image}, want: "invalid"},
+		{name: "malformed", prompt: "[img-zero]", media: []llm.MediaData{image}, want: "invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := bindGemma4Media(tt.prompt, tt.media)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("bindGemma4Media() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestAssignGemma4MixedMediaSpans(t *testing.T) {
+	bindings := []gemma4MediaBinding{
+		{Item: gemma4MediaItem{ID: 7, Kind: llm.MediaKindAudio, Audio: &gemma4AudioInput{SoftTokens: 2}}},
+		{Item: gemma4MediaItem{ID: 3, Kind: llm.MediaKindImage, Image: &gemma4ImageInput{SoftTokens: 3}}},
+		{Item: gemma4MediaItem{ID: 9, Kind: llm.MediaKindAudio, Audio: &gemma4AudioInput{SoftTokens: 1}}},
+	}
+	tokens := []int32{8, 4, 4, 8, 3, 3, 3, 8, 4, 8}
+	items, err := assignGemma4MediaSpans(tokens, bindings, 3, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []batch.TokenSpan{{Start: 1, End: 3}, {Start: 4, End: 7}, {Start: 8, End: 9}}
+	for i := range want {
+		if items[i].Span != want[i] {
+			t.Fatalf("item %d span = %+v, want %+v", i, items[i].Span, want[i])
+		}
+	}
+
+	tokens = append(tokens[:9], 4, 8)
+	if _, err := assignGemma4MediaSpans(tokens, bindings, 3, 4); err == nil || !strings.Contains(err.Error(), "token count") {
+		t.Fatalf("mismatched run error = %v", err)
+	}
+}
+
+func TestPrepareMixedGemma4MediaPrompt(t *testing.T) {
+	tok := testGemma4MediaTokenizer(t)
+	audioCfg := defaultAudioProcessorConfig()
+	frames := make([][]float64, 16000)
+	for i := range frames {
+		frames[i] = []float64{0.25}
+	}
+	m := &Model{
+		TextConfig: &TextConfig{
+			ImageTokenIDValue:     1,
+			AudioTokenIDValue:     4,
+			VisionSoftTokens:      1,
+			MaxPositionEmbeddings: 2048,
+		},
+		VisionConfig: &VisionConfig{
+			ModelType:           "gemma4_unified_vision",
+			PatchSize:           16,
+			PoolingKernelSize:   3,
+			ModelPatchSize:      48,
+			DefaultOutputLength: 1,
+		},
+		AudioConfig:          &AudioConfig{},
+		AudioProcessorConfig: &audioCfg,
+		tok:                  tok,
+		mediaTokens:          defaultGemma4MediaTokens(),
+	}
+	media := []llm.MediaData{
+		{ID: 0, Kind: llm.MediaKindImage, Data: makeTestGemma4PNG(t, 8, 4)},
+		{ID: 1, Kind: llm.MediaKindAudio, Data: makeTestWAV(t, 1, 16, 16000, frames)},
+	}
+	prepared, err := m.PrepareMediaPrompt(context.Background(), "<sep>[img-1]<sep>[img-0]<sep>", media)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := prepared.Payload.(*gemma4MediaPayload)
+	if len(payload.Items) != 2 || payload.Items[0].ID != 1 || payload.Items[1].ID != 0 {
+		t.Fatalf("payload order = %#v, want audio 1 then image 0", payload.Items)
+	}
+	for _, item := range payload.Items {
+		for i := item.Span.Start; i < item.Span.End; i++ {
+			if prepared.PLEInputIDs[i] != 0 {
+				t.Fatalf("PLEInputIDs[%d] = %d, want 0", i, prepared.PLEInputIDs[i])
+			}
+		}
+	}
+	if len(prepared.BidirectionalSpans) != 1 || prepared.BidirectionalSpans[0] != payload.Items[1].Span {
+		t.Fatalf("bidirectional spans = %+v, want image span %+v", prepared.BidirectionalSpans, payload.Items[1].Span)
+	}
+}
+
+func TestMergeGemma4MediaEmbeddings(t *testing.T) {
+	skipIfNoMLX(t)
+	embeddings := mlx.FromValues([]float32{
+		0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7,
+	}, 1, 8, 2)
+	replacements := []gemma4MediaReplacement{
+		{Span: batch.TokenSpan{Start: 1, End: 3}, Features: mlx.FromValues([]float32{10, 11, 12, 13}, 1, 2, 2)},
+		{Span: batch.TokenSpan{Start: 5, End: 6}, Features: mlx.FromValues([]float32{20, 21}, 1, 1, 2)},
+	}
+	got, err := mergeGemma4MediaEmbeddings(embeddings, 8, replacements)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mlx.Eval(got)
+	want := []float32{0, 0, 10, 11, 12, 13, 3, 3, 4, 4, 20, 21, 6, 6, 7, 7}
+	if !slices.Equal(got.Floats(), want) {
+		t.Fatalf("merged embeddings = %v, want %v", got.Floats(), want)
+	}
+	if _, err := mergeGemma4MediaEmbeddings(embeddings, 8, []gemma4MediaReplacement{
+		{Span: batch.TokenSpan{Start: 2, End: 4}, Features: replacements[0].Features},
+		{Span: batch.TokenSpan{Start: 3, End: 4}, Features: replacements[1].Features},
+	}); err == nil || !strings.Contains(err.Error(), "overlapping") {
+		t.Fatalf("overlap error = %v", err)
+	}
+}
+
+func TestPrepareMediaEmbeddingsHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := (&Model{}).PrepareMediaEmbeddings(ctx, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PrepareMediaEmbeddings() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestPrepareMediaEmbeddingsRejectsMalformedPayloads(t *testing.T) {
+	validImage := func(id, start, end int) gemma4MediaItem {
+		return gemma4MediaItem{
+			ID: id, Kind: llm.MediaKindImage,
+			Image: &gemma4ImageInput{SoftTokens: end - start},
+			Span:  batch.TokenSpan{Start: start, End: end},
+		}
+	}
+	validAudio := func(id, start, end int) gemma4MediaItem {
+		return gemma4MediaItem{
+			ID: id, Kind: llm.MediaKindAudio,
+			Audio: &gemma4AudioInput{
+				Features: make([]float32, end-start), FeatureMask: make([]bool, end-start),
+				FeatureSize: 1, Frames: end - start, SoftTokens: end - start,
+			},
+			Span: batch.TokenSpan{Start: start, End: end},
+		}
+	}
+	tests := []struct {
+		name     string
+		prepared *batch.PreparedInput
+		want     string
+	}{
+		{name: "nil prepared", want: "nil"},
+		{name: "empty tokens", prepared: &batch.PreparedInput{Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{validImage(0, 0, 1)}}}, want: "empty"},
+		{name: "nil payload", prepared: &batch.PreparedInput{Tokens: []int32{1}}, want: "payload"},
+		{name: "out of bounds", prepared: &batch.PreparedInput{Tokens: []int32{1}, Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{validImage(0, 0, 2)}}}, want: "span"},
+		{name: "overlap", prepared: &batch.PreparedInput{Tokens: []int32{1, 2, 3}, Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{validImage(0, 0, 2), validAudio(1, 1, 2)}}}, want: "overlapping"},
+		{name: "duplicate id", prepared: &batch.PreparedInput{Tokens: []int32{1, 2}, Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{validImage(0, 0, 1), validAudio(0, 1, 2)}}}, want: "duplicate"},
+		{name: "audio backing", prepared: &batch.PreparedInput{Tokens: []int32{1}, Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{{
+			ID: 0, Kind: llm.MediaKindAudio,
+			Audio: &gemma4AudioInput{Features: []float32{1}, FeatureMask: []bool{true}, FeatureSize: 2, Frames: 1, SoftTokens: 1},
+			Span:  batch.TokenSpan{Start: 0, End: 1},
+		}}}}, want: "processor dimensions"},
+		{name: "unknown kind", prepared: &batch.PreparedInput{Tokens: []int32{1}, Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{{ID: 0, Span: batch.TokenSpan{Start: 0, End: 1}}}}}, want: "media kind"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := (&Model{}).PrepareMediaEmbeddings(context.Background(), tt.prepared)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("PrepareMediaEmbeddings() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func makeTestGemma4PNG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := range height {
+		for x := range width {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(1 + x%254), G: uint8(1 + y%254), B: 64, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func testGemma4MediaTokenizer(t *testing.T) *tokenizer.Tokenizer {
+	t.Helper()
+	data := []byte(`{
+		"model":{"type":"BPE","vocab":{"<|image>":0,"<|image|>":1,"<image|>":2,"<|audio>":3,"<|audio|>":4,"<audio|>":5,"<sep>":6},"merges":[]},
+		"added_tokens":[
+			{"id":0,"content":"<|image>","special":true},
+			{"id":1,"content":"<|image|>","special":true},
+			{"id":2,"content":"<image|>","special":true},
+			{"id":3,"content":"<|audio>","special":true},
+			{"id":4,"content":"<|audio|>","special":true},
+			{"id":5,"content":"<audio|>","special":true},
+			{"id":6,"content":"<sep>","special":true}
+		]
+	}`)
+	tok, err := tokenizer.LoadFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
 }

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,38 @@ func decodeTestAudio(t *testing.T) api.ImageData {
 		t.Fatalf("failed to decode test audio: %v", err)
 	}
 	return data
+}
+
+func silentTestAudio(t *testing.T) api.ImageData {
+	t.Helper()
+	const (
+		sampleRate = 16_000
+		samples    = sampleRate / 2
+	)
+	dataSize := samples * 2
+	var out bytes.Buffer
+	for _, value := range []any{
+		[]byte("RIFF"), uint32(36 + dataSize), []byte("WAVE"),
+		[]byte("fmt "), uint32(16), uint16(1), uint16(1),
+		uint32(sampleRate), uint32(sampleRate * 2), uint16(2), uint16(16),
+		[]byte("data"), uint32(dataSize), make([]byte, dataSize),
+	} {
+		if err := binary.Write(&out, binary.LittleEndian, value); err != nil {
+			t.Fatalf("encode silent WAV: %v", err)
+		}
+	}
+	return out.Bytes()
+}
+
+func requireResponseContains(t *testing.T, response string, words ...string) {
+	t.Helper()
+	lower := strings.ToLower(response)
+	for _, word := range words {
+		if strings.Contains(lower, word) {
+			return
+		}
+	}
+	t.Fatalf("none of %v found in %q", words, response)
 }
 
 // setupAudioModel pulls the model, preloads it, and skips if it doesn't support audio.
@@ -258,6 +291,184 @@ func TestOpenAIChatWithAudio(t *testing.T) {
 			if !found {
 				t.Errorf("response missing expected words about sky/blue/light, got: %s", result.Choices[0].Message.Content)
 			}
+		})
+	}
+}
+
+// TestGemma4MultipleMedia exercises ordered multi-audio, multi-image, mixed
+// image/audio, OpenAI interleaving, and retained-history media through MLX.
+func TestGemma4MultipleMedia(t *testing.T) {
+	models := testModels([]string{"gemma4:e2b"})
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			client, endpoint, cleanup := InitServerConnection(ctx, t)
+			defer cleanup()
+
+			setupAudioModel(ctx, t, client, model)
+			requireCapability(ctx, t, client, model, "vision")
+			speech := decodeTestAudio(t)
+			silence := silentTestAudio(t)
+			abbeyRoad, docs, _ := decodeTestImages(t)
+			noThink := &api.ThinkValue{Value: false}
+
+			for _, tc := range []struct {
+				name  string
+				media []api.ImageData
+			}{
+				{name: "speech_then_silence", media: []api.ImageData{speech, silence}},
+				{name: "silence_then_speech", media: []api.ImageData{silence, speech}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					req := api.ChatRequest{
+						Model: model,
+						Think: noThink,
+						Messages: []api.Message{{
+							Role:    "user",
+							Content: "Two audio clips are attached. Transcribe only the clip containing speech.",
+							Images:  tc.media,
+						}},
+						Options: map[string]any{"temperature": 0, "seed": 123, "num_predict": 80},
+					}
+					response := DoChat(ctx, t, client, req, []string{"sky", "blue"}, 90*time.Second, 20*time.Second)
+					requireResponseContains(t, response.Content, "sky", "blue")
+				})
+			}
+
+			for _, tc := range []struct {
+				name        string
+				media       []api.ImageData
+				firstWords  []string
+				secondWords []string
+			}{
+				{
+					name: "abbey_then_docs", media: []api.ImageData{abbeyRoad, docs},
+					firstWords:  []string{"road", "street", "cross", "walk", "beatles"},
+					secondWords: []string{"laptop", "book", "read", "sleep", "documentation", "desk"},
+				},
+				{
+					name: "docs_then_abbey", media: []api.ImageData{docs, abbeyRoad},
+					firstWords:  []string{"laptop", "book", "read", "sleep", "documentation", "desk"},
+					secondWords: []string{"road", "street", "cross", "walk", "beatles"},
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					req := api.ChatRequest{
+						Model: model,
+						Think: noThink,
+						Messages: []api.Message{{
+							Role: "user",
+							Content: "Describe both pictures in order. Reply with exactly two labeled lines: " +
+								"FIRST: the first picture. SECOND: the second picture.",
+							Images: tc.media,
+						}},
+						Options: map[string]any{"temperature": 0, "seed": 123, "num_predict": 120},
+					}
+					response := DoChat(ctx, t, client, req, append(tc.firstWords, tc.secondWords...), 120*time.Second, 20*time.Second)
+					requireResponseContains(t, response.Content, tc.firstWords...)
+					requireResponseContains(t, response.Content, tc.secondWords...)
+				})
+			}
+
+			t.Run("mixed_same_message", func(t *testing.T) {
+				req := api.ChatRequest{
+					Model: model,
+					Think: noThink,
+					Messages: []api.Message{{
+						Role:    "user",
+						Content: "First [img] is a picture and second [img] is audio. Identify the picture subject and transcribe the spoken question.",
+						Images:  []api.ImageData{docs, speech},
+					}},
+					Options: map[string]any{"temperature": 0, "seed": 123, "num_predict": 120},
+				}
+				response := DoChat(ctx, t, client, req, []string{"llama", "alpaca", "sky", "blue"}, 120*time.Second, 20*time.Second)
+				requireResponseContains(t, response.Content, "llama", "alpaca", "animal", "cartoon", "bear", "character")
+				requireResponseContains(t, response.Content, "sky", "blue")
+			})
+
+			t.Run("openai_mixed_same_message", func(t *testing.T) {
+				body, err := json.Marshal(map[string]any{
+					"model": model,
+					"messages": []any{map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{"type": "text", "text": "First "},
+							map[string]any{"type": "image_url", "image_url": map[string]any{
+								"url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(docs),
+							}},
+							map[string]any{"type": "text", "text": " is a picture. Second "},
+							map[string]any{"type": "input_audio", "input_audio": map[string]any{
+								"data": base64.StdEncoding.EncodeToString(speech), "format": "wav",
+							}},
+							map[string]any{"type": "text", "text": " is audio. Identify the picture subject and transcribe the spoken question."},
+						},
+					}},
+					"temperature":      0,
+					"seed":             123,
+					"max_tokens":       200,
+					"reasoning_effort": "none",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+					fmt.Sprintf("http://%s/v1/chat/completions", endpoint), bytes.NewReader(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer resp.Body.Close()
+				responseBody, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("OpenAI mixed-media request returned %s: %s", resp.Status, responseBody)
+				}
+				var result struct {
+					Choices []struct {
+						Message struct {
+							Content   string `json:"content"`
+							Reasoning string `json:"reasoning"`
+						} `json:"message"`
+					} `json:"choices"`
+				}
+				if err := json.Unmarshal(responseBody, &result); err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Choices) != 1 {
+					t.Fatalf("OpenAI mixed-media choices = %d, want 1", len(result.Choices))
+				}
+				text := result.Choices[0].Message.Content + " " + result.Choices[0].Message.Reasoning
+				requireResponseContains(t, text, "llama", "alpaca", "animal", "cartoon", "bear", "character")
+				requireResponseContains(t, text, "sky", "blue")
+			})
+
+			t.Run("mixed_across_history", func(t *testing.T) {
+				req := api.ChatRequest{
+					Model: model,
+					Think: noThink,
+					Messages: []api.Message{
+						{Role: "user", Content: "Remember this picture.", Images: []api.ImageData{docs}},
+						{Role: "assistant", Content: "I will retain the picture for the next instruction."},
+						{
+							Role: "user",
+							Content: "Use both media inputs. Reply with exactly two labeled lines: " +
+								"AUDIO: the exact spoken question. IMAGE: the picture subject.",
+							Images: []api.ImageData{speech},
+						},
+					},
+					Options: map[string]any{"temperature": 0, "seed": 123, "num_predict": 120},
+				}
+				response := DoChat(ctx, t, client, req, []string{"llama", "alpaca", "sky", "blue"}, 120*time.Second, 20*time.Second)
+				requireResponseContains(t, response.Content, "llama", "alpaca", "animal", "cartoon", "bear", "character")
+				requireResponseContains(t, response.Content, "sky", "blue")
+			})
 		})
 	}
 }

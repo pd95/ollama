@@ -23,7 +23,7 @@ type mediaPromptPreparer interface {
 }
 
 type mediaEmbeddingPreparer interface {
-	PrepareMediaEmbeddings(prepared *batch.PreparedInput) error
+	PrepareMediaEmbeddings(ctx context.Context, prepared *batch.PreparedInput) error
 }
 
 func prefillChunkSize() int {
@@ -113,7 +113,7 @@ func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) er
 		if request.Prepared == nil {
 			return errors.New("missing prepared media input")
 		}
-		if err := preparer.PrepareMediaEmbeddings(request.Prepared); err != nil {
+		if err := preparer.PrepareMediaEmbeddings(ctx, request.Prepared); err != nil {
 			return err
 		}
 		embeddings = request.Prepared.InputEmbeddings
