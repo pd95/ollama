@@ -7,14 +7,16 @@ import (
 )
 
 type gemma4ImportTransform struct {
-	numLayers  int
-	numExperts int
+	numLayers      int
+	numExperts     int
+	hasAudioConfig bool
 }
 
 // gemma4Config is a minimal subset of the Gemma 4 config.json used for quant decisions.
 type gemma4Config struct {
-	NumHiddenLayers int `json:"num_hidden_layers"`
-	NumExperts      int `json:"num_experts"`
+	NumHiddenLayers int              `json:"num_hidden_layers"`
+	NumExperts      int              `json:"num_experts"`
+	AudioConfig     *json.RawMessage `json:"audio_config"`
 	TextConfig      struct {
 		NumHiddenLayers int `json:"num_hidden_layers"`
 		NumExperts      int `json:"num_experts"`
@@ -36,13 +38,15 @@ func newGemma4ImportTransform(rawConfig json.RawMessage) (quantizePolicy, error)
 		numExperts = cfg.TextConfig.NumExperts
 	}
 
-	return gemma4ImportTransform{numLayers: numLayers, numExperts: numExperts}, nil
+	return gemma4ImportTransform{
+		numLayers: numLayers, numExperts: numExperts, hasAudioConfig: cfg.AudioConfig != nil,
+	}, nil
 }
 
 func (t gemma4ImportTransform) quantizationType(name string, shape []int32, quantize string) string {
 	base := normalizeQuantType(quantize)
 	switch {
-	case isGemma4VisionTensor(name):
+	case isGemma4VisionTensor(name) || isGemma4AudioTensor(name):
 		return ""
 	case isEmbedTokensWeight(name):
 		// The embedding doubles as the lm_head projection; an 8-bit type keeps
@@ -65,7 +69,7 @@ func (t gemma4ImportTransform) quantizationType(name string, shape []int32, quan
 }
 
 func (t gemma4ImportTransform) includeTensor(name string) bool {
-	return !isGemma4AudioTensor(name)
+	return !isGemma4AudioTensor(name) || t.hasAudioConfig
 }
 
 func isGemma4VisionTensor(name string) bool {

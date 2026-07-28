@@ -183,8 +183,8 @@ func TestGemma4QuantizationType(t *testing.T) {
 	}
 }
 
-func TestGemma4ImportPlanKeepsVisionAndDropsAudio(t *testing.T) {
-	policy := gemma4ImportTransform{numLayers: 2}
+func TestGemma4ImportPlanKeepsMediaAtSourcePrecision(t *testing.T) {
+	policy := gemma4ImportTransform{numLayers: 2, hasAudioConfig: true}
 	inv := newInventory(sourceModelConfig{}, map[string]string{
 		"model.embed_tokens.weight":                                            "BF16",
 		"model.layers.0.self_attn.q_proj.weight":                               "BF16",
@@ -212,6 +212,8 @@ func TestGemma4ImportPlanKeepsVisionAndDropsAudio(t *testing.T) {
 		"model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight",
 		"model.embed_vision.embedding_projection.weight",
 		"model.vision_embedder.patch_dense.weight",
+		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight",
+		"model.embed_audio.embedding_projection.weight",
 	} {
 		tensor, ok := got[name]
 		if !ok {
@@ -221,12 +223,21 @@ func TestGemma4ImportPlanKeepsVisionAndDropsAudio(t *testing.T) {
 			t.Fatalf("%s Quantize = %q, want source precision", name, tensor.Quantize)
 		}
 	}
-	for _, name := range []string{
-		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight",
-		"model.embed_audio.embedding_projection.weight",
-	} {
-		if _, ok := got[name]; ok {
-			t.Fatalf("%s present in plan, want audio tensor excluded", name)
+}
+
+func TestGemma4ImportPlanDropsOrphanAudioTensors(t *testing.T) {
+	policy := gemma4ImportTransform{numLayers: 2}
+	inv := newInventory(sourceModelConfig{}, map[string]string{
+		"model.embed_tokens.weight":                     "BF16",
+		"model.embed_audio.embedding_projection.weight": "BF16",
+	})
+	specs, err := Plan(inv, Classification{Kind: SourceFloat}, policy)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	for _, name := range specNames(specs) {
+		if isGemma4AudioTensor(name) {
+			t.Fatalf("orphan audio tensor %s present in plan", name)
 		}
 	}
 }
