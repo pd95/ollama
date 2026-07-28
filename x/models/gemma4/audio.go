@@ -57,6 +57,9 @@ func parseAudioConfig(configData []byte) (*AudioConfig, error) {
 		}
 		return cfg, nil
 	}
+	if cfg.ModelType != "gemma4_audio" {
+		return nil, fmt.Errorf("unsupported Gemma4 audio model type %q", cfg.ModelType)
+	}
 	if cfg.HiddenSize <= 0 || cfg.NumHiddenLayers <= 0 || cfg.NumAttentionHeads <= 0 ||
 		cfg.HiddenSize%cfg.NumAttentionHeads != 0 || cfg.OutputProjDims <= 0 ||
 		cfg.AttentionChunkSize <= 0 || cfg.AttentionContextLeft <= 0 || cfg.AttentionContextRight < 0 ||
