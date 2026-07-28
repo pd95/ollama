@@ -561,8 +561,9 @@ func gemma4ModelDirMediaCapabilities(modelDir string) (vision, audio bool) {
 	}
 	processorData, processorErr := os.ReadFile(filepath.Join(modelDir, "processor_config.json"))
 	tokenizerConfigData, tokenizerErr := os.ReadFile(filepath.Join(modelDir, "tokenizer_config.json"))
-	audioReady := processorErr == nil && tokenizerErr == nil &&
-		gemma4metadata.ValidateAudioRuntimeMetadata(cfg, processorData, tokenizerConfigData) == nil &&
+	tokenizerData, tokenizerDataErr := os.ReadFile(filepath.Join(modelDir, "tokenizer.json"))
+	audioReady := processorErr == nil && tokenizerErr == nil && tokenizerDataErr == nil &&
+		gemma4metadata.ValidateAudioRuntimeMetadata(cfg, processorData, tokenizerConfigData, tokenizerData) == nil &&
 		gemma4metadata.ValidateAudioSourceInventory(cfg, tensors) == nil
 	return gemma4metadata.ValidateVisionSourceInventory(cfg, tensors) == nil, audioReady
 }
