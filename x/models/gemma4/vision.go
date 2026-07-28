@@ -595,10 +595,18 @@ func (m *Model) PrepareMediaEmbeddings(prepared *batch.PreparedInput) error {
 		features = m.EmbedVision.Forward(encoded)
 		start, end = payload.ImageStart, payload.ImageEnd
 	} else {
-		if m.Audio == nil || m.EmbedAudio == nil {
+		if m.EmbedAudio == nil || !m.AudioConfig.unified() && m.Audio == nil {
+			if m.AudioConfig.unified() {
+				return errors.New("Gemma4 MLX unified audio projection is not loaded; recreate or pull the model with its audio projection")
+			}
 			return errors.New("Gemma4 MLX audio weights are not loaded; recreate or pull the model so it includes the complete Gemma 4 audio tower")
 		}
-		features = m.EmbedAudio.Forward(m.Audio.Forward(payload.Audio))
+		if m.AudioConfig.unified() {
+			raw := mlx.FromValues(payload.Audio.Features, 1, payload.Audio.SoftTokens, payload.Audio.FeatureSize)
+			features = m.EmbedAudio.Forward(raw)
+		} else {
+			features = m.EmbedAudio.Forward(m.Audio.Forward(payload.Audio))
+		}
 		start, end = payload.AudioStart, payload.AudioEnd
 	}
 	features = features.AsType(embeddings.DType())
