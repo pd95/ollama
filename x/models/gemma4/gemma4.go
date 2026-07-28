@@ -386,6 +386,8 @@ type Model struct {
 	Vision        *VisionModel
 	UnifiedVision *UnifiedVisionEmbedder
 	EmbedVision   *MultimodalEmbedder
+	Audio         *AudioModel
+	EmbedAudio    *MultimodalEmbedder
 
 	// PLE model-level components (nil if no PLE).
 	EmbedTokensPerLayer nn.EmbeddingLayer
@@ -398,7 +400,9 @@ type Model struct {
 
 	tok *tokenizer.Tokenizer
 	*TextConfig
-	VisionConfig *VisionConfig
+	VisionConfig         *VisionConfig
+	AudioConfig          *AudioConfig
+	AudioProcessorConfig *AudioProcessorConfig
 
 	SuppressLogitBias *mlx.Array
 	weightPrefix      string
@@ -660,6 +664,19 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	audioConfig, err := parseAudioConfig(configData)
+	if err != nil {
+		return nil, err
+	}
+	var audioProcessorConfig *AudioProcessorConfig
+	if audioConfig != nil {
+		if processorData, readErr := root.Manifest.ReadConfig("processor_config.json"); readErr == nil {
+			audioProcessorConfig, err = parseAudioProcessorConfig(processorData)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	if qt := root.QuantType(); qt != "" {
 		cfg.QuantGroupSize, cfg.QuantBits, cfg.QuantMode = model.QuantizationParams(qt)
@@ -694,12 +711,14 @@ func newModel(root *model.Root) (base.Model, error) {
 	}
 
 	m := &Model{
-		Layers:            make([]*DecoderLayer, cfg.NumHiddenLayers),
-		TextConfig:        &cfg,
-		VisionConfig:      visionConfig,
-		tok:               tok,
-		mediaTokens:       mediaTokens,
-		SuppressLogitBias: makeSuppressLogitBias(suppressTokens, cfg.VocabSize),
+		Layers:               make([]*DecoderLayer, cfg.NumHiddenLayers),
+		TextConfig:           &cfg,
+		VisionConfig:         visionConfig,
+		AudioConfig:          audioConfig,
+		AudioProcessorConfig: audioProcessorConfig,
+		tok:                  tok,
+		mediaTokens:          mediaTokens,
+		SuppressLogitBias:    makeSuppressLogitBias(suppressTokens, cfg.VocabSize),
 	}
 
 	for i := range m.Layers {
@@ -768,6 +787,18 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			return err
 		}
 		m.EmbedVision = embedVision
+	}
+	if m.AudioConfig != nil && m.AudioProcessorConfig != nil && hasCompleteGemma4AudioWeights(tensors, m.AudioConfig, m.HiddenSize) {
+		audio, err := loadAudioModel(tensors, m.AudioConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+		if err != nil {
+			return err
+		}
+		embedAudio, err := loadMultimodalEmbedder(tensors, "embed_audio", m.AudioConfig.RMSNormEps, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+		if err != nil {
+			return err
+		}
+		m.Audio = audio
+		m.EmbedAudio = embedAudio
 	}
 
 	// PLE model-level weights.
