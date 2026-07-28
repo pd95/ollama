@@ -131,20 +131,80 @@ func TestFromChatRequest_WithImage(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Messages) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(result.Messages))
+	if len(result.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result.Messages))
 	}
 
-	if result.Messages[0].Content != "Hello" {
-		t.Errorf("expected first message content 'Hello', got %q", result.Messages[0].Content)
+	if result.Messages[0].Content != "Hello[img]" {
+		t.Errorf("expected interleaved message content, got %q", result.Messages[0].Content)
 	}
 
-	if len(result.Messages[1].Images) != 1 {
-		t.Fatalf("expected 1 image, got %d", len(result.Messages[1].Images))
+	if len(result.Messages[0].Images) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(result.Messages[0].Images))
 	}
 
-	if string(result.Messages[1].Images[0]) != string(imgData) {
+	if string(result.Messages[0].Images[0]) != string(imgData) {
 		t.Error("image data mismatch")
+	}
+}
+
+func TestFromChatRequest_PreservesMixedMediaOrder(t *testing.T) {
+	imgData, _ := base64.StdEncoding.DecodeString(image)
+	audioOne := []byte("audio-one")
+	audioTwo := []byte("audio-two")
+
+	req := ChatCompletionRequest{
+		Model: "test-model",
+		Messages: []Message{
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{"type": "text", "text": "before"},
+					map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": prefix + image},
+					},
+					map[string]any{
+						"type": "input_audio",
+						"input_audio": map[string]any{
+							"data":   base64.StdEncoding.EncodeToString(audioOne),
+							"format": "wav",
+						},
+					},
+					map[string]any{"type": "text", "text": "between"},
+					map[string]any{
+						"type": "input_audio",
+						"input_audio": map[string]any{
+							"data":   base64.StdEncoding.EncodeToString(audioTwo),
+							"format": "wav",
+						},
+					},
+					map[string]any{"type": "text", "text": "after"},
+				},
+			},
+		},
+	}
+
+	result, err := FromChatRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got, want := len(result.Messages), 1; got != want {
+		t.Fatalf("len(Messages) = %d, want %d", got, want)
+	}
+	message := result.Messages[0]
+	if got, want := message.Content, "before[img][img]between[img]after"; got != want {
+		t.Fatalf("message content = %q, want %q", got, want)
+	}
+	wantMedia := [][]byte{imgData, audioOne, audioTwo}
+	if got, want := len(message.Images), len(wantMedia); got != want {
+		t.Fatalf("message has %d media items, want %d", got, want)
+	}
+	for i := range wantMedia {
+		if diff := cmp.Diff(wantMedia[i], []byte(message.Images[i])); diff != "" {
+			t.Fatalf("media %d mismatch (-want +got):\n%s", i, diff)
+		}
 	}
 }
 
