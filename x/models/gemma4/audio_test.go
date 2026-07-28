@@ -20,6 +20,7 @@ import (
 
 const releasedGemma4AudioConfig = `{
   "audio_config": {
+	"model_type": "gemma4_audio",
     "attention_chunk_size": 12,
     "attention_context_left": 13,
     "attention_context_right": 0,
@@ -57,12 +58,16 @@ func TestParseReleasedAudioConfig(t *testing.T) {
 	if _, err := parseAudioConfig([]byte(bad)); err == nil {
 		t.Fatal("non-divisible head count: error = nil")
 	}
+	unknown := strings.Replace(releasedGemma4AudioConfig, `"model_type": "gemma4_audio"`, `"model_type": "future_audio"`, 1)
+	if _, err := parseAudioConfig([]byte(unknown)); err == nil {
+		t.Fatal("unknown audio model type: error = nil")
+	}
 }
 
 func TestParseReleasedUnifiedAudioConfig(t *testing.T) {
 	cfg, err := parseAudioConfig([]byte(`{
-		"audio_config":{
-			"model_type":"gemma4_unified_audio",
+			"audio_config":{
+				"model_type":"gemma4_unified_audio",
 			"audio_embed_dim":640,"audio_samples_per_token":640,
 			"hidden_size":640,"output_proj_dims":640,"rms_norm_eps":0.000001
 		}
@@ -278,6 +283,7 @@ func TestNewModelDisablesMalformedAudioMetadata(t *testing.T) {
 				"processor_config.json": []byte(`{
 					"audio_seq_length":750,
 					"feature_extractor":{
+						"feature_extractor_type":"Gemma4AudioFeatureExtractor",
 						"feature_size":128,"fft_length":512,"frame_length":320,
 						"hop_length":160,"input_scale_factor":1,"max_frequency":8000,
 						"mel_floor":0.001,"padding_side":"right","sampling_rate":16000
