@@ -9,6 +9,14 @@ implementation in MLX-VLM:
   `mlx_vlm/models/gemma4/vision.py`, and
   `mlx_vlm/models/gemma4_unified/gemma4_unified.py`
 
+The native Gemma 4 audio encoder in `x/models/gemma4/audio.go` is adapted from
+the same project's Gemma 4 Conformer implementation at revision
+`84f43753380355c0455a2bafb291d4b7cbcf81d1` (MLX-VLM v0.6.5), source path
+`mlx_vlm/models/gemma4/audio.py`. Its architecture and numerical behavior were
+also cross-checked against Hugging Face Transformers revision
+`dff4572dfa4bfa9f00cc8414e4b84877552fefe9`. No MLX-VLM or Transformers runtime
+dependency is included.
+
 The adapted implementation is distributed under the following license.
 
 ```text
