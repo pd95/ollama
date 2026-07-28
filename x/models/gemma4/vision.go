@@ -15,7 +15,10 @@ import (
 	_ "image/png"
 	"io"
 	"math"
+	"regexp"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 
 	xdraw "golang.org/x/image/draw"
@@ -96,14 +99,32 @@ type gemma4ImageInput struct {
 	Positions   []int32
 }
 
-type gemma4MediaPayload struct {
-	Image      *gemma4ImageInput
-	Audio      *gemma4AudioInput
-	ImageStart int
-	ImageEnd   int
-	AudioStart int
-	AudioEnd   int
+type gemma4MediaItem struct {
+	ID    int
+	Kind  llm.MediaKind
+	Image *gemma4ImageInput
+	Audio *gemma4AudioInput
+	Span  batch.TokenSpan
 }
+
+type gemma4MediaPayload struct {
+	Items []gemma4MediaItem
+}
+
+type gemma4MediaBinding struct {
+	Media       llm.MediaData
+	MarkerStart int
+	MarkerEnd   int
+	Sequence    string
+	Item        gemma4MediaItem
+}
+
+type gemma4MediaReplacement struct {
+	Span     batch.TokenSpan
+	Features *mlx.Array
+}
+
+var gemma4MediaMarkerPattern = regexp.MustCompile(`\[img-([^]]*)\]`)
 
 type ClippableLinear struct {
 	Linear    nn.LinearLayer
@@ -500,137 +521,463 @@ func (m *MultimodalEmbedder) Forward(x *mlx.Array) *mlx.Array {
 }
 
 func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, media []llm.MediaData) (*batch.PreparedInput, error) {
-	if len(media) != 1 {
-		return nil, fmt.Errorf("Gemma4 MLX currently supports exactly one image or WAV audio input per request, got %d", len(media))
-	}
-
-	marker := fmt.Sprintf("[img-%d]", media[0].ID)
-	if strings.Count(prompt, marker) != 1 {
-		return nil, fmt.Errorf("expected one %s marker in Gemma4 prompt", marker)
-	}
-
-	var payload gemma4MediaPayload
-	var sequence string
-	var tokenID int32
-	var softTokens int
-	switch media[0].Kind {
-	case llm.MediaKindImage:
-		if m.VisionConfig == nil {
-			return nil, errors.New("Gemma4 MLX model has no vision_config")
-		}
-		img, err := preprocessGemma4Image(ctx, media[0].Data, m.VisionConfig, int(m.VisionSoftTokens))
-		if err != nil {
-			return nil, err
-		}
-		payload.Image = img
-		softTokens = img.SoftTokens
-		tokenID = m.ImageTokenIDValue
-		sequence = m.mediaTokens.BOI + strings.Repeat(m.mediaTokens.Image, softTokens) + m.mediaTokens.EOI
-	case llm.MediaKindAudio:
-		if m.AudioConfig == nil || m.AudioProcessorConfig == nil {
-			return nil, errors.New("Gemma4 MLX model has no supported audio configuration")
-		}
-		audio, err := preprocessGemma4Audio(ctx, media[0].Data, m.AudioProcessorConfig)
-		if err != nil {
-			return nil, err
-		}
-		payload.Audio = audio
-		softTokens = audio.SoftTokens
-		tokenID = m.AudioTokenIDValue
-		sequence = m.mediaTokens.BOA + strings.Repeat(m.mediaTokens.Audio, softTokens) + m.mediaTokens.EOA
-	default:
-		return nil, fmt.Errorf("Gemma4 MLX does not support %s inputs", media[0].Kind)
-	}
-
-	expanded := strings.Replace(prompt, marker, sequence, 1)
-	tokens := m.tok.Encode(expanded, m.tok.AddBOS())
-	start, end, err := mediaTokenSpan(tokens, tokenID)
+	bindings, err := bindGemma4Media(prompt, media)
 	if err != nil {
 		return nil, err
 	}
-	if got := end - start; got != softTokens {
-		return nil, fmt.Errorf("Gemma4 media token count = %d, want %d", got, softTokens)
+
+	var aggregateSoftTokens int64
+	for i := range bindings {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		item := gemma4MediaItem{ID: bindings[i].Media.ID, Kind: bindings[i].Media.Kind}
+		var softTokens int
+		switch bindings[i].Media.Kind {
+		case llm.MediaKindImage:
+			if m.VisionConfig == nil {
+				return nil, errors.New("Gemma4 MLX model has no vision_config")
+			}
+			img, err := preprocessGemma4Image(ctx, bindings[i].Media.Data, m.VisionConfig, int(m.VisionSoftTokens))
+			if err != nil {
+				return nil, fmt.Errorf("preprocess Gemma4 image %d: %w", bindings[i].Media.ID, err)
+			}
+			item.Image = img
+			softTokens = img.SoftTokens
+			bindings[i].Sequence = m.mediaTokens.BOI + strings.Repeat(m.mediaTokens.Image, softTokens) + m.mediaTokens.EOI
+		case llm.MediaKindAudio:
+			if m.AudioConfig == nil || m.AudioProcessorConfig == nil {
+				return nil, errors.New("Gemma4 MLX model has no supported audio configuration")
+			}
+			audio, err := preprocessGemma4Audio(ctx, bindings[i].Media.Data, m.AudioProcessorConfig)
+			if err != nil {
+				return nil, fmt.Errorf("preprocess Gemma4 audio %d: %w", bindings[i].Media.ID, err)
+			}
+			item.Audio = audio
+			softTokens = audio.SoftTokens
+			bindings[i].Sequence = m.mediaTokens.BOA + strings.Repeat(m.mediaTokens.Audio, softTokens) + m.mediaTokens.EOA
+		default:
+			return nil, fmt.Errorf("Gemma4 MLX does not support %s inputs", bindings[i].Media.Kind)
+		}
+		aggregateSoftTokens += int64(softTokens)
+		if maxContext := m.MaxContextLength(); maxContext > 0 && aggregateSoftTokens >= int64(maxContext) {
+			return nil, fmt.Errorf("Gemma4 media requires at least %d tokens, model context length is %d", aggregateSoftTokens, m.MaxContextLength())
+		}
+		bindings[i].Item = item
+	}
+
+	expanded, err := expandGemma4MediaPrompt(prompt, bindings)
+	if err != nil {
+		return nil, err
+	}
+	tokens := m.tok.Encode(expanded, m.tok.AddBOS())
+	items, err := assignGemma4MediaSpans(tokens, bindings, m.ImageTokenIDValue, m.AudioTokenIDValue)
+	if err != nil {
+		return nil, err
 	}
 
 	pleIDs := append([]int32(nil), tokens...)
-	for i := start; i < end; i++ {
-		pleIDs[i] = 0
-	}
-	if payload.Image != nil {
-		payload.ImageStart, payload.ImageEnd = start, end
-	} else {
-		payload.AudioStart, payload.AudioEnd = start, end
+	var bidirectionalSpans []batch.TokenSpan
+	for _, item := range items {
+		for i := item.Span.Start; i < item.Span.End; i++ {
+			pleIDs[i] = 0
+		}
+		if item.Kind == llm.MediaKindImage && m.VisionConfig.unified() {
+			bidirectionalSpans = append(bidirectionalSpans, item.Span)
+		}
 	}
 	prepared := &batch.PreparedInput{
-		Tokens:      tokens,
-		PLEInputIDs: pleIDs,
-		Payload:     &payload,
-	}
-	if payload.Image != nil && m.VisionConfig.unified() {
-		prepared.BidirectionalSpans = []batch.TokenSpan{{Start: start, End: end}}
+		Tokens:             tokens,
+		PLEInputIDs:        pleIDs,
+		Payload:            &gemma4MediaPayload{Items: items},
+		BidirectionalSpans: bidirectionalSpans,
 	}
 	return prepared, nil
 }
 
-func (m *Model) PrepareMediaEmbeddings(prepared *batch.PreparedInput) error {
-	payload, ok := prepared.Payload.(*gemma4MediaPayload)
-	if !ok || payload == nil || payload.Image == nil && payload.Audio == nil {
-		return errors.New("invalid Gemma4 media payload")
+func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.PreparedInput) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	payload, err := validateGemma4MediaPayload(prepared)
+	if err != nil {
+		return err
+	}
+
+	needsVision, needsAudio := false, false
+	for _, item := range payload.Items {
+		switch item.Kind {
+		case llm.MediaKindImage:
+			if item.Image == nil || item.Audio != nil {
+				return fmt.Errorf("invalid Gemma4 image payload %d", item.ID)
+			}
+			needsVision = true
+		case llm.MediaKindAudio:
+			if item.Audio == nil || item.Image != nil {
+				return fmt.Errorf("invalid Gemma4 audio payload %d", item.ID)
+			}
+			needsAudio = true
+		default:
+			return fmt.Errorf("invalid Gemma4 media kind %q", item.Kind)
+		}
+	}
+	if needsVision && ((m.Vision == nil && m.UnifiedVision == nil) || m.EmbedVision == nil) {
+		return errors.New("Gemma4 MLX vision weights are not loaded; recreate or pull the model so it includes Gemma 4 vision tensor layers")
+	}
+	if needsAudio && m.AudioConfig == nil {
+		return errors.New("Gemma4 MLX model has no supported audio configuration")
+	}
+	if needsAudio && (m.EmbedAudio == nil || !m.AudioConfig.unified() && m.Audio == nil) {
+		if m.AudioConfig.unified() {
+			return errors.New("Gemma4 MLX unified audio projection is not loaded; recreate or pull the model with its audio projection")
+		}
+		return errors.New("Gemma4 MLX audio weights are not loaded; recreate or pull the model so it includes the complete Gemma 4 audio tower")
+	}
+	for _, item := range payload.Items {
+		if err := m.validateGemma4MediaInput(item); err != nil {
+			return err
+		}
+	}
+
+	// Media items are evaluated one at a time. Keep the model and completed
+	// outputs alive while sweeping each encoder's intermediate graph.
+	modelArrays := mlx.Collect(m)
+	mlx.Pin(modelArrays...)
+	defer mlx.Unpin(modelArrays...)
 
 	tokens := mlx.FromValues(prepared.Tokens, 1, len(prepared.Tokens))
 	embeddings := m.TokenEmbeddings(tokens)
-	var features *mlx.Array
-	var start, end int
-	if payload.Image != nil {
-		if (m.Vision == nil && m.UnifiedVision == nil) || m.EmbedVision == nil {
-			return errors.New("Gemma4 MLX vision weights are not loaded; recreate or pull the model so it includes Gemma 4 vision tensor layers")
+	if embeddings.NumDims() != 3 || embeddings.Dim(0) != 1 || embeddings.Dim(1) != len(prepared.Tokens) {
+		return fmt.Errorf("Gemma4 token embeddings have invalid shape %v", embeddings.Dims())
+	}
+	mlx.Eval(embeddings)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	mlx.Pin(embeddings)
+	pinnedOutputs := []*mlx.Array{embeddings}
+	defer func() { mlx.Unpin(pinnedOutputs...) }()
+
+	replacements := make([]gemma4MediaReplacement, 0, len(payload.Items))
+	for _, item := range payload.Items {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		var encoded *mlx.Array
-		if m.UnifiedVision != nil {
-			encoded = m.UnifiedVision.Forward(payload.Image)
-		} else {
-			encoded = m.Vision.Forward(payload.Image)
-		}
-		features = m.EmbedVision.Forward(encoded)
-		start, end = payload.ImageStart, payload.ImageEnd
-	} else {
-		if m.EmbedAudio == nil || !m.AudioConfig.unified() && m.Audio == nil {
-			if m.AudioConfig.unified() {
-				return errors.New("Gemma4 MLX unified audio projection is not loaded; recreate or pull the model with its audio projection")
+		var features *mlx.Array
+		switch item.Kind {
+		case llm.MediaKindImage:
+			var encoded *mlx.Array
+			if m.UnifiedVision != nil {
+				encoded = m.UnifiedVision.Forward(item.Image)
+			} else {
+				encoded = m.Vision.Forward(item.Image)
 			}
-			return errors.New("Gemma4 MLX audio weights are not loaded; recreate or pull the model so it includes the complete Gemma 4 audio tower")
+			features = m.EmbedVision.Forward(encoded)
+		case llm.MediaKindAudio:
+			if m.AudioConfig.unified() {
+				raw := mlx.FromValues(item.Audio.Features, 1, item.Audio.SoftTokens, item.Audio.FeatureSize)
+				features = m.EmbedAudio.Forward(raw)
+			} else {
+				features = m.EmbedAudio.Forward(m.Audio.Forward(item.Audio))
+			}
 		}
-		if m.AudioConfig.unified() {
-			raw := mlx.FromValues(payload.Audio.Features, 1, payload.Audio.SoftTokens, payload.Audio.FeatureSize)
-			features = m.EmbedAudio.Forward(raw)
-		} else {
-			features = m.EmbedAudio.Forward(m.Audio.Forward(payload.Audio))
+		features = features.AsType(embeddings.DType())
+		if features.NumDims() != 3 || features.Dim(0) != 1 || features.Dim(1) != item.Span.End-item.Span.Start || features.Dim(2) != embeddings.Dim(2) {
+			return fmt.Errorf("Gemma4 media %d features have shape %v, want [1,%d,%d]", item.ID, features.Dims(), item.Span.End-item.Span.Start, embeddings.Dim(2))
 		}
-		start, end = payload.AudioStart, payload.AudioEnd
+		mlx.Eval(features)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		mlx.Pin(features)
+		pinnedOutputs = append(pinnedOutputs, features)
+		replacements = append(replacements, gemma4MediaReplacement{Span: item.Span, Features: features})
+		mlx.Sweep()
 	}
-	features = features.AsType(embeddings.DType())
 
-	if features.Dim(1) != end-start {
-		return fmt.Errorf("Gemma4 media feature length = %d, want %d", features.Dim(1), end-start)
+	merged, err := mergeGemma4MediaEmbeddings(embeddings, len(prepared.Tokens), replacements)
+	if err != nil {
+		return err
 	}
-
-	parts := make([]*mlx.Array, 0, 3)
-	if start > 0 {
-		parts = append(parts, mlx.SliceStartStop(embeddings,
-			[]int32{0, 0, 0},
-			[]int32{1, int32(start), int32(embeddings.Dim(2))},
-		))
+	mlx.Eval(merged)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	parts = append(parts, features)
-	if end < len(prepared.Tokens) {
-		parts = append(parts, mlx.SliceStartStop(embeddings,
-			[]int32{0, int32(end), 0},
-			[]int32{1, int32(len(prepared.Tokens)), int32(embeddings.Dim(2))},
-		))
-	}
-	prepared.InputEmbeddings = mlx.Concatenate(parts, 1)
+	mlx.Pin(merged)
+	mlx.Unpin(pinnedOutputs...)
+	pinnedOutputs = nil
+	mlx.Sweep()
+	mlx.Unpin(merged)
+	prepared.InputEmbeddings = merged
 	return nil
+}
+
+func validateGemma4MediaPayload(prepared *batch.PreparedInput) (*gemma4MediaPayload, error) {
+	if prepared == nil {
+		return nil, errors.New("invalid nil Gemma4 prepared input")
+	}
+	if len(prepared.Tokens) == 0 {
+		return nil, errors.New("invalid empty Gemma4 prepared tokens")
+	}
+	payload, ok := prepared.Payload.(*gemma4MediaPayload)
+	if !ok || payload == nil || len(payload.Items) == 0 {
+		return nil, errors.New("invalid Gemma4 media payload")
+	}
+
+	previousEnd := 0
+	seenIDs := make(map[int]bool, len(payload.Items))
+	for _, item := range payload.Items {
+		if item.ID < 0 || seenIDs[item.ID] {
+			return nil, fmt.Errorf("invalid or duplicate Gemma4 media ID %d", item.ID)
+		}
+		seenIDs[item.ID] = true
+		if item.Span.Start < previousEnd || item.Span.Start < 0 || item.Span.End <= item.Span.Start || item.Span.End > len(prepared.Tokens) {
+			return nil, fmt.Errorf("invalid or overlapping Gemma4 media %d span [%d,%d) for %d tokens", item.ID, item.Span.Start, item.Span.End, len(prepared.Tokens))
+		}
+		spanLength := item.Span.End - item.Span.Start
+		switch item.Kind {
+		case llm.MediaKindImage:
+			if item.Image == nil || item.Audio != nil || item.Image.SoftTokens <= 0 || item.Image.SoftTokens != spanLength {
+				return nil, fmt.Errorf("invalid Gemma4 image payload %d", item.ID)
+			}
+		case llm.MediaKindAudio:
+			if item.Audio == nil || item.Image != nil || item.Audio.SoftTokens <= 0 || item.Audio.SoftTokens != spanLength {
+				return nil, fmt.Errorf("invalid Gemma4 audio payload %d", item.ID)
+			}
+			if item.Audio.FeatureSize <= 0 || item.Audio.Frames <= 0 ||
+				!hasExactGemma4InputLength(len(item.Audio.Features), item.Audio.Frames, item.Audio.FeatureSize) ||
+				len(item.Audio.FeatureMask) != item.Audio.Frames {
+				return nil, fmt.Errorf("invalid Gemma4 audio %d processor dimensions", item.ID)
+			}
+		default:
+			return nil, fmt.Errorf("invalid Gemma4 media kind %q", item.Kind)
+		}
+		previousEnd = item.Span.End
+	}
+	return payload, nil
+}
+
+func (m *Model) validateGemma4MediaInput(item gemma4MediaItem) error {
+	switch item.Kind {
+	case llm.MediaKindImage:
+		if m.UnifiedVision != nil {
+			if m.UnifiedVision.PatchDim <= 0 ||
+				!hasExactGemma4InputLength(len(item.Image.Patches), item.Image.SoftTokens, int(m.UnifiedVision.PatchDim)) ||
+				!hasExactGemma4InputLength(len(item.Image.Positions), item.Image.SoftTokens, 2) {
+				return fmt.Errorf("invalid Gemma4 unified image %d processor dimensions", item.ID)
+			}
+			return nil
+		}
+		if item.Image.Width <= 0 || item.Image.Height <= 0 || item.Image.PatchWidth <= 0 || item.Image.PatchHeight <= 0 ||
+			!hasExactGemma4InputLength(len(item.Image.Pixels), 3, item.Image.Height, item.Image.Width) {
+			return fmt.Errorf("invalid Gemma4 image %d processor dimensions", item.ID)
+		}
+	case llm.MediaKindAudio:
+		if m.AudioConfig.unified() {
+			if item.Audio.Frames != item.Audio.SoftTokens {
+				return fmt.Errorf("invalid Gemma4 unified audio %d processor dimensions", item.ID)
+			}
+		} else if item.Audio.FeatureSize != 128 || item.Audio.SoftTokens > item.Audio.Frames {
+			return fmt.Errorf("invalid Gemma4 audio %d processor dimensions", item.ID)
+		}
+	}
+	return nil
+}
+
+func hasExactGemma4InputLength(length int, dimensions ...int) bool {
+	expected := int64(1)
+	for _, dimension := range dimensions {
+		if dimension <= 0 || expected > maxIntValue/int64(dimension) {
+			return false
+		}
+		expected *= int64(dimension)
+	}
+	return expected == int64(length)
+}
+
+func bindGemma4Media(prompt string, media []llm.MediaData) ([]gemma4MediaBinding, error) {
+	if len(media) == 0 {
+		return nil, errors.New("Gemma4 media request contains no media")
+	}
+	if strings.Contains(prompt, "[img]") {
+		return nil, errors.New("Gemma4 prompt contains an unnumbered [img] marker")
+	}
+
+	byID := make(map[int]llm.MediaData, len(media))
+	for _, item := range media {
+		if item.ID < 0 {
+			return nil, fmt.Errorf("Gemma4 media ID must be non-negative, got %d", item.ID)
+		}
+		if _, ok := byID[item.ID]; ok {
+			return nil, fmt.Errorf("duplicate Gemma4 media ID %d", item.ID)
+		}
+		byID[item.ID] = item
+	}
+
+	matches := gemma4MediaMarkerPattern.FindAllStringSubmatchIndex(prompt, -1)
+	bindings := make([]gemma4MediaBinding, 0, len(matches))
+	seen := make(map[int]bool, len(matches))
+	for _, match := range matches {
+		rawID := prompt[match[2]:match[3]]
+		id, err := strconv.Atoi(rawID)
+		if err != nil || id < 0 || strconv.Itoa(id) != rawID {
+			return nil, fmt.Errorf("invalid Gemma4 media marker %q", prompt[match[0]:match[1]])
+		}
+		item, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("Gemma4 prompt marker [img-%d] has no matching media", id)
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("Gemma4 prompt contains multiple [img-%d] markers", id)
+		}
+		seen[id] = true
+		bindings = append(bindings, gemma4MediaBinding{
+			Media:       item,
+			MarkerStart: match[0],
+			MarkerEnd:   match[1],
+		})
+	}
+
+	withoutMarkers := gemma4MediaMarkerPattern.ReplaceAllString(prompt, "")
+	if strings.Contains(withoutMarkers, "[img-") {
+		return nil, errors.New("Gemma4 prompt contains a malformed media marker")
+	}
+	for _, item := range media {
+		if !seen[item.ID] {
+			return nil, fmt.Errorf("expected one [img-%d] marker in Gemma4 prompt", item.ID)
+		}
+	}
+	if len(bindings) != len(media) {
+		return nil, fmt.Errorf("Gemma4 prompt contains %d media markers for %d inputs", len(bindings), len(media))
+	}
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].MarkerStart < bindings[j].MarkerStart })
+	return bindings, nil
+}
+
+func expandGemma4MediaPrompt(prompt string, bindings []gemma4MediaBinding) (string, error) {
+	expandedLen := int64(len(prompt))
+	for _, binding := range bindings {
+		expandedLen += int64(len(binding.Sequence) - (binding.MarkerEnd - binding.MarkerStart))
+		if expandedLen < 0 || expandedLen > maxIntValue {
+			return "", errors.New("Gemma4 expanded media prompt is too large")
+		}
+	}
+
+	var expanded strings.Builder
+	expanded.Grow(int(expandedLen))
+	cursor := 0
+	for _, binding := range bindings {
+		if binding.MarkerStart < cursor || binding.MarkerEnd < binding.MarkerStart || binding.MarkerEnd > len(prompt) {
+			return "", errors.New("Gemma4 media markers overlap or are out of range")
+		}
+		expanded.WriteString(prompt[cursor:binding.MarkerStart])
+		expanded.WriteString(binding.Sequence)
+		cursor = binding.MarkerEnd
+	}
+	expanded.WriteString(prompt[cursor:])
+	return expanded.String(), nil
+}
+
+func assignGemma4MediaSpans(tokens []int32, bindings []gemma4MediaBinding, imageTokenID, audioTokenID int32) ([]gemma4MediaItem, error) {
+	hasImage, hasAudio := false, false
+	for _, binding := range bindings {
+		hasImage = hasImage || binding.Item.Kind == llm.MediaKindImage
+		hasAudio = hasAudio || binding.Item.Kind == llm.MediaKindAudio
+	}
+	if hasImage && hasAudio && imageTokenID == audioTokenID {
+		return nil, fmt.Errorf("Gemma4 image and audio token IDs must differ, both are %d", imageTokenID)
+	}
+
+	var imageSpans, audioSpans []batch.TokenSpan
+	if hasImage {
+		imageSpans = mediaTokenSpans(tokens, imageTokenID)
+	}
+	if hasAudio {
+		audioSpans = mediaTokenSpans(tokens, audioTokenID)
+	}
+	imageIndex, audioIndex := 0, 0
+	items := make([]gemma4MediaItem, 0, len(bindings))
+	previousEnd := 0
+	for _, binding := range bindings {
+		item := binding.Item
+		var span batch.TokenSpan
+		var softTokens int
+		switch item.Kind {
+		case llm.MediaKindImage:
+			if imageIndex >= len(imageSpans) {
+				return nil, fmt.Errorf("Gemma4 prompt contains no image token span for media %d", item.ID)
+			}
+			span = imageSpans[imageIndex]
+			imageIndex++
+			softTokens = item.Image.SoftTokens
+		case llm.MediaKindAudio:
+			if audioIndex >= len(audioSpans) {
+				return nil, fmt.Errorf("Gemma4 prompt contains no audio token span for media %d", item.ID)
+			}
+			span = audioSpans[audioIndex]
+			audioIndex++
+			softTokens = item.Audio.SoftTokens
+		default:
+			return nil, fmt.Errorf("invalid Gemma4 media kind %q", item.Kind)
+		}
+		if span.Start < previousEnd {
+			return nil, fmt.Errorf("Gemma4 media token spans do not follow prompt marker order at media %d", item.ID)
+		}
+		if got := span.End - span.Start; got != softTokens {
+			return nil, fmt.Errorf("Gemma4 media %d token count = %d, want %d", item.ID, got, softTokens)
+		}
+		item.Span = span
+		items = append(items, item)
+		previousEnd = span.End
+	}
+	if imageIndex != len(imageSpans) || audioIndex != len(audioSpans) {
+		return nil, fmt.Errorf("Gemma4 prompt contains unexpected media token spans: images=%d/%d audio=%d/%d", imageIndex, len(imageSpans), audioIndex, len(audioSpans))
+	}
+	return items, nil
+}
+
+func mergeGemma4MediaEmbeddings(embeddings *mlx.Array, tokenCount int, replacements []gemma4MediaReplacement) (*mlx.Array, error) {
+	if embeddings == nil || embeddings.NumDims() != 3 || embeddings.Dim(0) != 1 || embeddings.Dim(1) != tokenCount {
+		return nil, errors.New("invalid Gemma4 token embeddings")
+	}
+	if tokenCount > math.MaxInt32 {
+		return nil, fmt.Errorf("Gemma4 input length %d exceeds MLX index range", tokenCount)
+	}
+	hidden := embeddings.Dim(2)
+	parts := make([]*mlx.Array, 0, 2*len(replacements)+1)
+	cursor := 0
+	for _, replacement := range replacements {
+		span := replacement.Span
+		if span.Start < cursor || span.Start < 0 || span.End <= span.Start || span.End > tokenCount {
+			return nil, fmt.Errorf("invalid or overlapping Gemma4 media span [%d,%d) for %d tokens", span.Start, span.End, tokenCount)
+		}
+		if replacement.Features == nil || replacement.Features.NumDims() != 3 || replacement.Features.Dim(0) != 1 ||
+			replacement.Features.Dim(1) != span.End-span.Start || replacement.Features.Dim(2) != hidden {
+			return nil, fmt.Errorf("invalid Gemma4 media features for span [%d,%d)", span.Start, span.End)
+		}
+		if cursor < span.Start {
+			parts = append(parts, mlx.SliceStartStop(embeddings,
+				[]int32{0, int32(cursor), 0},
+				[]int32{1, int32(span.Start), int32(hidden)},
+			))
+		}
+		parts = append(parts, replacement.Features)
+		cursor = span.End
+	}
+	if cursor < tokenCount {
+		parts = append(parts, mlx.SliceStartStop(embeddings,
+			[]int32{0, int32(cursor), 0},
+			[]int32{1, int32(tokenCount), int32(hidden)},
+		))
+	}
+	if len(parts) == 0 {
+		return nil, errors.New("Gemma4 media payload contains no embedding replacements")
+	}
+	if len(parts) == 1 {
+		return parts[0], nil
+	}
+	return mlx.Concatenate(parts, 1), nil
 }
 
 func preprocessGemma4Image(ctx context.Context, data []byte, cfg *VisionConfig, maxSoftTokens int) (*gemma4ImageInput, error) {
@@ -900,25 +1247,30 @@ func imageToCHWFloat32Context(ctx context.Context, img image.Image) ([]float32, 
 }
 
 func mediaTokenSpan(tokens []int32, mediaTokenID int32) (int, int, error) {
-	start, end := -1, -1
-	for i, tok := range tokens {
-		if tok != mediaTokenID {
-			continue
-		}
-		if start == -1 {
-			start = i
-		}
-		end = i + 1
-	}
-	if start == -1 {
+	spans := mediaTokenSpans(tokens, mediaTokenID)
+	if len(spans) == 0 {
 		return 0, 0, fmt.Errorf("Gemma4 prompt contains no media token id %d", mediaTokenID)
 	}
-	for i := start; i < end; i++ {
-		if tokens[i] != mediaTokenID {
-			return 0, 0, errors.New("Gemma4 media tokens are not contiguous")
-		}
+	if len(spans) != 1 {
+		return 0, 0, errors.New("Gemma4 media tokens are not contiguous")
 	}
-	return start, end, nil
+	return spans[0].Start, spans[0].End, nil
+}
+
+func mediaTokenSpans(tokens []int32, mediaTokenID int32) []batch.TokenSpan {
+	var spans []batch.TokenSpan
+	for i := 0; i < len(tokens); {
+		if tokens[i] != mediaTokenID {
+			i++
+			continue
+		}
+		start := i
+		for i < len(tokens) && tokens[i] == mediaTokenID {
+			i++
+		}
+		spans = append(spans, batch.TokenSpan{Start: start, End: i})
+	}
+	return spans
 }
 
 func imageTokenSpan(tokens []int32, imageTokenID int32) (int, int, error) {
@@ -1131,6 +1483,6 @@ var (
 		PrepareMediaPrompt(context.Context, string, []llm.MediaData) (*batch.PreparedInput, error)
 	} = (*Model)(nil)
 	_ interface {
-		PrepareMediaEmbeddings(*batch.PreparedInput) error
+		PrepareMediaEmbeddings(context.Context, *batch.PreparedInput) error
 	} = (*Model)(nil)
 )

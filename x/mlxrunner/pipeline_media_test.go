@@ -30,6 +30,7 @@ type mediaPrepareModel struct {
 	mediaRejectModel
 	gotPrompt string
 	gotMedia  []llm.MediaData
+	tokens    []int32
 }
 
 type mediaPrefillModel struct {
@@ -54,10 +55,13 @@ func (m *mediaPrefillModel) Forward(b *batch.Batch, _ []cache.Cache) *mlx.Array 
 func (m *mediaPrepareModel) PrepareMediaPrompt(_ context.Context, prompt string, media []llm.MediaData) (*batch.PreparedInput, error) {
 	m.gotPrompt = prompt
 	m.gotMedia = media
+	tokens := m.tokens
+	if len(tokens) == 0 {
+		tokens = []int32{10, 20, 30}
+	}
 	return &batch.PreparedInput{
-		Tokens:      []int32{10, 20, 30},
-		PLEInputIDs: []int32{10, 0, 30},
-		Payload:     "prepared",
+		Tokens:  tokens,
+		Payload: "prepared",
 	}, nil
 }
 
@@ -116,6 +120,25 @@ func TestPrepareUsesMediaPromptPreparer(t *testing.T) {
 	}
 	if request.Prepared == nil || request.Prepared.Payload != "prepared" {
 		t.Fatalf("prepared = %#v", request.Prepared)
+	}
+}
+
+func TestPrepareRejectsExpandedMultiMediaContext(t *testing.T) {
+	model := &mediaPrepareModel{tokens: []int32{1, 2, 3, 4}}
+	runner := Runner{Model: model, contextLength: 4}
+	request := &Request{CompletionRequest: CompletionRequest{
+		Prompt: "compare [img-0] and [img-1]",
+		Media: []llm.MediaData{
+			{ID: 0, Kind: llm.MediaKindImage, Data: []byte("first")},
+			{ID: 1, Kind: llm.MediaKindAudio, Data: []byte("second")},
+		},
+	}}
+	err := runner.Prepare(request)
+	if err == nil || !strings.Contains(err.Error(), "input length (4 tokens)") {
+		t.Fatalf("Prepare() error = %v, want exact expanded context rejection", err)
+	}
+	if len(model.gotMedia) != 2 {
+		t.Fatalf("media passed to preparer = %d, want 2", len(model.gotMedia))
 	}
 }
 
@@ -241,6 +264,26 @@ func TestBidirectionalMediaPrefillKeepsLongTextChunked(t *testing.T) {
 	}
 	if want := []int{2048, 952, 280, 1719}; !slices.Equal(chunks, want) {
 		t.Fatalf("prefill chunk sizes = %v, want %v", chunks, want)
+	}
+}
+
+func TestBidirectionalMediaPrefillChunksAroundMultipleSpans(t *testing.T) {
+	const total = 5000
+	spans := []batch.TokenSpan{{Start: 10, End: 290}, {Start: 400, End: 680}}
+	var chunks []int
+	for position := 0; position < total-1; {
+		n, err := nextPrefillChunk(position, total-position-1, prefillChunkSize(), spans)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chunks = append(chunks, n)
+		position += n
+	}
+	if want := []int{10, 280, 110, 280, 2048, 2048, 223}; !slices.Equal(chunks, want) {
+		t.Fatalf("prefill chunk sizes = %v, want %v", chunks, want)
+	}
+	if err := validateBidirectionalSpans(spans, total, prefillChunkSize()); err != nil {
+		t.Fatalf("validateBidirectionalSpans() error = %v", err)
 	}
 }
 
