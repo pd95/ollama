@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"encoding/json"
 	"maps"
 	"testing"
 )
@@ -82,6 +83,11 @@ func TestValidateAudioConfig(t *testing.T) {
 			}
 		})
 	}
+
+	var overflow ConfigFile
+	if err := json.Unmarshal([]byte(`{"audio_config":{"gradient_clipping":1e39}}`), &overflow); err == nil {
+		t.Fatal("float32 overflow: json.Unmarshal() error = nil")
+	}
 }
 
 func TestValidateAudioRuntimeMetadata(t *testing.T) {
@@ -94,7 +100,7 @@ func TestValidateAudioRuntimeMetadata(t *testing.T) {
 		}
 	}`)
 	tokens := []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`)
-	tokenizerData := []byte(`{"model":{"vocab":{}},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":258881,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`)
+	tokenizerData := []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":258881,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`)
 	cfg := releasedAudioConfig(12)
 	if err := ValidateAudioRuntimeMetadata(cfg, processor, tokens, tokenizerData); err != nil {
 		t.Fatalf("ValidateAudioRuntimeMetadata() error = %v", err)
@@ -112,7 +118,8 @@ func TestValidateAudioRuntimeMetadata(t *testing.T) {
 		{"missing tokens", processor, nil, tokenizerData, nil},
 		{"incomplete tokens", processor, []byte(`{"audio_token":"<|audio|>"}`), tokenizerData, nil},
 		{"missing tokenizer", processor, tokens, nil, nil},
-		{"wrong tokenizer id", processor, tokens, []byte(`{"model":{"vocab":{"<|audio>":5,"<|audio|>":7,"<audio|>":6}}}`), nil},
+		{"wrong tokenizer id", processor, tokens, []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`), nil},
+		{"vocab membership is not singleton encoding", processor, tokens, []byte(`{"model":{"type":"BPE","vocab":{"<|audio>":0,"<|audio|>":1,"<audio|>":2},"merges":[]},"added_tokens":[]}`), func(cfg *ConfigFile) { cfg.AudioTokenID = 1; cfg.TextConfig.VocabSize = 3 }},
 		{"invalid token id", processor, tokens, tokenizerData, func(cfg *ConfigFile) { cfg.AudioTokenID = cfg.TextConfig.VocabSize }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
