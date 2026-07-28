@@ -557,10 +557,11 @@ func hasGemma4AudioTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifest
 }
 
 func hasGemma4AudioRuntimeMetadata(cfg gemma4metadata.ConfigFile, mf *manifest.Manifest) bool {
-	var processorData, tokenizerConfigData json.RawMessage
+	var processorData, tokenizerConfigData, tokenizerData json.RawMessage
 	return mf.ReadConfigJSON("processor_config.json", &processorData) == nil &&
 		mf.ReadConfigJSON("tokenizer_config.json", &tokenizerConfigData) == nil &&
-		gemma4metadata.ValidateAudioRuntimeMetadata(cfg, processorData, tokenizerConfigData) == nil
+		mf.ReadConfigJSON("tokenizer.json", &tokenizerData) == nil &&
+		gemma4metadata.ValidateAudioRuntimeMetadata(cfg, processorData, tokenizerConfigData, tokenizerData) == nil
 }
 
 func projectorHasAudio(f *gguf.File) bool {

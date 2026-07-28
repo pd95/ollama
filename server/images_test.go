@@ -701,6 +701,9 @@ func TestGemma4SafetensorsAudioCapabilityRequiresRuntimeMetadataAndTensors(t *te
 	if !slices.Contains(m.Capabilities(), model.CapabilityAudio) {
 		t.Fatalf("complete audio capabilities = %v, want audio", m.Capabilities())
 	}
+	if !m.Gemma4AudioReady {
+		t.Fatal("complete audio model was not marked runtime-ready")
+	}
 
 	withoutProcessor := slices.DeleteFunc(slices.Clone(complete), func(layer manifest.Layer) bool {
 		return layer.Name == "processor_config.json"
@@ -722,6 +725,32 @@ func TestGemma4SafetensorsAudioCapabilityRequiresRuntimeMetadataAndTensors(t *te
 	}
 	if slices.Contains(m.Capabilities(), model.CapabilityAudio) {
 		t.Fatalf("partial audio capabilities = %v, did not expect audio", m.Capabilities())
+	}
+
+	badConfig := *gemma4AudioConfig(1)
+	badConfig.AudioConfig.ResidualWeight = 0
+	badConfigData, err := json.Marshal(badConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidScalar := replaceGemma4ManifestJSON(t, slices.Clone(complete), "config.json", badConfigData)
+	createSafetensorsTestModel(t, "gemma4-audio-invalid-scalar", cfg, invalidScalar)
+	m, err = GetModel("gemma4-audio-invalid-scalar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(m.Capabilities(), model.CapabilityAudio) || m.Gemma4AudioReady {
+		t.Fatalf("invalid-scalar capabilities = %v ready=%v, did not expect audio", m.Capabilities(), m.Gemma4AudioReady)
+	}
+
+	badTokenizer := replaceGemma4ManifestJSON(t, slices.Clone(complete), "tokenizer.json", []byte(`{"model":{"vocab":{"<|audio>":5,"<|audio|>":8,"<audio|>":6}}}`))
+	createSafetensorsTestModel(t, "gemma4-audio-invalid-tokenizer", cfg, badTokenizer)
+	m, err = GetModel("gemma4-audio-invalid-tokenizer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(m.Capabilities(), model.CapabilityAudio) || m.Gemma4AudioReady {
+		t.Fatalf("invalid-tokenizer capabilities = %v ready=%v, did not expect audio", m.Capabilities(), m.Gemma4AudioReady)
 	}
 }
 
@@ -786,8 +815,10 @@ func gemma4AudioConfig(layers int) *gemma4metadata.ConfigFile {
 		AudioTokenID: 7,
 		AudioConfig: &gemma4metadata.AudioConfig{
 			AttentionChunkSize: 2, AttentionContextLeft: 2,
+			AttentionInvalidLogit: -1e9, AttentionLogitCap: 50,
 			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
 			NumHiddenLayers: layers, OutputProjDims: 3,
+			GradientClipping: 1e10, ResidualWeight: 0.5, RMSNormEps: 1e-6,
 			SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
 		},
 	}
@@ -815,12 +846,27 @@ func gemma4AudioManifestLayers(t *testing.T, complete bool) []manifest.Layer {
 		"config.json":           config,
 		"processor_config.json": []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`),
 		"tokenizer_config.json": []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`),
+		"tokenizer.json":        []byte(`{"model":{"vocab":{}},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`),
 	}
 	for name, contents := range configs {
 		configDigest := createTestBlob(t, contents)
 		layers = append(layers, manifest.Layer{MediaType: "application/vnd.ollama.image.json", Digest: configDigest, Size: int64(len(contents)), Name: name})
 	}
 	return layers
+}
+
+func replaceGemma4ManifestJSON(t *testing.T, layers []manifest.Layer, name string, contents []byte) []manifest.Layer {
+	t.Helper()
+	digest := createTestBlob(t, contents)
+	for i := range layers {
+		if layers[i].Name == name {
+			layers[i].Digest = digest
+			layers[i].Size = int64(len(contents))
+			return layers
+		}
+	}
+	t.Fatalf("manifest config %q not found", name)
+	return nil
 }
 
 func gemma4AudioTensorNames(layers int) []string {
