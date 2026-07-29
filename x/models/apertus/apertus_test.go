@@ -153,6 +153,46 @@ func TestParseConfigApertus1p5Exact8B(t *testing.T) {
 	}
 }
 
+func TestParseConfigApertus1p5Synthetic70B(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+		"architectures": ["Apertus1p5ForConditionalGeneration"],
+		"model_type": "apertus1p5",
+		"text_config": {
+			"dtype": "bfloat16",
+			"hidden_act": "xielu",
+			"hidden_size": 8192,
+			"intermediate_size": 43008,
+			"max_position_embeddings": 262144,
+			"model_type": "apertus1p5_text",
+			"num_attention_heads": 64,
+			"num_hidden_layers": 80,
+			"num_key_value_heads": 8,
+			"output_vocab_size": 131072,
+			"qk_norm": true,
+			"rms_norm_eps": 0.00001,
+			"rope_parameters": {
+				"factor": 32.0,
+				"high_freq_factor": 4.0,
+				"low_freq_factor": 1.0,
+				"original_max_position_embeddings": 8192,
+				"rope_theta": 4000000,
+				"rope_type": "llama3"
+			},
+			"vocab_size": 266752
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HiddenSize != 8192 || cfg.IntermediateSize != 43008 || cfg.NumHiddenLayers != 80 ||
+		cfg.NumAttentionHeads != 64 || cfg.NumKeyValueHeads != 8 || cfg.HeadDim != 128 {
+		t.Fatalf("70B dimensions were not preserved: %+v", cfg)
+	}
+	if cfg.VocabSize != 266752 || cfg.OutputVocabSize != 131072 || cfg.MaxPositionEmbeddings != 262144 {
+		t.Fatalf("70B composite vocabulary/context = %d/%d/%d", cfg.VocabSize, cfg.OutputVocabSize, cfg.MaxPositionEmbeddings)
+	}
+}
+
 func TestParseConfigApertus1p5RequiresRopeParameters(t *testing.T) {
 	_, err := parseConfig([]byte(`{
 		"architectures": ["Apertus1p5ForConditionalGeneration"],
