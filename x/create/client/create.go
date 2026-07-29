@@ -387,26 +387,13 @@ func detectApertus1p5MediaCapabilities(modelDir string) modelCapabilities {
 		return modelCapabilities{}
 	}
 
-	visionCount := 0
-	audioEncoderCount := 0
-	for name := range inv.Tensors {
-		if strings.HasPrefix(name, "model.vision_tokenizer.") {
-			visionCount++
-		}
-		if strings.HasPrefix(name, "model.audio_tokenizer.encoder.") {
-			audioEncoderCount++
-		}
-	}
 	vision := cfg.ImageTokenID == 131079 && cfg.ImageTokenOffset == 131272 &&
 		cfg.Vision.CodebookSize == 131072 && cfg.Vision.EmbedDim == 256 && cfg.Vision.InChannels == 3 &&
-		slices.Equal(cfg.Vision.Multiplier, []int32{1, 1, 2, 2, 4}) && visionCount == 247 &&
-		inv.Has("model.vision_tokenizer.encoder.conv_in.weight") &&
-		inv.Has("model.vision_tokenizer.quant_conv.weight") &&
-		inv.Has("model.vision_tokenizer.quantize.embedding.weight")
+		slices.Equal(cfg.Vision.Multiplier, []int32{1, 1, 2, 2, 4}) && create.Apertus1p5VisionInventoryComplete(inv)
 	audio := cfg.AudioTokenID == 131085 && cfg.AudioTokenOffset == 262344 &&
 		cfg.Audio.CodebookSize == 4096 && cfg.Audio.CodebookDim == 512 && cfg.Audio.Channels == 1 &&
 		cfg.Audio.SampleRate == 24000 && slices.Equal(cfg.Audio.Ratios, []int32{6, 5, 5, 4}) &&
-		audioEncoderCount == 62 && inv.Has("model.audio_tokenizer.quantizer.codebook.embed")
+		create.Apertus1p5AudioInventoryComplete(inv)
 	return modelCapabilities{vision: vision, audio: audio}
 }
 

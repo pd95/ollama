@@ -159,6 +159,12 @@ func (m *Model) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array
 	if err != nil {
 		panic(err)
 	}
+	if codes == nil {
+		panic(fmt.Sprintf("Apertus 1.5 %s encoder returned no codes", payload.kind))
+	}
+	if codes.NumDims() != 2 || codes.Dim(0) != 1 || codes.Dim(1) != payload.expected {
+		panic(fmt.Sprintf("Apertus 1.5 %s encoded shape %v, want [1,%d]", payload.kind, codes.Dims(), payload.expected))
+	}
 	vocabIDs := mlx.Add(codes, mlx.NewScalarArray(float32(offset)).AsType(mlx.DTypeInt32))
 	return mlx.Squeeze(m.EmbedTokens.Forward(vocabIDs), 0)
 }
