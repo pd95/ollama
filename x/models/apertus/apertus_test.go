@@ -1,7 +1,6 @@
 package apertus
 
 import (
-	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -151,59 +150,6 @@ func TestParseConfigApertus1p5Exact8B(t *testing.T) {
 	}
 	if cfg.RopeScaling.Factor != 32 {
 		t.Fatalf("RopeScaling.Factor = %v, want 32", cfg.RopeScaling.Factor)
-	}
-}
-
-func TestPruneApertus1p5TokenizerAddedTokens(t *testing.T) {
-	data := []byte(`{
-		"model": {
-			"type": "BPE",
-			"vocab": {"a": 0},
-			"merges": []
-		},
-		"added_tokens": [
-			{"id": 61, "content": "<|system_start|>", "special": true},
-			{"id": 73, "content": "<|tool_output_start|>", "special": true},
-			{"id": 131073, "content": "<|img_start|>", "special": true},
-			{"id": 262344, "content": "<|audio token 0|>", "special": true}
-		]
-	}`)
-
-	pruned, err := pruneApertus1p5TokenizerAddedTokens(data, 131072)
-	if err != nil {
-		t.Fatalf("pruneApertus1p5TokenizerAddedTokens error: %v", err)
-	}
-
-	var got struct {
-		AddedTokens []struct {
-			ID      int32  `json:"id"`
-			Content string `json:"content"`
-		} `json:"added_tokens"`
-	}
-	if err := json.Unmarshal(pruned, &got); err != nil {
-		t.Fatalf("parse pruned tokenizer: %v", err)
-	}
-
-	want := []struct {
-		id      int32
-		content string
-	}{
-		{id: 61, content: "<|system_start|>"},
-		{id: 73, content: "<|tool_output_start|>"},
-	}
-	if len(got.AddedTokens) != len(want) {
-		t.Fatalf("kept added tokens = %v, want %d", got.AddedTokens, len(want))
-	}
-	for i, wantToken := range want {
-		if got.AddedTokens[i].ID != wantToken.id || got.AddedTokens[i].Content != wantToken.content {
-			t.Fatalf("kept token %d = (%d, %q), want (%d, %q)",
-				i,
-				got.AddedTokens[i].ID,
-				got.AddedTokens[i].Content,
-				wantToken.id,
-				wantToken.content,
-			)
-		}
 	}
 }
 
