@@ -128,6 +128,25 @@ func TestApertus1p5RendererPlainChatDefaultSystem(t *testing.T) {
 	}
 }
 
+func TestApertus1p5RendererPreservesStableMediaOrder(t *testing.T) {
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "first", Images: []api.ImageData{api.ImageData("a")}},
+		{Role: "assistant", Content: "seen"},
+		{Role: "user", Content: "second", Images: []api.ImageData{api.ImageData("b"), api.ImageData("c")}},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[img-0] first", "[img-1][img-2] second"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered prompt missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, apertusImageToken) {
+		t.Fatalf("renderer leaked architecture placeholder before media preparation:\n%s", got)
+	}
+}
+
 func TestApertus1p5RendererToolsAppendGenerationPromptForToolDecision(t *testing.T) {
 	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{
 		{Role: "user", Content: "What is the weather in Zurich?"},
