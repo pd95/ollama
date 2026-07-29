@@ -87,21 +87,32 @@ func (c *apertureAudioConv) forward(x *mlx.Array) *mlx.Array {
 	right := paddingTotal / 2
 	left := paddingTotal - right
 	extra := ((length+c.stride-1)/c.stride)*c.stride - length
-	paddedLength := length + left + right + extra
+	maxPad := max(left, right+extra)
+	extraZero := int32(0)
+	reflectLength := length
+	if length <= maxPad {
+		extraZero = maxPad - length + 1
+		x = mlx.PadConstant(x, []int{1}, []int{0}, []int{int(extraZero)})
+		reflectLength += extraZero
+	}
+	paddedLength := reflectLength + left + right + extra
 	indices := make([]int32, paddedLength)
-	period := max(int32(1), 2*(length-1))
+	period := max(int32(1), 2*(reflectLength-1))
 	for i := range indices {
 		position := int32(i) - left
 		position %= period
 		if position < 0 {
 			position += period
 		}
-		if position >= length {
+		if position >= reflectLength {
 			position = period - position
 		}
 		indices[i] = position
 	}
 	x = mlx.Take(x, mlx.FromValues(indices, len(indices)), 1)
+	if extraZero > 0 {
+		x = x.Slice(mlx.Slice(), mlx.Slice(0, int(length+left+right+extra)), mlx.Slice())
+	}
 	return c.conv.Forward(x)
 }
 
@@ -157,7 +168,7 @@ func loadApertureLSTM(tensors map[string]*mlx.Array, path string, layers int, hi
 	return l, nil
 }
 
-func (l *apertureLSTM) forward(input *mlx.Array) (*mlx.Array, error) {
+func (l *apertureLSTM) forward(ctx context.Context, input *mlx.Array) (*mlx.Array, error) {
 	residual := input
 	x := input
 	for layer := range l.inputWeights {
@@ -169,6 +180,11 @@ func (l *apertureLSTM) forward(input *mlx.Array) (*mlx.Array, error) {
 		steps := x.Dim(1)
 		outputs := make([]*mlx.Array, 0, steps)
 		for t := range steps {
+			if t&63 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			xt := x.Slice(mlx.Slice(), mlx.Slice(t, t+1), mlx.Slice()).Squeeze(1)
 			gates := mlx.Add(mlx.Add(mlx.Matmul(xt, mlx.Transpose(l.inputWeights[layer], 1, 0)), l.inputBiases[layer]), mlx.Add(mlx.Matmul(h, mlx.Transpose(l.hiddenWeights[layer], 1, 0)), l.hiddenBiases[layer]))
 			i := mlx.Sigmoid(gates.Slice(mlx.Slice(), mlx.Slice(0, int(l.hidden))))
@@ -255,7 +271,10 @@ func loadAudioTokenizer(tensors map[string]*mlx.Array, cfg AudioTokenizerConfig)
 	return a, nil
 }
 
-func (a *AudioTokenizer) encode(samples []float32) (*mlx.Array, error) {
+func (a *AudioTokenizer) encode(ctx context.Context, samples []float32) (*mlx.Array, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(samples) == 0 {
 		return nil, errors.New("empty Apertus audio")
 	}
@@ -266,6 +285,9 @@ func (a *AudioTokenizer) encode(samples []float32) (*mlx.Array, error) {
 		return nil, fmt.Errorf("Apertus audio initial convolution produced an empty sequence from %d samples", len(samples))
 	}
 	for i := range a.residuals {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		h = a.residuals[i].forward(h)
 		h = a.downsample[i].forward(apertureELU(h))
 		mlx.Eval(h)
@@ -274,7 +296,7 @@ func (a *AudioTokenizer) encode(samples []float32) (*mlx.Array, error) {
 		}
 	}
 	var err error
-	h, err = a.lstm.forward(h)
+	h, err = a.lstm.forward(ctx, h)
 	if err != nil {
 		return nil, err
 	}
