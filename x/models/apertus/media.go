@@ -213,6 +213,7 @@ func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.Prep
 		}
 		vocabIDs := mlx.Add(codes, mlx.NewScalarArray(float32(offset)).AsType(mlx.DTypeInt32))
 		features := m.EmbedTokens.Forward(vocabIDs)
+		mlx.Eval(features)
 		featureCursor := 0
 		for _, span := range item.spans {
 			if span.Start < previousEnd || span.Start < 0 || span.End <= span.Start || span.End > len(prepared.Tokens) {
