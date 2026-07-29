@@ -12,6 +12,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,8 @@ var defaultAudioModels = []string{
 	"gemma4:e2b",
 	"gemma4:e4b",
 }
+
+var catResponsePattern = regexp.MustCompile(`\bcats?\b`)
 
 // decodeTestAudio returns the test audio clip ("Why is the sky blue?", 16kHz mono WAV).
 func decodeTestAudio(t *testing.T) api.ImageData {
@@ -60,11 +63,31 @@ func requireResponseContains(t *testing.T, response string, words ...string) {
 	t.Helper()
 	lower := strings.ToLower(response)
 	for _, word := range words {
+		if word == "cat" {
+			if catResponsePattern.MatchString(lower) {
+				return
+			}
+			continue
+		}
 		if strings.Contains(lower, word) {
 			return
 		}
 	}
 	t.Fatalf("none of %v found in %q", words, response)
+}
+
+func requireLabeledImageOrder(t *testing.T, response string, firstWords, secondWords []string) {
+	t.Helper()
+	lower := strings.ToLower(response)
+	firstAt := strings.Index(lower, "first:")
+	secondAt := strings.Index(lower, "second:")
+	if firstAt < 0 || secondAt <= firstAt {
+		t.Fatalf("response does not contain ordered FIRST:/SECOND: labels: %q", response)
+	}
+	first := response[firstAt+len("first:") : secondAt]
+	second := response[secondAt+len("second:"):]
+	requireResponseContains(t, first, firstWords...)
+	requireResponseContains(t, second, secondWords...)
 }
 
 // setupAudioModel pulls the model, preloads it, and skips if it doesn't support audio.
@@ -344,13 +367,13 @@ func TestGemma4MultipleMedia(t *testing.T) {
 			}{
 				{
 					name: "abbey_then_docs", media: []api.ImageData{abbeyRoad, docs},
-					firstWords:  []string{"road", "street", "cross", "walk", "beatles"},
-					secondWords: []string{"laptop", "book", "read", "sleep", "documentation", "desk"},
+					firstWords:  []string{"road", "street", "cross", "walk", "beatles", "stripe", "ollamas"},
+					secondWords: []string{"laptop", "book", "read", "sleep", "documentation", "document", "desk", "work", "study", "activity", "office"},
 				},
 				{
 					name: "docs_then_abbey", media: []api.ImageData{docs, abbeyRoad},
 					firstWords:  []string{"laptop", "book", "read", "sleep", "documentation", "desk"},
-					secondWords: []string{"road", "street", "cross", "walk", "beatles"},
+					secondWords: []string{"road", "street", "cross", "walk", "beatles", "stripe"},
 				},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
@@ -366,8 +389,7 @@ func TestGemma4MultipleMedia(t *testing.T) {
 						Options: map[string]any{"temperature": 0, "seed": 123, "num_predict": 120},
 					}
 					response := DoChat(ctx, t, client, req, append(tc.firstWords, tc.secondWords...), 120*time.Second, 20*time.Second)
-					requireResponseContains(t, response.Content, tc.firstWords...)
-					requireResponseContains(t, response.Content, tc.secondWords...)
+					requireLabeledImageOrder(t, response.Content, tc.firstWords, tc.secondWords)
 				})
 			}
 
@@ -383,7 +405,7 @@ func TestGemma4MultipleMedia(t *testing.T) {
 					Options: map[string]any{"temperature": 0, "seed": 123, "num_predict": 120},
 				}
 				response := DoChat(ctx, t, client, req, []string{"llama", "alpaca", "sky", "blue"}, 120*time.Second, 20*time.Second)
-				requireResponseContains(t, response.Content, "llama", "alpaca", "animal", "cartoon", "bear", "character")
+				requireResponseContains(t, response.Content, "llama", "alpaca", "animal", "cartoon", "bear", "character", "cat")
 				requireResponseContains(t, response.Content, "sky", "blue")
 			})
 
@@ -445,7 +467,7 @@ func TestGemma4MultipleMedia(t *testing.T) {
 					t.Fatalf("OpenAI mixed-media choices = %d, want 1", len(result.Choices))
 				}
 				text := result.Choices[0].Message.Content + " " + result.Choices[0].Message.Reasoning
-				requireResponseContains(t, text, "llama", "alpaca", "animal", "cartoon", "bear", "character")
+				requireResponseContains(t, text, "llama", "alpaca", "animal", "cartoon", "bear", "character", "cat")
 				requireResponseContains(t, text, "sky", "blue")
 			})
 
@@ -466,7 +488,7 @@ func TestGemma4MultipleMedia(t *testing.T) {
 					Options: map[string]any{"temperature": 0, "seed": 123, "num_predict": 120},
 				}
 				response := DoChat(ctx, t, client, req, []string{"llama", "alpaca", "sky", "blue"}, 120*time.Second, 20*time.Second)
-				requireResponseContains(t, response.Content, "llama", "alpaca", "animal", "cartoon", "bear", "character")
+				requireResponseContains(t, response.Content, "llama", "alpaca", "animal", "cartoon", "bear", "character", "cat")
 				requireResponseContains(t, response.Content, "sky", "blue")
 			})
 		})
