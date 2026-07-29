@@ -15,6 +15,7 @@ import (
 
 	"github.com/ollama/ollama/llm"
 	"github.com/ollama/ollama/x/mlxrunner/batch"
+	mlxmedia "github.com/ollama/ollama/x/mlxrunner/media"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/tokenizer"
 )
@@ -212,7 +213,7 @@ func TestBindGemma4MediaPreservesMarkerIdentity(t *testing.T) {
 		{ID: 0, Kind: llm.MediaKindImage, Data: []byte("image")},
 		{ID: 1, Kind: llm.MediaKindAudio, Data: []byte("audio")},
 	}
-	bindings, err := bindGemma4Media("before [img-1] middle [img-0] after", media)
+	bindings, err := mlxmedia.BindMarkers("before [img-1] middle [img-0] after", media)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +241,7 @@ func TestBindGemma4MediaRejectsInvalidMappings(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := bindGemma4Media(tt.prompt, tt.media)
+			_, err := mlxmedia.BindMarkers(tt.prompt, tt.media)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("bindGemma4Media() error = %v, want %q", err, tt.want)
 			}
@@ -249,13 +250,13 @@ func TestBindGemma4MediaRejectsInvalidMappings(t *testing.T) {
 }
 
 func TestAssignGemma4MixedMediaSpans(t *testing.T) {
-	bindings := []gemma4MediaBinding{
-		{Item: gemma4MediaItem{ID: 7, Kind: llm.MediaKindAudio, Audio: &gemma4AudioInput{SoftTokens: 2}}},
-		{Item: gemma4MediaItem{ID: 3, Kind: llm.MediaKindImage, Image: &gemma4ImageInput{SoftTokens: 3}}},
-		{Item: gemma4MediaItem{ID: 9, Kind: llm.MediaKindAudio, Audio: &gemma4AudioInput{SoftTokens: 1}}},
+	bindings := []mlxmedia.Binding{
+		{Media: llm.MediaData{ID: 7, Kind: llm.MediaKindAudio}, ExpectedTokens: 2},
+		{Media: llm.MediaData{ID: 3, Kind: llm.MediaKindImage}, ExpectedTokens: 3},
+		{Media: llm.MediaData{ID: 9, Kind: llm.MediaKindAudio}, ExpectedTokens: 1},
 	}
 	tokens := []int32{8, 4, 4, 8, 3, 3, 3, 8, 4, 8}
-	items, err := assignGemma4MediaSpans(tokens, bindings, 3, 4)
+	items, err := mlxmedia.AssignTokenSpans(tokens, bindings, map[llm.MediaKind]int32{llm.MediaKindImage: 3, llm.MediaKindAudio: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +268,7 @@ func TestAssignGemma4MixedMediaSpans(t *testing.T) {
 	}
 
 	tokens = append(tokens[:9], 4, 8)
-	if _, err := assignGemma4MediaSpans(tokens, bindings, 3, 4); err == nil || !strings.Contains(err.Error(), "token count") {
+	if _, err := mlxmedia.AssignTokenSpans(tokens, bindings, map[llm.MediaKind]int32{llm.MediaKindImage: 3, llm.MediaKindAudio: 4}); err == nil || !strings.Contains(err.Error(), "token count") {
 		t.Fatalf("mismatched run error = %v", err)
 	}
 }
@@ -327,11 +328,11 @@ func TestMergeGemma4MediaEmbeddings(t *testing.T) {
 	embeddings := mlx.FromValues([]float32{
 		0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7,
 	}, 1, 8, 2)
-	replacements := []gemma4MediaReplacement{
+	replacements := []mlxmedia.Replacement{
 		{Span: batch.TokenSpan{Start: 1, End: 3}, Features: mlx.FromValues([]float32{10, 11, 12, 13}, 1, 2, 2)},
 		{Span: batch.TokenSpan{Start: 5, End: 6}, Features: mlx.FromValues([]float32{20, 21}, 1, 1, 2)},
 	}
-	got, err := mergeGemma4MediaEmbeddings(embeddings, 8, replacements)
+	got, err := mlxmedia.MergeEmbeddings(embeddings, 8, replacements)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +341,7 @@ func TestMergeGemma4MediaEmbeddings(t *testing.T) {
 	if !slices.Equal(got.Floats(), want) {
 		t.Fatalf("merged embeddings = %v, want %v", got.Floats(), want)
 	}
-	if _, err := mergeGemma4MediaEmbeddings(embeddings, 8, []gemma4MediaReplacement{
+	if _, err := mlxmedia.MergeEmbeddings(embeddings, 8, []mlxmedia.Replacement{
 		{Span: batch.TokenSpan{Start: 2, End: 4}, Features: replacements[0].Features},
 		{Span: batch.TokenSpan{Start: 3, End: 4}, Features: replacements[1].Features},
 	}); err == nil || !strings.Contains(err.Error(), "overlapping") {
@@ -359,19 +360,17 @@ func TestPrepareMediaEmbeddingsHonorsCanceledContext(t *testing.T) {
 func TestPrepareMediaEmbeddingsRejectsMalformedPayloads(t *testing.T) {
 	validImage := func(id, start, end int) gemma4MediaItem {
 		return gemma4MediaItem{
-			ID: id, Kind: llm.MediaKindImage,
+			Item:  mlxmedia.Item{ID: id, Kind: llm.MediaKindImage, Span: batch.TokenSpan{Start: start, End: end}, ExpectedTokens: end - start},
 			Image: &gemma4ImageInput{SoftTokens: end - start},
-			Span:  batch.TokenSpan{Start: start, End: end},
 		}
 	}
 	validAudio := func(id, start, end int) gemma4MediaItem {
 		return gemma4MediaItem{
-			ID: id, Kind: llm.MediaKindAudio,
+			Item: mlxmedia.Item{ID: id, Kind: llm.MediaKindAudio, Span: batch.TokenSpan{Start: start, End: end}, ExpectedTokens: end - start},
 			Audio: &gemma4AudioInput{
 				Features: make([]float32, end-start), FeatureMask: make([]bool, end-start),
 				FeatureSize: 1, Frames: end - start, SoftTokens: end - start,
 			},
-			Span: batch.TokenSpan{Start: start, End: end},
 		}
 	}
 	tests := []struct {
@@ -386,11 +385,10 @@ func TestPrepareMediaEmbeddingsRejectsMalformedPayloads(t *testing.T) {
 		{name: "overlap", prepared: &batch.PreparedInput{Tokens: []int32{1, 2, 3}, Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{validImage(0, 0, 2), validAudio(1, 1, 2)}}}, want: "overlapping"},
 		{name: "duplicate id", prepared: &batch.PreparedInput{Tokens: []int32{1, 2}, Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{validImage(0, 0, 1), validAudio(0, 1, 2)}}}, want: "duplicate"},
 		{name: "audio backing", prepared: &batch.PreparedInput{Tokens: []int32{1}, Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{{
-			ID: 0, Kind: llm.MediaKindAudio,
+			Item:  mlxmedia.Item{ID: 0, Kind: llm.MediaKindAudio, Span: batch.TokenSpan{Start: 0, End: 1}, ExpectedTokens: 1},
 			Audio: &gemma4AudioInput{Features: []float32{1}, FeatureMask: []bool{true}, FeatureSize: 2, Frames: 1, SoftTokens: 1},
-			Span:  batch.TokenSpan{Start: 0, End: 1},
 		}}}}, want: "processor dimensions"},
-		{name: "unknown kind", prepared: &batch.PreparedInput{Tokens: []int32{1}, Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{{ID: 0, Span: batch.TokenSpan{Start: 0, End: 1}}}}}, want: "media kind"},
+		{name: "unknown kind", prepared: &batch.PreparedInput{Tokens: []int32{1}, Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{{Item: mlxmedia.Item{ID: 0, Span: batch.TokenSpan{Start: 0, End: 1}, ExpectedTokens: 1}}}}}, want: "media kind"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
