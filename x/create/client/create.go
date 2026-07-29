@@ -333,7 +333,6 @@ func readConfigV2(m *imagemanifest.ModelManifest) (*model.ConfigV2, error) {
 
 func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 	capabilities := []string{"completion"}
-
 	caps := detectCapabilities(modelDir)
 	if caps.vision {
 		capabilities = append(capabilities, "vision")
@@ -357,6 +356,58 @@ func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 	}
 
 	return capabilities
+}
+
+func detectApertus1p5MediaCapabilities(modelDir string) modelCapabilities {
+	inv, err := create.ReadInventory(modelDir)
+	if err != nil {
+		return modelCapabilities{}
+	}
+
+	var cfg struct {
+		ImageTokenID     int32 `json:"image_token_id"`
+		AudioTokenID     int32 `json:"audio_token_id"`
+		ImageTokenOffset int32 `json:"image_token_offset"`
+		AudioTokenOffset int32 `json:"audio_token_offset"`
+		Vision           struct {
+			CodebookSize int32   `json:"codebook_size"`
+			EmbedDim     int32   `json:"embed_dim"`
+			InChannels   int32   `json:"in_channels"`
+			Multiplier   []int32 `json:"channel_multiplier"`
+		} `json:"vision_tokenizer_config"`
+		Audio struct {
+			CodebookSize int32   `json:"codebook_size"`
+			CodebookDim  int32   `json:"codebook_dim"`
+			Channels     int32   `json:"audio_channels"`
+			SampleRate   int32   `json:"sampling_rate"`
+			Ratios       []int32 `json:"upsampling_ratios"`
+		} `json:"audio_tokenizer_config"`
+	}
+	if json.Unmarshal(inv.RawConfig, &cfg) != nil {
+		return modelCapabilities{}
+	}
+
+	visionCount := 0
+	audioEncoderCount := 0
+	for name := range inv.Tensors {
+		if strings.HasPrefix(name, "model.vision_tokenizer.") {
+			visionCount++
+		}
+		if strings.HasPrefix(name, "model.audio_tokenizer.encoder.") {
+			audioEncoderCount++
+		}
+	}
+	vision := cfg.ImageTokenID == 131079 && cfg.ImageTokenOffset == 131272 &&
+		cfg.Vision.CodebookSize == 131072 && cfg.Vision.EmbedDim == 256 && cfg.Vision.InChannels == 3 &&
+		slices.Equal(cfg.Vision.Multiplier, []int32{1, 1, 2, 2, 4}) && visionCount == 247 &&
+		inv.Has("model.vision_tokenizer.encoder.conv_in.weight") &&
+		inv.Has("model.vision_tokenizer.quant_conv.weight") &&
+		inv.Has("model.vision_tokenizer.quantize.embedding.weight")
+	audio := cfg.AudioTokenID == 131085 && cfg.AudioTokenOffset == 262344 &&
+		cfg.Audio.CodebookSize == 4096 && cfg.Audio.CodebookDim == 512 && cfg.Audio.Channels == 1 &&
+		cfg.Audio.SampleRate == 24000 && slices.Equal(cfg.Audio.Ratios, []int32{6, 5, 5, 4}) &&
+		audioEncoderCount == 62 && inv.Has("model.audio_tokenizer.quantizer.codebook.embed")
+	return modelCapabilities{vision: vision, audio: audio}
 }
 
 // newLayerCreator returns a LayerCreator callback for creating config/JSON layers.
@@ -529,6 +580,9 @@ func detectCapabilities(modelDir string) modelCapabilities {
 	audio := cfg.AudioConfig != nil || cfg.SoundConfig != nil
 	if isGemma4ModelConfig(cfg.Architectures, cfg.ModelType) {
 		vision, audio = gemma4ModelDirMediaCapabilities(modelDir)
+	} else if isApertus1p5ModelConfig(cfg.Architectures, cfg.ModelType) {
+		media := detectApertus1p5MediaCapabilities(modelDir)
+		vision, audio = media.vision, media.audio
 	}
 
 	return modelCapabilities{
@@ -537,6 +591,16 @@ func detectCapabilities(modelDir string) modelCapabilities {
 		thinking: chatTemplateHasThinkingSupport(readChatTemplate(modelDir)) ||
 			alwaysSupportsThinking(cfg.Architectures, cfg.ModelType),
 	}
+}
+
+func isApertus1p5ModelConfig(architectures []string, modelType string) bool {
+	for _, value := range append(architectures, modelType) {
+		value = strings.ToLower(value)
+		if strings.Contains(value, "apertus1p5") || strings.Contains(value, "apertus-1.5") || strings.Contains(value, "apertus_1_5") {
+			return true
+		}
+	}
+	return false
 }
 
 func isGemma4ModelConfig(architectures []string, modelType string) bool {
