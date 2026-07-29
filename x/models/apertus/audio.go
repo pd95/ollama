@@ -87,21 +87,32 @@ func (c *apertureAudioConv) forward(x *mlx.Array) *mlx.Array {
 	right := paddingTotal / 2
 	left := paddingTotal - right
 	extra := ((length+c.stride-1)/c.stride)*c.stride - length
-	paddedLength := length + left + right + extra
+	maxPad := max(left, right+extra)
+	extraZero := int32(0)
+	reflectLength := length
+	if length <= maxPad {
+		extraZero = maxPad - length + 1
+		x = mlx.PadConstant(x, []int{1}, []int{0}, []int{int(extraZero)})
+		reflectLength += extraZero
+	}
+	paddedLength := reflectLength + left + right + extra
 	indices := make([]int32, paddedLength)
-	period := max(int32(1), 2*(length-1))
+	period := max(int32(1), 2*(reflectLength-1))
 	for i := range indices {
 		position := int32(i) - left
 		position %= period
 		if position < 0 {
 			position += period
 		}
-		if position >= length {
+		if position >= reflectLength {
 			position = period - position
 		}
 		indices[i] = position
 	}
 	x = mlx.Take(x, mlx.FromValues(indices, len(indices)), 1)
+	if extraZero > 0 {
+		x = x.Slice(mlx.Slice(), mlx.Slice(0, int(length+left+right+extra)), mlx.Slice())
+	}
 	return c.conv.Forward(x)
 }
 

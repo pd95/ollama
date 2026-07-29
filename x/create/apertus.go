@@ -2,6 +2,7 @@ package create
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -54,4 +55,78 @@ func isApertus1p5MediaTensor(name string) bool {
 
 func isApertus1p5RuntimeTensor(name string) bool {
 	return isApertus1p5TextTensor(name) || isApertus1p5MediaTensor(name)
+}
+
+func Apertus1p5VisionInventoryComplete(inv Inventory) bool {
+	return completeApertus1p5VisionNames(inv.Has)
+}
+
+func completeApertus1p5VisionNames(has func(string) bool) bool {
+	const p = "model.vision_tokenizer."
+	pair := func(path string) bool { return has(path+".weight") && has(path+".bias") }
+	if !pair(p+"encoder.conv_in") || !pair(p+"encoder.conv_out") || !pair(p+"encoder.norm_out") ||
+		!pair(p+"quant_conv") || !has(p+"quantize.embedding.weight") {
+		return false
+	}
+	for level := range 5 {
+		for block := range 4 {
+			path := fmt.Sprintf("%sencoder.down.%d.block.%d", p, level, block)
+			if !pair(path+".norm1") || !pair(path+".conv1") || !pair(path+".norm2") || !pair(path+".conv2") {
+				return false
+			}
+			if block == 0 && (level == 2 || level == 4) && !pair(path+".nin_shortcut") {
+				return false
+			}
+			if level == 4 {
+				attn := fmt.Sprintf("%sencoder.down.%d.attn.%d", p, level, block)
+				if !pair(attn+".norm") || !pair(attn+".q") || !pair(attn+".k") || !pair(attn+".v") || !pair(attn+".proj_out") {
+					return false
+				}
+			}
+		}
+		if level < 4 && !pair(fmt.Sprintf("%sencoder.down.%d.downsample.conv", p, level)) {
+			return false
+		}
+	}
+	for _, block := range []string{"block_1", "block_2"} {
+		path := p + "encoder.mid." + block
+		if !pair(path+".norm1") || !pair(path+".conv1") || !pair(path+".norm2") || !pair(path+".conv2") {
+			return false
+		}
+	}
+	attn := p + "encoder.mid.attn_1"
+	return pair(attn+".norm") && pair(attn+".q") && pair(attn+".k") && pair(attn+".v") && pair(attn+".proj_out")
+}
+
+func Apertus1p5AudioInventoryComplete(inv Inventory) bool {
+	return completeApertus1p5AudioNames(inv.Has)
+}
+
+func completeApertus1p5AudioNames(has func(string) bool) bool {
+	const p = "model.audio_tokenizer.encoder.layers."
+	conv := func(path string) bool {
+		return has(path+".conv.bias") && has(path+".conv.parametrizations.weight.original0") && has(path+".conv.parametrizations.weight.original1")
+	}
+	if !conv(p+"0") || !conv(p+"15") || !has("model.audio_tokenizer.quantizer.codebook.embed") {
+		return false
+	}
+	for _, index := range []int{1, 4, 7, 10} {
+		path := fmt.Sprintf("%s%d", p, index)
+		if !conv(path+".block.1") || !conv(path+".block.3") || !conv(path+".shortcut") {
+			return false
+		}
+	}
+	for _, index := range []int{3, 6, 9, 12} {
+		if !conv(fmt.Sprintf("%s%d", p, index)) {
+			return false
+		}
+	}
+	for layer := range 2 {
+		for _, kind := range []string{"weight_ih", "weight_hh", "bias_ih", "bias_hh"} {
+			if !has(fmt.Sprintf("%s13.lstm.%s_l%d", p, kind, layer)) {
+				return false
+			}
+		}
+	}
+	return true
 }
