@@ -463,13 +463,13 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	}
 	m.LMHead = lmHead
 
-	if hasCompleteVisionTokenizerInventory(tensors) {
+	if canLoadVisionTokenizer(tensors, m.VisionTokenizer) {
 		m.Vision, err = loadVisionTokenizer(tensors, m.VisionTokenizer)
 		if err != nil {
 			return fmt.Errorf("load Apertus 1.5 vision tokenizer: %w", err)
 		}
 	}
-	if hasCompleteAudioTokenizerInventory(tensors) {
+	if canLoadAudioTokenizer(tensors, m.AudioTokenizer) {
 		m.Audio, err = loadAudioTokenizer(tensors, m.AudioTokenizer)
 		if err != nil {
 			return fmt.Errorf("load Apertus 1.5 audio tokenizer: %w", err)
@@ -539,9 +539,17 @@ func hasCompleteVisionTokenizerInventory(tensors map[string]*mlx.Array) bool {
 	return completeApertusVisionNames(has)
 }
 
+func canLoadVisionTokenizer(tensors map[string]*mlx.Array, cfg VisionTokenizerConfig) bool {
+	return hasCompleteVisionTokenizerInventory(tensors) && cfg.validate() == nil
+}
+
 func hasCompleteAudioTokenizerInventory(tensors map[string]*mlx.Array) bool {
 	has := func(name string) bool { return tensors[name] != nil }
 	return completeApertusAudioNames(has)
+}
+
+func canLoadAudioTokenizer(tensors map[string]*mlx.Array, cfg AudioTokenizerConfig) bool {
+	return hasCompleteAudioTokenizerInventory(tensors) && cfg.validate() == nil
 }
 
 func completeApertusVisionNames(has func(string) bool) bool {
