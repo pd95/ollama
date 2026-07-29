@@ -168,6 +168,10 @@ func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.Prep
 	}
 	ids := mlx.Reshape(mlx.FromValues(prepared.Tokens, len(prepared.Tokens)), 1, int32(len(prepared.Tokens)))
 	embeddings := m.EmbedTokens.Forward(ids)
+	mlx.Eval(embeddings)
+	mlx.Pin(embeddings)
+	pinned := []*mlx.Array{embeddings}
+	defer func() { mlx.Unpin(pinned...) }()
 	replacements := make([]shared.Replacement, 0, len(payload.items))
 	previousEnd := 0
 	seen := map[int]bool{}
@@ -190,7 +194,7 @@ func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.Prep
 				return fmt.Errorf("Apertus 1.5 image %d payload is invalid", item.id)
 			}
 			var err error
-			codes, err = m.Vision.encode(item.image.pixels, item.image.width, item.image.height)
+			codes, err = m.Vision.encode(ctx, item.image.pixels, item.image.width, item.image.height)
 			if err != nil {
 				return fmt.Errorf("Apertus 1.5 image %d encode: %w", item.id, err)
 			}
@@ -200,7 +204,7 @@ func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.Prep
 				return fmt.Errorf("Apertus 1.5 audio %d payload is invalid", item.id)
 			}
 			var err error
-			codes, err = m.Audio.encode(item.audio.samples)
+			codes, err = m.Audio.encode(ctx, item.audio.samples)
 			if err != nil {
 				return fmt.Errorf("Apertus 1.5 audio %d encode: %w", item.id, err)
 			}
@@ -214,20 +218,28 @@ func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.Prep
 		vocabIDs := mlx.Add(codes, mlx.NewScalarArray(float32(offset)).AsType(mlx.DTypeInt32))
 		features := m.EmbedTokens.Forward(vocabIDs)
 		mlx.Eval(features)
+		mlx.Pin(features)
+		mlx.Sweep()
 		featureCursor := 0
 		for _, span := range item.spans {
 			if span.Start < previousEnd || span.Start < 0 || span.End <= span.Start || span.End > len(prepared.Tokens) {
+				mlx.Unpin(features)
 				return fmt.Errorf("Apertus 1.5 media %d has invalid span [%d,%d)", item.id, span.Start, span.End)
 			}
 			count := span.End - span.Start
 			part := features.Slice(mlx.Slice(), mlx.Slice(featureCursor, featureCursor+count), mlx.Slice())
+			mlx.Eval(part)
+			mlx.Pin(part)
+			pinned = append(pinned, part)
 			replacements = append(replacements, shared.Replacement{Span: span, Features: part})
 			featureCursor += count
 			previousEnd = span.End
 		}
 		if featureCursor != item.expected {
+			mlx.Unpin(features)
 			return fmt.Errorf("Apertus 1.5 media %d spans cover %d tokens, want %d", item.id, featureCursor, item.expected)
 		}
+		mlx.Unpin(features)
 	}
 	if !slices.IsSortedFunc(replacements, func(a, b shared.Replacement) int { return a.Span.Start - b.Span.Start }) {
 		return errors.New("Apertus 1.5 media replacements are unordered")
