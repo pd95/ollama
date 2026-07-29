@@ -151,6 +151,43 @@ func TestApertus1p5PlanKeepsEncodeOnlyMediaTensors(t *testing.T) {
 	}
 }
 
+func TestApertus1p5MediaInventoryRequiresEveryTensor(t *testing.T) {
+	tests := []struct {
+		name       string
+		complete   func(func(string) bool) bool
+		wantCount  int
+		removeName string
+	}{
+		{
+			name:       "vision",
+			complete:   completeApertus1p5VisionNames,
+			wantCount:  247,
+			removeName: "model.vision_tokenizer.encoder.down.4.attn.2.v.bias",
+		},
+		{
+			name:       "audio",
+			complete:   completeApertus1p5AudioNames,
+			wantCount:  63,
+			removeName: "model.audio_tokenizer.encoder.layers.13.lstm.weight_hh_l1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			names := map[string]bool{}
+			if !tt.complete(func(name string) bool { names[name] = true; return true }) {
+				t.Fatal("complete inventory callback returned false")
+			}
+			if len(names) != tt.wantCount {
+				t.Fatalf("required tensor count = %d, want %d", len(names), tt.wantCount)
+			}
+			delete(names, tt.removeName)
+			if tt.complete(func(name string) bool { return names[name] }) {
+				t.Fatalf("inventory reported complete without %q", tt.removeName)
+			}
+		})
+	}
+}
+
 func apertus1p5Inventory() Inventory {
 	tensors := map[string]SourceTensor{
 		"model.language_model.embed_tokens.weight": {Name: "model.language_model.embed_tokens.weight", Dtype: "BF16", Shape: []int32{266752, 4096}},

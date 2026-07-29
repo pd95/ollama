@@ -463,13 +463,13 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	}
 	m.LMHead = lmHead
 
-	if tensors["model.vision_tokenizer.encoder.conv_in.weight"] != nil {
+	if hasCompleteVisionTokenizerInventory(tensors) {
 		m.Vision, err = loadVisionTokenizer(tensors, m.VisionTokenizer)
 		if err != nil {
 			return fmt.Errorf("load Apertus 1.5 vision tokenizer: %w", err)
 		}
 	}
-	if tensors["model.audio_tokenizer.encoder.layers.0.conv.bias"] != nil {
+	if hasCompleteAudioTokenizerInventory(tensors) {
 		m.Audio, err = loadAudioTokenizer(tensors, m.AudioTokenizer)
 		if err != nil {
 			return fmt.Errorf("load Apertus 1.5 audio tokenizer: %w", err)
@@ -532,6 +532,83 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	}
 
 	return nil
+}
+
+func hasCompleteVisionTokenizerInventory(tensors map[string]*mlx.Array) bool {
+	has := func(name string) bool { return tensors[name] != nil }
+	return completeApertusVisionNames(has)
+}
+
+func hasCompleteAudioTokenizerInventory(tensors map[string]*mlx.Array) bool {
+	has := func(name string) bool { return tensors[name] != nil }
+	return completeApertusAudioNames(has)
+}
+
+func completeApertusVisionNames(has func(string) bool) bool {
+	const p = "model.vision_tokenizer."
+	linear := func(path string) bool { return has(path+".weight") && has(path+".bias") }
+	norm := linear
+	if !linear(p+"encoder.conv_in") || !linear(p+"encoder.conv_out") || !norm(p+"encoder.norm_out") ||
+		!linear(p+"quant_conv") || !has(p+"quantize.embedding.weight") {
+		return false
+	}
+	for level := range 5 {
+		for block := range 4 {
+			path := fmt.Sprintf("%sencoder.down.%d.block.%d", p, level, block)
+			if !norm(path+".norm1") || !linear(path+".conv1") || !norm(path+".norm2") || !linear(path+".conv2") {
+				return false
+			}
+			if block == 0 && (level == 2 || level == 4) && !linear(path+".nin_shortcut") {
+				return false
+			}
+			if level == 4 {
+				attn := fmt.Sprintf("%sencoder.down.%d.attn.%d", p, level, block)
+				if !norm(attn+".norm") || !linear(attn+".q") || !linear(attn+".k") || !linear(attn+".v") || !linear(attn+".proj_out") {
+					return false
+				}
+			}
+		}
+		if level < 4 && !linear(fmt.Sprintf("%sencoder.down.%d.downsample.conv", p, level)) {
+			return false
+		}
+	}
+	for _, block := range []string{"block_1", "block_2"} {
+		path := p + "encoder.mid." + block
+		if !norm(path+".norm1") || !linear(path+".conv1") || !norm(path+".norm2") || !linear(path+".conv2") {
+			return false
+		}
+	}
+	attn := p + "encoder.mid.attn_1"
+	return norm(attn+".norm") && linear(attn+".q") && linear(attn+".k") && linear(attn+".v") && linear(attn+".proj_out")
+}
+
+func completeApertusAudioNames(has func(string) bool) bool {
+	const p = "model.audio_tokenizer.encoder.layers."
+	conv := func(path string) bool {
+		return has(path+".conv.bias") && has(path+".conv.parametrizations.weight.original0") && has(path+".conv.parametrizations.weight.original1")
+	}
+	if !conv(p+"0") || !conv(p+"15") || !has("model.audio_tokenizer.quantizer.codebook.embed") {
+		return false
+	}
+	for _, index := range []int{1, 4, 7, 10} {
+		path := fmt.Sprintf("%s%d", p, index)
+		if !conv(path+".block.1") || !conv(path+".block.3") || !conv(path+".shortcut") {
+			return false
+		}
+	}
+	for _, index := range []int{3, 6, 9, 12} {
+		if !conv(fmt.Sprintf("%s%d", p, index)) {
+			return false
+		}
+	}
+	for layer := range 2 {
+		for _, kind := range []string{"weight_ih", "weight_hh", "bias_ih", "bias_hh"} {
+			if !has(fmt.Sprintf("%s13.lstm.%s_l%d", p, kind, layer)) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (*mlx.Array, *mlx.Array) {
