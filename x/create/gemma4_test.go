@@ -7,17 +7,19 @@ import (
 
 func TestGemma4UnifiedImportTransformRegistration(t *testing.T) {
 	tests := []struct {
-		name       string
-		configJSON string
-		cfg        sourceModelConfig
-		wantErr    bool
-		wantLayers int
+		name             string
+		configJSON       string
+		cfg              sourceModelConfig
+		wantErr          bool
+		wantLayers       int
+		wantUnifiedAudio bool
 	}{
 		{
-			name:       "unified conditional generation architecture",
-			configJSON: `{"architectures":["Gemma4UnifiedForConditionalGeneration"],"text_config":{"num_hidden_layers":48}}`,
-			cfg:        sourceModelConfig{Architectures: []string{"Gemma4UnifiedForConditionalGeneration"}},
-			wantLayers: 48,
+			name:             "unified conditional generation architecture",
+			configJSON:       `{"architectures":["Gemma4UnifiedForConditionalGeneration"],"text_config":{"num_hidden_layers":48},"audio_config":{"model_type":"gemma4_unified_audio"}}`,
+			cfg:              sourceModelConfig{Architectures: []string{"Gemma4UnifiedForConditionalGeneration"}},
+			wantLayers:       48,
+			wantUnifiedAudio: true,
 		},
 		{
 			name:       "unified model type fallback",
@@ -55,6 +57,9 @@ func TestGemma4UnifiedImportTransformRegistration(t *testing.T) {
 			if gemmaTransform.numLayers != tt.wantLayers {
 				t.Fatalf("numLayers = %d, want %d", gemmaTransform.numLayers, tt.wantLayers)
 			}
+			if gemmaTransform.unifiedAudio != tt.wantUnifiedAudio {
+				t.Fatalf("unifiedAudio = %v, want %v", gemmaTransform.unifiedAudio, tt.wantUnifiedAudio)
+			}
 		})
 	}
 }
@@ -64,6 +69,7 @@ func TestGemma4QuantizationType(t *testing.T) {
 	transform26B := gemma4ImportTransform{numLayers: 30, numExperts: 128}
 	// 8-expert model (hypothetical)
 	transform8E := gemma4ImportTransform{numLayers: 30, numExperts: 8}
+	transformUnified := gemma4ImportTransform{numLayers: 48, unifiedAudio: true}
 
 	aligned := []int32{2816, 2816} // divisible by 64 (int4/int8 group size) and 16 (nvfp4)
 
@@ -145,31 +151,28 @@ func TestGemma4QuantizationType(t *testing.T) {
 		{"norm", transform26B, "model.layers.0.input_layernorm.weight", []int32{2816}, "int4", ""},
 		{"router scale", transform26B, "model.layers.0.router.scale", []int32{2816}, "int4", ""},
 
-		// === Audio/vision tower tensors: must pass through unquantized for all quant types ===
-		// These contain .v_proj and down_proj but should NOT be intercepted by
-		// the sensitive-tensor promotion logic.
+		// === Audio/vision tensors: quantize eligible linear weights ===
 		{"audio norm int4", transform26B, "model.audio_tower.subsample_conv_projection.layer0.norm.weight", []int32{128}, "int4", ""},
 		{"audio norm nvfp4", transform26B, "model.audio_tower.subsample_conv_projection.layer0.norm.weight", []int32{128}, "nvfp4", ""},
 		{"audio norm int8", transform26B, "model.audio_tower.subsample_conv_projection.layer0.norm.weight", []int32{128}, "int8", ""},
 		{"audio norm mxfp8", transform26B, "model.audio_tower.subsample_conv_projection.layer0.norm.weight", []int32{128}, "mxfp8", ""},
 		{"audio conv int4", transform26B, "model.audio_tower.subsample_conv_projection.layer0.conv.weight", []int32{128, 1, 3, 3}, "int4", ""},
 		{"audio conv nvfp4", transform26B, "model.audio_tower.subsample_conv_projection.layer0.conv.weight", []int32{128, 1, 3, 3}, "nvfp4", ""},
-		{"audio linear int4", transform26B, "model.audio_tower.subsample_conv_projection.input_proj_linear.weight", aligned, "int4", ""},
-		{"audio linear nvfp4", transform26B, "model.audio_tower.subsample_conv_projection.input_proj_linear.weight", aligned, "nvfp4", ""},
-		// Audio tower v_proj — must NOT be promoted despite containing .v_proj
-		{"audio v_proj int4", transform26B, "model.audio_tower.layers.0.self_attn.v_proj.linear.weight", aligned, "int4", ""},
-		{"audio v_proj nvfp4", transform26B, "model.audio_tower.layers.0.self_attn.v_proj.linear.weight", aligned, "nvfp4", ""},
-		// Vision tower — source precision for every quant family.
-		{"vision v_proj int4", transform26B, "model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight", aligned, "int4", ""},
-		{"vision v_proj nvfp4", transform26B, "model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight", aligned, "nvfp4", ""},
-		{"vision q_proj nvfp4", transform26B, "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight", aligned, "nvfp4", ""},
-		{"unified vision embedder nvfp4", transform26B, "model.vision_embedder.patch_dense.weight", aligned, "nvfp4", ""},
-		{"vision projection nvfp4", transform26B, "model.embed_vision.embedding_projection.linear.weight", aligned, "nvfp4", ""},
-		{"embed_vision int4", transform26B, "model.embed_vision.embedding_projection.weight", aligned, "int4", ""},
-		{"unified vision patch dense", transform26B, "model.vision_embedder.patch_dense.weight", aligned, "nvfp4", ""},
-		// Audio tower down_proj
-		{"audio down_proj int4", transform26B, "model.audio_tower.layers.0.mlp.down_proj.linear.weight", aligned, "int4", ""},
-		{"audio down_proj nvfp4", transform26B, "model.audio_tower.layers.0.mlp.down_proj.linear.weight", aligned, "nvfp4", ""},
+		{"vision position table", transform26B, "model.vision_tower.patch_embedder.position_embedding_table", aligned, "nvfp4", ""},
+		{"unified vision position table", transform26B, "model.vision_embedder.pos_embedding", aligned, "nvfp4", ""},
+		{"audio linear int4", transform26B, "model.audio_tower.subsample_conv_projection.input_proj_linear.weight", aligned, "int4", "int4"},
+		{"audio linear nvfp4", transform26B, "model.audio_tower.subsample_conv_projection.input_proj_linear.weight", aligned, "nvfp4", "nvfp4"},
+		{"audio v_proj int4", transform26B, "model.audio_tower.layers.0.self_attn.v_proj.linear.weight", aligned, "int4", "int8"},
+		{"audio v_proj nvfp4", transform26B, "model.audio_tower.layers.0.self_attn.v_proj.linear.weight", aligned, "nvfp4", "mxfp8"},
+		{"vision v_proj int4", transform26B, "model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight", aligned, "int4", "int8"},
+		{"vision v_proj nvfp4", transform26B, "model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight", aligned, "nvfp4", "mxfp8"},
+		{"embed_vision int4", transform26B, "model.embed_vision.embedding_projection.weight", aligned, "int4", "int8"},
+		{"unified vision patch dense", transform26B, "model.vision_embedder.patch_dense.weight", aligned, "nvfp4", "mxfp8"},
+		{"audio output projection", transform26B, "model.audio_tower.output_proj.weight", aligned, "nvfp4", "mxfp8"},
+		{"unified audio projection", transform26B, "model.embed_audio.embedding_projection.weight", aligned, "nvfp4", "mxfp8"},
+		{"unified direct audio stays dense", transformUnified, "model.embed_audio.embedding_projection.weight", aligned, "nvfp4", ""},
+		{"audio down_proj int4", transform26B, "model.audio_tower.layers.0.mlp.down_proj.linear.weight", aligned, "int4", "int8"},
+		{"audio down_proj nvfp4", transform26B, "model.audio_tower.layers.0.mlp.down_proj.linear.weight", aligned, "nvfp4", "mxfp8"},
 	}
 
 	for _, tt := range tests {
@@ -183,7 +186,7 @@ func TestGemma4QuantizationType(t *testing.T) {
 	}
 }
 
-func TestGemma4ImportPlanKeepsMediaAtSourcePrecision(t *testing.T) {
+func TestGemma4ImportPlanQuantizesMediaLinears(t *testing.T) {
 	policy := gemma4ImportTransform{numLayers: 2, hasAudioConfig: true}
 	inv := newInventory(sourceModelConfig{}, map[string]string{
 		"model.embed_tokens.weight":                                            "BF16",
@@ -193,6 +196,7 @@ func TestGemma4ImportPlanKeepsMediaAtSourcePrecision(t *testing.T) {
 		"model.embed_vision.embedding_projection.weight":                       "BF16",
 		"model.vision_embedder.patch_dense.weight":                             "BF16",
 		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight": "BF16",
+		"model.audio_tower.output_proj.weight":                                 "BF16",
 		"model.embed_audio.embedding_projection.weight":                        "BF16",
 	})
 
@@ -207,21 +211,50 @@ func TestGemma4ImportPlanKeepsMediaAtSourcePrecision(t *testing.T) {
 			got[tensor.Name] = tensor
 		}
 	}
-	for _, name := range []string{
-		"model.vision_tower.patch_embedder.input_proj.weight",
-		"model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight",
-		"model.embed_vision.embedding_projection.weight",
-		"model.vision_embedder.patch_dense.weight",
-		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight",
-		"model.embed_audio.embedding_projection.weight",
-	} {
+	want := map[string]string{
+		"model.vision_tower.patch_embedder.input_proj.weight":                  "nvfp4",
+		"model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight":   "mxfp8",
+		"model.embed_vision.embedding_projection.weight":                       "mxfp8",
+		"model.vision_embedder.patch_dense.weight":                             "mxfp8",
+		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight": "nvfp4",
+		"model.audio_tower.output_proj.weight":                                 "mxfp8",
+		"model.embed_audio.embedding_projection.weight":                        "mxfp8",
+	}
+	for name, quantize := range want {
 		tensor, ok := got[name]
 		if !ok {
 			t.Fatalf("%s missing from plan; got %v", name, specNames(specs))
 		}
-		if tensor.Quantize != "" {
-			t.Fatalf("%s Quantize = %q, want source precision", name, tensor.Quantize)
+		if tensor.Quantize != quantize {
+			t.Fatalf("%s Quantize = %q, want %q", name, tensor.Quantize, quantize)
 		}
+	}
+}
+
+func TestGemma4UnifiedAudioImportPlanRetainsDirectProjection(t *testing.T) {
+	policy := gemma4ImportTransform{numLayers: 48, hasAudioConfig: true, unifiedAudio: true}
+	inv := newInventory(sourceModelConfig{}, map[string]string{
+		"model.embed_tokens.weight":                     "BF16",
+		"model.embed_audio.embedding_projection.weight": "BF16",
+	})
+
+	specs, err := Plan(inv, Classification{Kind: SourceFloat, Quantize: "nvfp4"}, policy)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	found := false
+	for _, spec := range specs {
+		for _, tensor := range spec.Tensors {
+			if tensor.Name == "model.embed_audio.embedding_projection.weight" {
+				found = true
+				if tensor.Quantize != "" {
+					t.Fatalf("unified direct audio Quantize = %q, want source precision", tensor.Quantize)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("unified direct audio projection missing from plan")
 	}
 }
 

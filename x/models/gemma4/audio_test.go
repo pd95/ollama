@@ -190,14 +190,14 @@ func TestPrepareAudioMediaEmbeddingsRejectsMissingWeights(t *testing.T) {
 	skipIfNoMLX(t)
 	m := &Model{
 		TextConfig:  &TextConfig{EmbedScale: 1},
+		AudioConfig: &AudioConfig{ModelType: "gemma4_audio"},
 		EmbedTokens: nn.NewEmbedding(mlx.FromValues([]float32{0, 0, 1, 1, 2, 2}, 3, 2)),
 	}
 	prepared := &legacyPreparedInput{
 		Tokens: []int32{0, 1, 2},
 		Payload: &gemma4MediaPayload{
 			Items: []gemma4MediaItem{{
-				ID:    0,
-				Kind:  llm.MediaKindAudio,
+				Item:  mlxmedia.Item{ID: 0, Kind: llm.MediaKindAudio, Span: batch.TokenSpan{Start: 1, End: 2}, ExpectedTokens: 1},
 				Audio: &gemma4AudioInput{Features: make([]float32, 128), FeatureMask: []bool{true}, FeatureSize: 128, Frames: 1, SoftTokens: 1},
 				Span:  gemma4Span{Start: 1, End: 2},
 			}},
@@ -220,8 +220,7 @@ func TestPrepareAudioMediaEmbeddingsRejectsMissingConfig(t *testing.T) {
 	prepared := &legacyPreparedInput{
 		Tokens: []int32{0, 1, 2},
 		Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{{
-			ID:    0,
-			Kind:  llm.MediaKindAudio,
+			Item:  mlxmedia.Item{ID: 0, Kind: llm.MediaKindAudio, Span: batch.TokenSpan{Start: 1, End: 2}, ExpectedTokens: 1},
 			Audio: &gemma4AudioInput{Features: []float32{1}, FeatureMask: []bool{true}, FeatureSize: 1, Frames: 1, SoftTokens: 1},
 			Span:  gemma4Span{Start: 1, End: 2},
 		}}},
@@ -246,8 +245,7 @@ func TestPrepareUnifiedAudioMediaEmbeddings(t *testing.T) {
 		Tokens: []int32{0, 1, 2},
 		Payload: &gemma4MediaPayload{
 			Items: []gemma4MediaItem{{
-				ID:    0,
-				Kind:  llm.MediaKindAudio,
+				Item:  mlxmedia.Item{ID: 0, Kind: llm.MediaKindAudio, Span: batch.TokenSpan{Start: 1, End: 2}, ExpectedTokens: 1},
 				Audio: &gemma4AudioInput{Features: []float32{3, 4}, FeatureMask: []bool{true}, FeatureSize: 2, Frames: 1, SoftTokens: 1},
 				Span:  gemma4Span{Start: 1, End: 2},
 			}},
@@ -278,12 +276,12 @@ func TestPrepareMultipleUnifiedAudioMediaEmbeddings(t *testing.T) {
 		Tokens: []int32{0, 1, 2, 3, 4, 5},
 		Payload: &gemma4MediaPayload{Items: []gemma4MediaItem{
 			{
-				ID: 1, Kind: llm.MediaKindAudio,
+				Item:  mlxmedia.Item{ID: 1, Kind: llm.MediaKindAudio, Span: batch.TokenSpan{Start: 1, End: 2}, ExpectedTokens: 1},
 				Audio: &gemma4AudioInput{Features: []float32{3, 4}, FeatureMask: []bool{true}, FeatureSize: 2, Frames: 1, SoftTokens: 1},
 				Span:  gemma4Span{Start: 1, End: 2},
 			},
 			{
-				ID: 0, Kind: llm.MediaKindAudio,
+				Item:  mlxmedia.Item{ID: 0, Kind: llm.MediaKindAudio, Span: batch.TokenSpan{Start: 4, End: 5}, ExpectedTokens: 1},
 				Audio: &gemma4AudioInput{Features: []float32{5, 12}, FeatureMask: []bool{true}, FeatureSize: 2, Frames: 1, SoftTokens: 1},
 				Span:  gemma4Span{Start: 4, End: 5},
 			},
