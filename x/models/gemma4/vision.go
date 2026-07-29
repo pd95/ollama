@@ -15,10 +15,7 @@ import (
 	_ "image/png"
 	"io"
 	"math"
-	"regexp"
 	"slices"
-	"sort"
-	"strconv"
 	"strings"
 
 	xdraw "golang.org/x/image/draw"
@@ -26,6 +23,7 @@ import (
 
 	"github.com/ollama/ollama/llm"
 	"github.com/ollama/ollama/x/mlxrunner/batch"
+	mlxmedia "github.com/ollama/ollama/x/mlxrunner/media"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
 	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
@@ -100,31 +98,14 @@ type gemma4ImageInput struct {
 }
 
 type gemma4MediaItem struct {
-	ID    int
-	Kind  llm.MediaKind
+	mlxmedia.Item
 	Image *gemma4ImageInput
 	Audio *gemma4AudioInput
-	Span  batch.TokenSpan
 }
 
 type gemma4MediaPayload struct {
 	Items []gemma4MediaItem
 }
-
-type gemma4MediaBinding struct {
-	Media       llm.MediaData
-	MarkerStart int
-	MarkerEnd   int
-	Sequence    string
-	Item        gemma4MediaItem
-}
-
-type gemma4MediaReplacement struct {
-	Span     batch.TokenSpan
-	Features *mlx.Array
-}
-
-var gemma4MediaMarkerPattern = regexp.MustCompile(`\[img-([^]]*)\]`)
 
 type ClippableLinear struct {
 	Linear    nn.LinearLayer
@@ -312,55 +293,79 @@ func parseGemma4MediaTokens(data []byte, fallback gemma4MediaTokens) gemma4Media
 	return fallback
 }
 
-func hasCompleteGemma4VisionWeights(tensors map[string]*mlx.Array, cfg *VisionConfig) bool {
+func hasCompleteGemma4VisionWeights(
+	tensors map[string]*mlx.Array,
+	cfg *VisionConfig,
+	textHiddenSize int32,
+	groupSize, bits int,
+	mode string,
+	tq map[string]*model.TensorQuantInfo,
+) bool {
 	names := make([]string, 0, len(tensors))
 	for name, tensor := range tensors {
 		if tensor != nil {
 			names = append(names, name)
 		}
 	}
-	return gemma4metadata.ValidateVisionTensors(gemma4metadata.ConfigFile{
+	if err := gemma4metadata.ValidateVisionTensors(gemma4metadata.ConfigFile{
 		VisionConfig: &gemma4metadata.VisionConfig{
 			ModelType:       cfg.ModelType,
 			NumHiddenLayers: int(cfg.NumHiddenLayers),
 			Standardize:     cfg.Standardize,
 		},
-	}, names) == nil
+	}, names); err != nil {
+		return false
+	}
+	if cfg.unified() {
+		return validateGemma4UnifiedVisionWeights(tensors, cfg, textHiddenSize, groupSize, bits, mode, tq) == nil
+	}
+	return validateGemma4TowerVisionWeights(tensors, cfg, textHiddenSize, groupSize, bits, mode, tq) == nil
 }
 
-func loadUnifiedVisionEmbedder(tensors map[string]*mlx.Array, cfg *VisionConfig, textHiddenSize int32, groupSize, bits int, mode string, tq map[string]*model.TensorQuantInfo) (*UnifiedVisionEmbedder, error) {
+func validateGemma4UnifiedVisionWeights(tensors map[string]*mlx.Array, cfg *VisionConfig, textHiddenSize int32, groupSize, bits int, mode string, tq map[string]*model.TensorQuantInfo) error {
 	const prefix = "model.vision_embedder."
 	patchDim64 := int64(cfg.ModelPatchSize) * int64(cfg.ModelPatchSize) * 3
 	if patchDim64 <= 0 || patchDim64 > math.MaxInt32 {
-		return nil, fmt.Errorf("invalid Gemma4 unified patch dimension %d", patchDim64)
+		return fmt.Errorf("invalid Gemma4 unified patch dimension %d", patchDim64)
 	}
 	patchDim := int32(patchDim64)
 	expected := map[string][]int{
-		prefix + "patch_ln1.weight":                      {int(patchDim)},
-		prefix + "patch_ln1.bias":                        {int(patchDim)},
-		prefix + "patch_dense.weight":                    {int(cfg.MMEmbedDim), int(patchDim)},
-		prefix + "patch_dense.bias":                      {int(cfg.MMEmbedDim)},
-		prefix + "patch_ln2.weight":                      {int(cfg.MMEmbedDim)},
-		prefix + "patch_ln2.bias":                        {int(cfg.MMEmbedDim)},
-		prefix + "pos_embedding":                         {int(cfg.MMPosembSize), 2, int(cfg.MMEmbedDim)},
-		prefix + "pos_norm.weight":                       {int(cfg.MMEmbedDim)},
-		prefix + "pos_norm.bias":                         {int(cfg.MMEmbedDim)},
-		"model.embed_vision.embedding_projection.weight": {int(textHiddenSize), int(cfg.MMEmbedDim)},
+		prefix + "patch_ln1.weight": {int(patchDim)},
+		prefix + "patch_ln1.bias":   {int(patchDim)},
+		prefix + "patch_dense.bias": {int(cfg.MMEmbedDim)},
+		prefix + "patch_ln2.weight": {int(cfg.MMEmbedDim)},
+		prefix + "patch_ln2.bias":   {int(cfg.MMEmbedDim)},
+		prefix + "pos_embedding":    {int(cfg.MMPosembSize), 2, int(cfg.MMEmbedDim)},
+		prefix + "pos_norm.weight":  {int(cfg.MMEmbedDim)},
+		prefix + "pos_norm.bias":    {int(cfg.MMEmbedDim)},
 	}
 	for name, shape := range expected {
 		array := tensors[name]
 		if array == nil {
-			return nil, fmt.Errorf("missing Gemma4 unified tensor %s", name)
+			return fmt.Errorf("missing Gemma4 unified tensor %s", name)
 		}
 		if !slices.Equal(array.Dims(), shape) {
-			return nil, fmt.Errorf("Gemma4 unified tensor %s shape %v, want %v", name, array.Dims(), shape)
+			return fmt.Errorf("Gemma4 unified tensor %s shape %v, want %v", name, array.Dims(), shape)
 		}
-		switch array.DType() {
-		case mlx.DTypeBFloat16, mlx.DTypeFloat16, mlx.DTypeFloat32:
-		default:
-			return nil, fmt.Errorf("Gemma4 unified tensor %s has unsupported dtype %s", name, array.DType())
+		if !isGemma4FloatingDType(array.DType()) {
+			return fmt.Errorf("Gemma4 unified tensor %s has unsupported dtype %s", name, array.DType())
 		}
 	}
+	if err := validateGemma4LinearWeight(tensors, prefix+"patch_dense", []int{int(cfg.MMEmbedDim), int(patchDim)}, groupSize, bits, mode, tq); err != nil {
+		return err
+	}
+	if err := validateGemma4LinearWeight(tensors, "model.embed_vision.embedding_projection", []int{int(textHiddenSize), int(cfg.MMEmbedDim)}, groupSize, bits, mode, tq); err != nil {
+		return err
+	}
+	return nil
+}
+
+func loadUnifiedVisionEmbedder(tensors map[string]*mlx.Array, cfg *VisionConfig, textHiddenSize int32, groupSize, bits int, mode string, tq map[string]*model.TensorQuantInfo) (*UnifiedVisionEmbedder, error) {
+	if err := validateGemma4UnifiedVisionWeights(tensors, cfg, textHiddenSize, groupSize, bits, mode, tq); err != nil {
+		return nil, err
+	}
+	const prefix = "model.vision_embedder."
+	patchDim := cfg.ModelPatchSize * cfg.ModelPatchSize * 3
 	linears := model.NewLinearFactory(tensors, groupSize, bits, mode, tq)
 	patchDense := linears.Make(prefix + "patch_dense")
 	posEmbedding := tensors[prefix+"pos_embedding"]
@@ -402,6 +407,62 @@ func resolveVisionPrefix(tensors map[string]*mlx.Array) string {
 		return "model."
 	}
 	return ""
+}
+
+func resolveGemma4LinearPath(tensors map[string]*mlx.Array, path string) (string, bool) {
+	if tensors[path+".weight"] != nil {
+		return path, true
+	}
+	if tensors[path+".linear.weight"] != nil {
+		return path + ".linear", true
+	}
+	return "", false
+}
+
+func validateGemma4TowerVisionWeights(tensors map[string]*mlx.Array, cfg *VisionConfig, textHiddenSize int32, groupSize, bits int, mode string, tq map[string]*model.TensorQuantInfo) error {
+	prefix := resolveVisionPrefix(tensors)
+	validate := func(path string, want []int) error {
+		resolved, ok := resolveGemma4LinearPath(tensors, path)
+		if !ok {
+			return fmt.Errorf("missing Gemma4 vision linear %s", path)
+		}
+		return validateGemma4LinearWeight(tensors, resolved, want, groupSize, bits, mode, tq)
+	}
+	patchInput := int64(cfg.PatchSize) * int64(cfg.PatchSize) * 3
+	qWidth := int64(cfg.NumAttentionHeads) * int64(cfg.HeadDim)
+	kvWidth := int64(cfg.NumKeyValueHeads) * int64(cfg.HeadDim)
+	if patchInput <= 0 || patchInput > math.MaxInt32 || qWidth <= 0 || qWidth > math.MaxInt32 || kvWidth <= 0 || kvWidth > math.MaxInt32 {
+		return errors.New("invalid Gemma4 tower vision dimensions")
+	}
+	if err := validate(prefix+"vision_tower.patch_embedder.input_proj", []int{int(cfg.HiddenSize), int(patchInput)}); err != nil {
+		return err
+	}
+	for i := range cfg.NumHiddenLayers {
+		layer := fmt.Sprintf("%svision_tower.encoder.layers.%d", prefix, i)
+		for _, spec := range []struct {
+			path string
+			want []int
+		}{
+			{path: ".self_attn.q_proj", want: []int{int(qWidth), int(cfg.HiddenSize)}},
+			{path: ".self_attn.k_proj", want: []int{int(kvWidth), int(cfg.HiddenSize)}},
+			{path: ".self_attn.v_proj", want: []int{int(kvWidth), int(cfg.HiddenSize)}},
+			{path: ".self_attn.o_proj", want: []int{int(cfg.HiddenSize), int(qWidth)}},
+			{path: ".mlp.gate_proj", want: []int{int(cfg.IntermediateSize), int(cfg.HiddenSize)}},
+			{path: ".mlp.up_proj", want: []int{int(cfg.IntermediateSize), int(cfg.HiddenSize)}},
+			{path: ".mlp.down_proj", want: []int{int(cfg.HiddenSize), int(cfg.IntermediateSize)}},
+		} {
+			if err := validate(layer+spec.path, spec.want); err != nil {
+				return err
+			}
+		}
+	}
+	for _, path := range []string{"embed_vision.embedding_projection", "model.embed_vision.embedding_projection"} {
+		if _, ok := resolveGemma4LinearPath(tensors, path); !ok {
+			continue
+		}
+		return validate(path, []int{int(textHiddenSize), int(cfg.HiddenSize)})
+	}
+	return errors.New("missing Gemma4 vision embedding projection")
 }
 
 func loadVisionModel(tensors map[string]*mlx.Array, cfg *VisionConfig, groupSize, bits int, mode string, tq map[string]*model.TensorQuantInfo) (*VisionModel, error) {
@@ -521,18 +582,19 @@ func (m *MultimodalEmbedder) Forward(x *mlx.Array) *mlx.Array {
 }
 
 func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, media []llm.MediaData) (*batch.PreparedInput, error) {
-	bindings, err := bindGemma4Media(prompt, media)
+	bindings, err := mlxmedia.BindMarkers(prompt, media)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Gemma4 media prompt: %w", err)
 	}
 
-	var aggregateSoftTokens int64
+	payloadItems := make([]gemma4MediaItem, len(bindings))
+	aggregateSoftTokens := 0
 	for i := range bindings {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
-		item := gemma4MediaItem{ID: bindings[i].Media.ID, Kind: bindings[i].Media.Kind}
+		item := gemma4MediaItem{Item: mlxmedia.Item{ID: bindings[i].Media.ID, Kind: bindings[i].Media.Kind}}
 		var softTokens int
 		switch bindings[i].Media.Kind {
 		case llm.MediaKindImage:
@@ -560,26 +622,37 @@ func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, media []l
 		default:
 			return nil, fmt.Errorf("Gemma4 MLX does not support %s inputs", bindings[i].Media.Kind)
 		}
-		aggregateSoftTokens += int64(softTokens)
-		if maxContext := m.MaxContextLength(); maxContext > 0 && aggregateSoftTokens >= int64(maxContext) {
+		aggregateSoftTokens, err = mlxmedia.AddTokenBudget(aggregateSoftTokens, softTokens)
+		if err != nil {
+			return nil, fmt.Errorf("Gemma4 media token budget: %w", err)
+		}
+		if maxContext := m.MaxContextLength(); maxContext > 0 && aggregateSoftTokens >= maxContext {
 			return nil, fmt.Errorf("Gemma4 media requires at least %d tokens, model context length is %d", aggregateSoftTokens, m.MaxContextLength())
 		}
-		bindings[i].Item = item
+		bindings[i].ExpectedTokens = softTokens
+		item.ExpectedTokens = softTokens
+		payloadItems[i] = item
 	}
 
-	expanded, err := expandGemma4MediaPrompt(prompt, bindings)
+	expanded, err := mlxmedia.ExpandPrompt(prompt, bindings)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Gemma4 media prompt: %w", err)
 	}
 	tokens := m.tok.Encode(expanded, m.tok.AddBOS())
-	items, err := assignGemma4MediaSpans(tokens, bindings, m.ImageTokenIDValue, m.AudioTokenIDValue)
+	sharedItems, err := mlxmedia.AssignTokenSpans(tokens, bindings, map[llm.MediaKind]int32{
+		llm.MediaKindImage: m.ImageTokenIDValue,
+		llm.MediaKindAudio: m.AudioTokenIDValue,
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Gemma4 media prompt: %w", err)
+	}
+	for i := range payloadItems {
+		payloadItems[i].Item = sharedItems[i]
 	}
 
 	pleIDs := append([]int32(nil), tokens...)
 	var bidirectionalSpans []batch.TokenSpan
-	for _, item := range items {
+	for _, item := range payloadItems {
 		for i := item.Span.Start; i < item.Span.End; i++ {
 			pleIDs[i] = 0
 		}
@@ -590,7 +663,7 @@ func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, media []l
 	prepared := &batch.PreparedInput{
 		Tokens:             tokens,
 		PLEInputIDs:        pleIDs,
-		Payload:            &gemma4MediaPayload{Items: items},
+		Payload:            &gemma4MediaPayload{Items: payloadItems},
 		BidirectionalSpans: bidirectionalSpans,
 	}
 	return prepared, nil
@@ -659,7 +732,7 @@ func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.Prep
 	pinnedOutputs := []*mlx.Array{embeddings}
 	defer func() { mlx.Unpin(pinnedOutputs...) }()
 
-	replacements := make([]gemma4MediaReplacement, 0, len(payload.Items))
+	replacements := make([]mlxmedia.Replacement, 0, len(payload.Items))
 	for _, item := range payload.Items {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -692,13 +765,13 @@ func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.Prep
 		}
 		mlx.Pin(features)
 		pinnedOutputs = append(pinnedOutputs, features)
-		replacements = append(replacements, gemma4MediaReplacement{Span: item.Span, Features: features})
+		replacements = append(replacements, mlxmedia.Replacement{Span: item.Span, Features: features})
 		mlx.Sweep()
 	}
 
-	merged, err := mergeGemma4MediaEmbeddings(embeddings, len(prepared.Tokens), replacements)
+	merged, err := mlxmedia.MergeEmbeddings(embeddings, len(prepared.Tokens), replacements)
 	if err != nil {
-		return err
+		return fmt.Errorf("Gemma4 media embeddings: %w", err)
 	}
 	mlx.Eval(merged)
 	if err := ctx.Err(); err != nil {
@@ -725,16 +798,14 @@ func validateGemma4MediaPayload(prepared *batch.PreparedInput) (*gemma4MediaPayl
 		return nil, errors.New("invalid Gemma4 media payload")
 	}
 
-	previousEnd := 0
-	seenIDs := make(map[int]bool, len(payload.Items))
+	items := make([]mlxmedia.Item, len(payload.Items))
+	for i := range payload.Items {
+		items[i] = payload.Items[i].Item
+	}
+	if err := mlxmedia.ValidateItems(items, len(prepared.Tokens)); err != nil {
+		return nil, fmt.Errorf("invalid Gemma4 media payload: %w", err)
+	}
 	for _, item := range payload.Items {
-		if item.ID < 0 || seenIDs[item.ID] {
-			return nil, fmt.Errorf("invalid or duplicate Gemma4 media ID %d", item.ID)
-		}
-		seenIDs[item.ID] = true
-		if item.Span.Start < previousEnd || item.Span.Start < 0 || item.Span.End <= item.Span.Start || item.Span.End > len(prepared.Tokens) {
-			return nil, fmt.Errorf("invalid or overlapping Gemma4 media %d span [%d,%d) for %d tokens", item.ID, item.Span.Start, item.Span.End, len(prepared.Tokens))
-		}
 		spanLength := item.Span.End - item.Span.Start
 		switch item.Kind {
 		case llm.MediaKindImage:
@@ -753,7 +824,6 @@ func validateGemma4MediaPayload(prepared *batch.PreparedInput) (*gemma4MediaPayl
 		default:
 			return nil, fmt.Errorf("invalid Gemma4 media kind %q", item.Kind)
 		}
-		previousEnd = item.Span.End
 	}
 	return payload, nil
 }
@@ -794,190 +864,6 @@ func hasExactGemma4InputLength(length int, dimensions ...int) bool {
 		expected *= int64(dimension)
 	}
 	return expected == int64(length)
-}
-
-func bindGemma4Media(prompt string, media []llm.MediaData) ([]gemma4MediaBinding, error) {
-	if len(media) == 0 {
-		return nil, errors.New("Gemma4 media request contains no media")
-	}
-	if strings.Contains(prompt, "[img]") {
-		return nil, errors.New("Gemma4 prompt contains an unnumbered [img] marker")
-	}
-
-	byID := make(map[int]llm.MediaData, len(media))
-	for _, item := range media {
-		if item.ID < 0 {
-			return nil, fmt.Errorf("Gemma4 media ID must be non-negative, got %d", item.ID)
-		}
-		if _, ok := byID[item.ID]; ok {
-			return nil, fmt.Errorf("duplicate Gemma4 media ID %d", item.ID)
-		}
-		byID[item.ID] = item
-	}
-
-	matches := gemma4MediaMarkerPattern.FindAllStringSubmatchIndex(prompt, -1)
-	bindings := make([]gemma4MediaBinding, 0, len(matches))
-	seen := make(map[int]bool, len(matches))
-	for _, match := range matches {
-		rawID := prompt[match[2]:match[3]]
-		id, err := strconv.Atoi(rawID)
-		if err != nil || id < 0 || strconv.Itoa(id) != rawID {
-			return nil, fmt.Errorf("invalid Gemma4 media marker %q", prompt[match[0]:match[1]])
-		}
-		item, ok := byID[id]
-		if !ok {
-			return nil, fmt.Errorf("Gemma4 prompt marker [img-%d] has no matching media", id)
-		}
-		if seen[id] {
-			return nil, fmt.Errorf("Gemma4 prompt contains multiple [img-%d] markers", id)
-		}
-		seen[id] = true
-		bindings = append(bindings, gemma4MediaBinding{
-			Media:       item,
-			MarkerStart: match[0],
-			MarkerEnd:   match[1],
-		})
-	}
-
-	withoutMarkers := gemma4MediaMarkerPattern.ReplaceAllString(prompt, "")
-	if strings.Contains(withoutMarkers, "[img-") {
-		return nil, errors.New("Gemma4 prompt contains a malformed media marker")
-	}
-	for _, item := range media {
-		if !seen[item.ID] {
-			return nil, fmt.Errorf("expected one [img-%d] marker in Gemma4 prompt", item.ID)
-		}
-	}
-	if len(bindings) != len(media) {
-		return nil, fmt.Errorf("Gemma4 prompt contains %d media markers for %d inputs", len(bindings), len(media))
-	}
-	sort.Slice(bindings, func(i, j int) bool { return bindings[i].MarkerStart < bindings[j].MarkerStart })
-	return bindings, nil
-}
-
-func expandGemma4MediaPrompt(prompt string, bindings []gemma4MediaBinding) (string, error) {
-	expandedLen := int64(len(prompt))
-	for _, binding := range bindings {
-		expandedLen += int64(len(binding.Sequence) - (binding.MarkerEnd - binding.MarkerStart))
-		if expandedLen < 0 || expandedLen > maxIntValue {
-			return "", errors.New("Gemma4 expanded media prompt is too large")
-		}
-	}
-
-	var expanded strings.Builder
-	expanded.Grow(int(expandedLen))
-	cursor := 0
-	for _, binding := range bindings {
-		if binding.MarkerStart < cursor || binding.MarkerEnd < binding.MarkerStart || binding.MarkerEnd > len(prompt) {
-			return "", errors.New("Gemma4 media markers overlap or are out of range")
-		}
-		expanded.WriteString(prompt[cursor:binding.MarkerStart])
-		expanded.WriteString(binding.Sequence)
-		cursor = binding.MarkerEnd
-	}
-	expanded.WriteString(prompt[cursor:])
-	return expanded.String(), nil
-}
-
-func assignGemma4MediaSpans(tokens []int32, bindings []gemma4MediaBinding, imageTokenID, audioTokenID int32) ([]gemma4MediaItem, error) {
-	hasImage, hasAudio := false, false
-	for _, binding := range bindings {
-		hasImage = hasImage || binding.Item.Kind == llm.MediaKindImage
-		hasAudio = hasAudio || binding.Item.Kind == llm.MediaKindAudio
-	}
-	if hasImage && hasAudio && imageTokenID == audioTokenID {
-		return nil, fmt.Errorf("Gemma4 image and audio token IDs must differ, both are %d", imageTokenID)
-	}
-
-	var imageSpans, audioSpans []batch.TokenSpan
-	if hasImage {
-		imageSpans = mediaTokenSpans(tokens, imageTokenID)
-	}
-	if hasAudio {
-		audioSpans = mediaTokenSpans(tokens, audioTokenID)
-	}
-	imageIndex, audioIndex := 0, 0
-	items := make([]gemma4MediaItem, 0, len(bindings))
-	previousEnd := 0
-	for _, binding := range bindings {
-		item := binding.Item
-		var span batch.TokenSpan
-		var softTokens int
-		switch item.Kind {
-		case llm.MediaKindImage:
-			if imageIndex >= len(imageSpans) {
-				return nil, fmt.Errorf("Gemma4 prompt contains no image token span for media %d", item.ID)
-			}
-			span = imageSpans[imageIndex]
-			imageIndex++
-			softTokens = item.Image.SoftTokens
-		case llm.MediaKindAudio:
-			if audioIndex >= len(audioSpans) {
-				return nil, fmt.Errorf("Gemma4 prompt contains no audio token span for media %d", item.ID)
-			}
-			span = audioSpans[audioIndex]
-			audioIndex++
-			softTokens = item.Audio.SoftTokens
-		default:
-			return nil, fmt.Errorf("invalid Gemma4 media kind %q", item.Kind)
-		}
-		if span.Start < previousEnd {
-			return nil, fmt.Errorf("Gemma4 media token spans do not follow prompt marker order at media %d", item.ID)
-		}
-		if got := span.End - span.Start; got != softTokens {
-			return nil, fmt.Errorf("Gemma4 media %d token count = %d, want %d", item.ID, got, softTokens)
-		}
-		item.Span = span
-		items = append(items, item)
-		previousEnd = span.End
-	}
-	if imageIndex != len(imageSpans) || audioIndex != len(audioSpans) {
-		return nil, fmt.Errorf("Gemma4 prompt contains unexpected media token spans: images=%d/%d audio=%d/%d", imageIndex, len(imageSpans), audioIndex, len(audioSpans))
-	}
-	return items, nil
-}
-
-func mergeGemma4MediaEmbeddings(embeddings *mlx.Array, tokenCount int, replacements []gemma4MediaReplacement) (*mlx.Array, error) {
-	if embeddings == nil || embeddings.NumDims() != 3 || embeddings.Dim(0) != 1 || embeddings.Dim(1) != tokenCount {
-		return nil, errors.New("invalid Gemma4 token embeddings")
-	}
-	if tokenCount > math.MaxInt32 {
-		return nil, fmt.Errorf("Gemma4 input length %d exceeds MLX index range", tokenCount)
-	}
-	hidden := embeddings.Dim(2)
-	parts := make([]*mlx.Array, 0, 2*len(replacements)+1)
-	cursor := 0
-	for _, replacement := range replacements {
-		span := replacement.Span
-		if span.Start < cursor || span.Start < 0 || span.End <= span.Start || span.End > tokenCount {
-			return nil, fmt.Errorf("invalid or overlapping Gemma4 media span [%d,%d) for %d tokens", span.Start, span.End, tokenCount)
-		}
-		if replacement.Features == nil || replacement.Features.NumDims() != 3 || replacement.Features.Dim(0) != 1 ||
-			replacement.Features.Dim(1) != span.End-span.Start || replacement.Features.Dim(2) != hidden {
-			return nil, fmt.Errorf("invalid Gemma4 media features for span [%d,%d)", span.Start, span.End)
-		}
-		if cursor < span.Start {
-			parts = append(parts, mlx.SliceStartStop(embeddings,
-				[]int32{0, int32(cursor), 0},
-				[]int32{1, int32(span.Start), int32(hidden)},
-			))
-		}
-		parts = append(parts, replacement.Features)
-		cursor = span.End
-	}
-	if cursor < tokenCount {
-		parts = append(parts, mlx.SliceStartStop(embeddings,
-			[]int32{0, int32(cursor), 0},
-			[]int32{1, int32(tokenCount), int32(hidden)},
-		))
-	}
-	if len(parts) == 0 {
-		return nil, errors.New("Gemma4 media payload contains no embedding replacements")
-	}
-	if len(parts) == 1 {
-		return parts[0], nil
-	}
-	return mlx.Concatenate(parts, 1), nil
 }
 
 func preprocessGemma4Image(ctx context.Context, data []byte, cfg *VisionConfig, maxSoftTokens int) (*gemma4ImageInput, error) {
