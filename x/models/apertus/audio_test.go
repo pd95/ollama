@@ -37,3 +37,11 @@ func TestDecodeApertusExtensibleFloatWAV(t *testing.T) {
 		t.Fatalf("decoded samples = %v", got)
 	}
 }
+
+func TestAudioEncodeCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&AudioTokenizer{}).encode(ctx, []float32{0}); err != context.Canceled {
+		t.Fatalf("encode error = %v, want context.Canceled", err)
+	}
+}

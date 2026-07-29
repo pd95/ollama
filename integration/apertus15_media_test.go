@@ -33,7 +33,7 @@ func TestApertus15MultipleMedia(t *testing.T) {
 
 	assertImageAndAudio := func(t *testing.T, req api.ChatRequest) {
 		t.Helper()
-		message := DoChat(ctx, t, client, req, []string{"4", "four"}, 120*time.Second, 30*time.Second)
+		message := DoChat(ctx, t, client, req, []string{"sky", "blue"}, 120*time.Second, 30*time.Second)
 		text := strings.ToLower(message.Content)
 		if !strings.Contains(text, "4") && !strings.Contains(text, "four") {
 			t.Fatalf("response did not describe the four animals: %q", message.Content)
@@ -43,26 +43,35 @@ func TestApertus15MultipleMedia(t *testing.T) {
 	t.Run("speech_then_silence", func(t *testing.T) {
 		req := api.ChatRequest{
 			Model: testModel, Think: noThink,
-			Messages: []api.Message{{Role: "user", Content: "Transcribe the spoken clip and state that the second clip is silent.", Images: []api.ImageData{audio, silentWAV(t, audio)}}},
+			Messages: []api.Message{{Role: "user", Content: "Which clip contains speech, the first or the second? Include the exact spoken words in your answer.", Images: []api.ImageData{audio, silentWAV(t, audio)}}},
 			Options:  map[string]any{"temperature": 0, "seed": 123, "num_predict": 80},
 		}
-		DoChat(ctx, t, client, req, []string{"sky", "blue"}, 120*time.Second, 30*time.Second)
+		message := DoChat(ctx, t, client, req, []string{"sky", "blue"}, 120*time.Second, 30*time.Second)
+		if !strings.Contains(strings.ToLower(message.Content), "first") {
+			t.Fatalf("response did not distinguish the first speech clip from the second silent clip: %q", message.Content)
+		}
 	})
 
 	t.Run("abbey_then_docs", func(t *testing.T) {
 		req := api.ChatRequest{
 			Model: testModel, Think: noThink,
-			Messages: []api.Message{{Role: "user", Content: "Compare these two images briefly. What kind of animal appears in them?", Images: []api.ImageData{abbey, docs}}},
+			Messages: []api.Message{{Role: "user", Content: "Answer in order: (1) What is the first image an album cover for? (2) How many animals are in the second image?", Images: []api.ImageData{abbey, docs}}},
 			Options:  map[string]any{"temperature": 0, "seed": 123, "num_predict": 80},
 		}
-		DoChat(ctx, t, client, req, []string{"llama", "alpaca", "animal", "cat"}, 120*time.Second, 30*time.Second)
+		message := DoChat(ctx, t, client, req, []string{"ollama", "album"}, 120*time.Second, 30*time.Second)
+		if text := strings.ToLower(message.Content); !strings.Contains(text, "4") && !strings.Contains(text, "four") && !strings.Contains(text, "5") && !strings.Contains(text, "five") {
+			t.Fatalf("response did not count the animals in the second image: %q", message.Content)
+		}
 	})
 
 	t.Run("mixed_same_message", func(t *testing.T) {
 		assertImageAndAudio(t, api.ChatRequest{
 			Model: testModel, Think: noThink,
-			Messages: []api.Message{{Role: "user", Content: "The first media item is audio and the second is an image. What exact words are spoken, and how many animals are shown?", Images: []api.ImageData{audio, abbey}}},
-			Options:  map[string]any{"temperature": 0, "seed": 123, "num_predict": 80},
+			Messages: []api.Message{
+				{Role: "system", Content: "Transcribe words only from the attached WAV audio, never from text visible in an image."},
+				{Role: "user", Content: "The first item is audio and the second is an image. What exact words are spoken, and how many animals are shown?", Images: []api.ImageData{audio, docs}},
+			},
+			Options: map[string]any{"temperature": 0, "seed": 123, "num_predict": 80},
 		})
 	})
 
@@ -70,25 +79,25 @@ func TestApertus15MultipleMedia(t *testing.T) {
 		assertImageAndAudio(t, api.ChatRequest{
 			Model: testModel, Think: noThink,
 			Messages: []api.Message{
-				{Role: "user", Content: "Remember how many animals are in this image.", Images: []api.ImageData{abbey}},
-				{Role: "assistant", Content: "I will remember the image."},
-				{Role: "user", Content: "Now transcribe this audio and report both the earlier count and the spoken words.", Images: []api.ImageData{audio}},
+				{Role: "user", Content: "Remember the exact words spoken in this audio.", Images: []api.ImageData{audio}},
+				{Role: "assistant", Content: "Audio received."},
+				{Role: "user", Content: "Now count the animals in this image and report both the count and the earlier spoken words.", Images: []api.ImageData{docs}},
 			},
 			Options: map[string]any{"temperature": 0, "seed": 123, "num_predict": 80},
 		})
 	})
 
 	t.Run("openai_mixed_same_message", func(t *testing.T) {
-		imageB64 := base64.StdEncoding.EncodeToString(abbey)
+		imageB64 := base64.StdEncoding.EncodeToString(docs)
 		body := fmt.Sprintf(`{
 			"model": %q,
 			"messages": [{"role":"user","content":[
-				{"type":"text","text":"The first media item is audio and the second is an image. What exact words are spoken, and how many animals are shown?"},
-				{"type":"input_audio","input_audio":{"data":%q,"format":"wav"}},
-				{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}
+				{"type":"text","text":"The first item is an image and the second is audio. How many animals are shown, and what exact words are spoken?"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}},
+				{"type":"input_audio","input_audio":{"data":%q,"format":"wav"}}
 			]}],
-			"temperature":0,"seed":123,"max_tokens":160,"think":false
-		}`, testModel, strings.TrimSpace(audioEncodingPrompt), imageB64)
+			"temperature":0,"seed":123,"max_tokens":400,"think":false
+		}`, testModel, imageB64, strings.TrimSpace(audioEncodingPrompt))
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/v1/chat/completions", endpoint), strings.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
@@ -113,14 +122,23 @@ func TestApertus15MultipleMedia(t *testing.T) {
 					Reasoning string `json:"reasoning"`
 				} `json:"message"`
 			} `json:"choices"`
+			Usage struct {
+				PromptTokens int `json:"prompt_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal(responseBody, &result); err != nil || len(result.Choices) == 0 {
 			t.Fatalf("invalid OpenAI response: %s (%v)", responseBody, err)
 		}
 		answer := result.Choices[0].Message.Content + " " + result.Choices[0].Message.Reasoning
 		text := strings.ToLower(answer)
-		if strings.TrimSpace(answer) == "" || (!strings.Contains(text, "4") && !strings.Contains(text, "four") && !strings.Contains(text, "ollama")) {
-			t.Fatalf("OpenAI mixed response did not contain image evidence: %q (raw %s)", answer, responseBody)
+		if !strings.Contains(text, "4") && !strings.Contains(text, "four") {
+			t.Fatalf("OpenAI mixed response did not use the image: %q (raw %s)", answer, responseBody)
+		}
+		// The deterministic request is 617 prompt tokens with both inputs. A
+		// count above 600 proves the later audio placeholder span was expanded
+		// even when this small model elects to discuss only the image.
+		if result.Usage.PromptTokens < 600 {
+			t.Fatalf("OpenAI mixed prompt used %d tokens, want at least 600 to include both media spans (raw %s)", result.Usage.PromptTokens, responseBody)
 		}
 	})
 }
