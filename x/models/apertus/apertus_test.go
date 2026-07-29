@@ -213,6 +213,50 @@ func TestParseConfigApertus1p5RequiresRopeParameters(t *testing.T) {
 	}
 }
 
+func TestApertus1p5MediaLoaderRequiresValidIndependentConfig(t *testing.T) {
+	tensors := map[string]*mlx.Array{}
+	completeApertusVisionNames(func(name string) bool {
+		tensors[name] = mlx.New(name)
+		return true
+	})
+	completeApertusAudioNames(func(name string) bool {
+		tensors[name] = mlx.New(name)
+		return true
+	})
+
+	vision := VisionTokenizerConfig{
+		AttnResolutions: []int32{16}, BaseChannels: 256, ChannelMultiplier: []int32{1, 1, 2, 2, 4},
+		CodebookSize: 131072, EmbedDim: 256, InChannels: 3, LatentChannels: 256,
+		NumResBlocks: 4, Resolution: 256,
+	}
+	audio := AudioTokenizerConfig{
+		AudioChannels: 1, CodebookDim: 512, CodebookSize: 4096, Compress: 2,
+		DilationGrowthRate: 2, HiddenSize: 512, KernelSize: 7, LastKernelSize: 7,
+		NormType: "weight_norm", NumFilters: 32, NumLSTMLayers: 2, NumResidualLayers: 1,
+		PadMode: "reflect", ResidualKernelSize: 3, SamplingRate: 24000,
+		UpsamplingRatios: []int32{6, 5, 5, 4}, UseConvShortcut: true,
+	}
+	if !canLoadVisionTokenizer(tensors, vision) || !canLoadAudioTokenizer(tensors, audio) {
+		t.Fatal("complete tensors with supported configs must enable both media tokenizers")
+	}
+	if canLoadVisionTokenizer(tensors, VisionTokenizerConfig{}) {
+		t.Fatal("complete vision tensors with missing vision config enabled vision")
+	}
+	invalidVision := vision
+	invalidVision.Resolution = 512
+	if canLoadVisionTokenizer(tensors, invalidVision) || !canLoadAudioTokenizer(tensors, audio) {
+		t.Fatal("invalid vision config did not suppress only vision")
+	}
+	if canLoadAudioTokenizer(tensors, AudioTokenizerConfig{}) {
+		t.Fatal("complete audio tensors with missing audio config enabled audio")
+	}
+	invalidAudio := audio
+	invalidAudio.SamplingRate = 16000
+	if canLoadAudioTokenizer(tensors, invalidAudio) || !canLoadVisionTokenizer(tensors, vision) {
+		t.Fatal("invalid audio config did not suppress only audio")
+	}
+}
+
 func TestParseConfigRejectsInvalidOutputVocab(t *testing.T) {
 	_, err := parseConfig([]byte(`{
 		"architectures": ["ApertusForCausalLM"],
