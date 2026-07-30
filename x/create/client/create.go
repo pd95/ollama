@@ -26,6 +26,7 @@ import (
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
 	imagemanifest "github.com/ollama/ollama/x/imagegen/manifest"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/quant"
 )
 
@@ -534,12 +535,49 @@ func detectCapabilities(modelDir string) modelCapabilities {
 		_ = json.Unmarshal(data, &cfg)
 	}
 
+	vision := cfg.VisionConfig != nil
+	audio := cfg.AudioConfig != nil
+	if isGemma4ModelConfig(cfg.Architectures, cfg.ModelType) {
+		vision, audio = gemma4ModelDirMediaCapabilities(modelDir)
+	}
+
 	return modelCapabilities{
-		vision: cfg.VisionConfig != nil,
-		audio:  cfg.AudioConfig != nil,
+		vision: vision,
+		audio:  audio,
 		thinking: chatTemplateHasThinkingSupport(readChatTemplate(modelDir)) ||
 			alwaysSupportsThinking(cfg.Architectures, cfg.ModelType),
 	}
+}
+
+func isGemma4ModelConfig(architectures []string, modelType string) bool {
+	for _, arch := range architectures {
+		if strings.Contains(strings.ToLower(arch), "gemma4") {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(modelType), "gemma4")
+}
+
+func gemma4ModelDirMediaCapabilities(modelDir string) (vision, audio bool) {
+	inv, err := create.ReadInventory(modelDir)
+	if err != nil {
+		return false, false
+	}
+	var cfg gemma4metadata.ConfigFile
+	if err := json.Unmarshal(inv.RawConfig, &cfg); err != nil {
+		return false, false
+	}
+	tensors := make(map[string]gemma4metadata.TensorDescriptor, len(inv.Tensors))
+	for name, tensor := range inv.Tensors {
+		tensors[name] = gemma4metadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: tensor.Shape}
+	}
+	processorData, processorErr := os.ReadFile(filepath.Join(modelDir, "processor_config.json"))
+	tokenizerConfigData, tokenizerErr := os.ReadFile(filepath.Join(modelDir, "tokenizer_config.json"))
+	tokenizerData, tokenizerDataErr := os.ReadFile(filepath.Join(modelDir, "tokenizer.json"))
+	audioReady := processorErr == nil && tokenizerErr == nil && tokenizerDataErr == nil &&
+		gemma4metadata.ValidateAudioRuntimeMetadata(cfg, processorData, tokenizerConfigData, tokenizerData) == nil &&
+		gemma4metadata.ValidateAudioSourceInventory(cfg, tensors) == nil
+	return gemma4metadata.ValidateVisionSourceInventory(cfg, tensors) == nil, audioReady
 }
 
 // readChatTemplate returns the model's chat template, preferring the

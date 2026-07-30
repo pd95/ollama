@@ -23,6 +23,7 @@ import (
 	ollamatemplate "github.com/ollama/ollama/template"
 	"github.com/ollama/ollama/thinking"
 	"github.com/ollama/ollama/types/model"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 )
 
 type modelListSummary struct {
@@ -391,10 +392,19 @@ func buildModelListSummary(name model.Name, mf *manifest.Manifest) (modelListSum
 		summary.Capabilities = appendModelListCapability(summary.Capabilities, model.CapabilityVision)
 	}
 
-	if cfg.ModelFormat == "safetensors" && isGemma4Renderer(cfg.Renderer) {
-		summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
-			return c == model.CapabilityVision || c == model.CapabilityAudio
-		})
+	if isLocalGemma4SafetensorsConfig(cfg) {
+		var gemma4cfg gemma4metadata.ConfigFile
+		configErr := mf.ReadConfigJSON("config.json", &gemma4cfg)
+		if configErr != nil || !hasGemma4VisionTensorLayers(gemma4cfg, mf.Layers) {
+			summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
+				return c == model.CapabilityVision
+			})
+		}
+		if configErr != nil || !hasGemma4AudioRuntimeMetadata(gemma4cfg, mf) || !hasGemma4AudioTensorLayers(gemma4cfg, mf.Layers) {
+			summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
+				return c == model.CapabilityAudio
+			})
+		}
 	}
 
 	return summary, nil

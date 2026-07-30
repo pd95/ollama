@@ -271,6 +271,13 @@ func GetTensorQuantization(name string, shape []int32, quantize string) string {
 	if !stackedExpert && !ShouldQuantize(name, "") {
 		return ""
 	}
+	return getEligibleTensorQuantization(name, shape, quantize)
+}
+
+// getEligibleTensorQuantization chooses the quantization for a weight after an
+// architecture policy has established that its namespace is eligible.
+func getEligibleTensorQuantization(name string, shape []int32, quantize string) string {
+	stackedExpert := isStackedExpertWeight(name)
 
 	// Quantize standard linear weights (2D). Also allow stacked expert weights (3D),
 	// e.g. qwen switch_mlp / experts combined tensors.
@@ -317,9 +324,7 @@ func GetTensorQuantization(name string, shape []int32, quantize string) string {
 	return quantNorm
 }
 
-var (
-	expertLayerPrefixRegexp = regexp.MustCompile(`^(?:model\.language_model\.|language_model(?:\.model)?\.|model\.)?layers\.\d+$`)
-)
+var expertLayerPrefixRegexp = regexp.MustCompile(`^(?:model\.language_model\.|language_model(?:\.model)?\.|model\.)?layers\.\d+$`)
 
 // ExpertGroupPrefix returns the group prefix for expert tensors that should be packed together.
 // For example:

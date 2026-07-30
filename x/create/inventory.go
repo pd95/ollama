@@ -39,6 +39,22 @@ func (inv Inventory) Has(name string) bool {
 	return ok
 }
 
+// filterInventory applies the same architecture include policy used by Plan so
+// excluded media or auxiliary tensors cannot alter source dtype classification.
+func filterInventory(inv Inventory, policy quantizePolicy) Inventory {
+	if _, ok := policy.(tensorIncludePolicy); !ok {
+		return inv
+	}
+	filtered := inv
+	filtered.Tensors = make(map[string]SourceTensor, len(inv.Tensors))
+	for name, tensor := range inv.Tensors {
+		if tensorIncluded(policy, name) {
+			filtered.Tensors[name] = tensor
+		}
+	}
+	return filtered
+}
+
 // ReadInventory reads a source model directory into an Inventory: the config,
 // the shard index, and every tensor's header. It reads no weight data. If the
 // shard index references a tensor that cannot be found (a missing or truncated

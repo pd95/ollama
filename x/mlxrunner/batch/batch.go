@@ -7,6 +7,20 @@ type Batch struct {
 	// InputIDs is the input token IDs for this forward pass, shape (B, L).
 	InputIDs *mlx.Array
 
+	// InputEmbeddings optionally replaces token embedding lookup for this
+	// forward pass, shape (B, L, hidden). The token IDs are still present for
+	// masks, positions, sampling history, and model-specific side inputs.
+	InputEmbeddings *mlx.Array
+
+	// PLEInputIDs optionally supplies token IDs for per-layer embeddings when
+	// InputEmbeddings contains multimodal replacements.
+	PLEInputIDs *mlx.Array
+
+	// BidirectionalSpans contains absolute token ranges that may attend in
+	// both directions during prefill. Model implementations decide which
+	// layer types consume these spans.
+	BidirectionalSpans []TokenSpan
+
 	// SeqOffsets gives each row's current position within its sequence —
 	// where the chunk in InputIDs starts. Length equals the batch dimension
 	// of InputIDs.
@@ -26,8 +40,24 @@ type Batch struct {
 	Memo Memo
 }
 
+type TokenSpan struct {
+	Start int
+	End   int
+}
+
 type Memo struct {
 	entries map[any]any
+}
+
+// PreparedInput carries prompt preparation results across the runner boundary.
+// Media-specific implementations may attach CPU-side metadata in Payload during
+// Prepare, then materialize InputEmbeddings on the MLX worker thread.
+type PreparedInput struct {
+	Tokens             []int32
+	PLEInputIDs        []int32
+	Payload            any
+	InputEmbeddings    *mlx.Array
+	BidirectionalSpans []TokenSpan
 }
 
 // Get returns the memoized value for key and true if present, or nil

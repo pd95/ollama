@@ -7,15 +7,20 @@ import (
 )
 
 type gemma4ImportTransform struct {
-	numLayers  int
-	numExperts int
+	numLayers      int
+	numExperts     int
+	hasAudioConfig bool
+	unifiedAudio   bool
 }
 
 // gemma4Config is a minimal subset of the Gemma 4 config.json used for quant decisions.
 type gemma4Config struct {
 	NumHiddenLayers int `json:"num_hidden_layers"`
 	NumExperts      int `json:"num_experts"`
-	TextConfig      struct {
+	AudioConfig     *struct {
+		ModelType string `json:"model_type"`
+	} `json:"audio_config"`
+	TextConfig struct {
 		NumHiddenLayers int `json:"num_hidden_layers"`
 		NumExperts      int `json:"num_experts"`
 	} `json:"text_config"`
@@ -36,12 +41,40 @@ func newGemma4ImportTransform(rawConfig json.RawMessage) (quantizePolicy, error)
 		numExperts = cfg.TextConfig.NumExperts
 	}
 
-	return gemma4ImportTransform{numLayers: numLayers, numExperts: numExperts}, nil
+	return gemma4ImportTransform{
+		numLayers:      numLayers,
+		numExperts:     numExperts,
+		hasAudioConfig: cfg.AudioConfig != nil,
+		unifiedAudio:   cfg.AudioConfig != nil && cfg.AudioConfig.ModelType == "gemma4_unified_audio",
+	}, nil
 }
 
 func (t gemma4ImportTransform) quantizationType(name string, shape []int32, quantize string) string {
 	base := normalizeQuantType(quantize)
 	switch {
+	case isGemma4VisionTensor(name) || isGemma4AudioTensor(name):
+		if t.unifiedAudio && strings.HasSuffix(name, "embed_audio.embedding_projection.weight") {
+			// The unified 12B architecture projects raw waveform blocks directly
+			// into language embeddings. Even MXFP8 caused mixed-media requests to
+			// lose speech, while retaining this small matrix costs about 5 MB.
+			return ""
+		}
+		// Media namespaces also contain large two-dimensional position tables.
+		// Only weights consumed as linear projections are eligible here.
+		if !strings.HasSuffix(name, ".weight") {
+			return ""
+		}
+		eligible := getEligibleTensorQuantization(name, shape, quantize)
+		if eligible == "" {
+			return ""
+		}
+		if isGemma4MediaBoundaryProjection(name) {
+			// The media boundary is small relative to the decoder and directly
+			// determines the semantic embeddings consumed by the language model.
+			// Keep it quantized, but promote four-bit imports to eight bits.
+			return sensitiveType(true, shape, base)
+		}
+		return eligible
 	case isEmbedTokensWeight(name):
 		// The embedding doubles as the lm_head projection; an 8-bit type keeps
 		// quality close to bf16 (matching GGUF Q6_K) while saving bandwidth.
@@ -62,12 +95,37 @@ func (t gemma4ImportTransform) quantizationType(name string, shape []int32, quan
 	}
 }
 
+func (t gemma4ImportTransform) includeTensor(name string) bool {
+	return !isGemma4AudioTensor(name) || t.hasAudioConfig
+}
+
+func isGemma4VisionTensor(name string) bool {
+	return isVisionTower(name) || strings.Contains(name, "embed_vision") || strings.Contains(name, "vision_embedder")
+}
+
+func isGemma4AudioTensor(name string) bool {
+	return isAudioTower(name) || strings.Contains(name, "audio")
+}
+
+func isGemma4MediaBoundaryProjection(name string) bool {
+	for _, suffix := range []string{
+		"embed_vision.embedding_projection.weight",
+		"vision_embedder.patch_dense.weight",
+		"audio_tower.output_proj.weight",
+		"embed_audio.embedding_projection.weight",
+	} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // isSensitiveProjection reports the value/key/down projections whose precision
-// most affects quality — attention output (v/k) and the residual stream
-// (down). Audio and vision tower tensors are excluded and follow the generic
-// policy.
+// most affects quality: attention output (v/k) and the residual stream
+// (down). Non-text media tensors are handled separately.
 func (t gemma4ImportTransform) isSensitiveProjection(name string) bool {
-	if isVisionTower(name) || isAudioTower(name) {
+	if isGemma4VisionTensor(name) || isGemma4AudioTensor(name) {
 		return false
 	}
 	return strings.Contains(name, ".v_proj") ||

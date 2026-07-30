@@ -25,15 +25,16 @@ func CreateDraftLayers(modelDir, tensorPrefix, configPrefix, quantize string, st
 	if err != nil {
 		return nil, fmt.Errorf("read draft model: %w", err)
 	}
-	class, err := Classify(inv, quantize)
-	if err != nil {
-		return nil, err
-	}
 	policy, err := newTensorImportTransform(inv)
 	if err != nil {
 		return nil, fmt.Errorf("build draft quantization policy for %q: %w", inv.Config.Architecture(), err)
 	}
-	specs, err := Plan(inv, class, draftPolicy{policy})
+	draftTransform := draftPolicy{policy}
+	class, err := Classify(filterInventory(inv, draftTransform), quantize)
+	if err != nil {
+		return nil, err
+	}
+	specs, err := Plan(inv, class, draftTransform)
 	if err != nil {
 		return nil, fmt.Errorf("plan draft model: %w", err)
 	}
@@ -74,6 +75,13 @@ func prefixSpecs(specs []BlobSpec, prefix string) []BlobSpec {
 // may change later). Every other tensor follows the wrapped policy. It is given
 // unprefixed source names, since planning runs before prefixSpecs.
 type draftPolicy struct{ inner quantizePolicy }
+
+func (p draftPolicy) includeTensor(name string) bool {
+	if include, ok := p.inner.(tensorIncludePolicy); ok {
+		return include.includeTensor(name)
+	}
+	return true
+}
 
 func (p draftPolicy) quantizationType(name string, shape []int32, requested string) string {
 	if isEmbedTokensWeight(name) {

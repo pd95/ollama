@@ -2,6 +2,9 @@ package client
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +15,8 @@ import (
 	"github.com/ollama/ollama/parser"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
+	"github.com/ollama/ollama/x/safetensors"
 )
 
 func TestModelfileConfig(t *testing.T) {
@@ -381,14 +386,14 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 			want: []string{"completion", "vision", "thinking"},
 		},
 		{
-			name: "model with audio config",
+			name: "gemma4 with audio config and missing vision tensors",
 			configJSON: `{
 				"architectures": ["Gemma4ForConditionalGeneration"],
 				"model_type": "gemma4",
 				"vision_config": {"hidden_size": 1024},
 				"audio_config": {"num_mel_bins": 128}
 			}`,
-			want: []string{"completion", "vision", "audio"},
+			want: []string{"completion"},
 		},
 		{
 			name: "model with audio but no vision",
@@ -420,6 +425,289 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 				t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestInferSafetensorsCapabilitiesGemma4VisionRequiresTensors(t *testing.T) {
+	configJSON := `{
+		"architectures": ["Gemma4ForConditionalGeneration"],
+		"model_type": "gemma4",
+		"vision_config": {"hidden_size": 1024, "num_hidden_layers": 2}
+	}`
+
+	tests := []struct {
+		name    string
+		tensors []string
+		want    []string
+	}{
+		{
+			name:    "missing vision tensors",
+			tensors: nil,
+			want:    []string{"completion"},
+		},
+		{
+			name:    "patch only",
+			tensors: []string{"model.vision_tower.patch_embedder.input_proj.weight"},
+			want:    []string{"completion"},
+		},
+		{
+			name: "partial vision tower and projector",
+			tensors: []string{
+				"model.vision_tower.patch_embedder.input_proj.weight",
+				"model.embed_vision.embedding_projection.weight",
+			},
+			want: []string{"completion"},
+		},
+		{
+			name:    "complete vision tower and projector",
+			tensors: gemma4ClientVisionTensorNames(2),
+			want:    []string{"completion", "vision"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if len(tt.tensors) > 0 {
+				writeClientSafetensors(t, dir, tt.tensors...)
+			}
+
+			if got := inferSafetensorsCapabilities(dir, ""); !slices.Equal(got, tt.want) {
+				t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInferSafetensorsCapabilitiesGemma4UnifiedVision(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["Gemma4UnifiedForConditionalGeneration"],
+		"model_type": "gemma4_unified",
+		"text_config": {"hidden_size": 2},
+		"vision_config": {"model_type": "gemma4_unified_vision", "mm_embed_dim": 2, "mm_posemb_size": 4, "model_patch_size": 1}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeClientSafetensorsWithShapes(t, dir, map[string][]int32{
+		"model.vision_embedder.patch_ln1.weight":         {3},
+		"model.vision_embedder.patch_ln1.bias":           {3},
+		"model.vision_embedder.patch_dense.weight":       {2, 3},
+		"model.vision_embedder.patch_dense.bias":         {2},
+		"model.vision_embedder.patch_ln2.weight":         {2},
+		"model.vision_embedder.patch_ln2.bias":           {2},
+		"model.vision_embedder.pos_embedding":            {4, 2, 2},
+		"model.vision_embedder.pos_norm.weight":          {2},
+		"model.vision_embedder.pos_norm.bias":            {2},
+		"model.embed_vision.embedding_projection.weight": {2, 2},
+	})
+	if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion", "vision"}; !slices.Equal(got, want) {
+		t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+	}
+}
+
+func TestInferSafetensorsCapabilitiesGemma4AudioRequiresCompleteTensors(t *testing.T) {
+	cfg := gemma4metadata.ConfigFile{
+		Architectures: []string{"Gemma4ForConditionalGeneration"},
+		ModelType:     "gemma4",
+		TextConfig:    gemma4metadata.TextConfig{HiddenSize: 5, VocabSize: 32},
+		AudioTokenID:  7,
+		AudioConfig: &gemma4metadata.AudioConfig{
+			ModelType:          "gemma4_audio",
+			AttentionChunkSize: 2, AttentionContextLeft: 2,
+			AttentionInvalidLogit: -1e9, AttentionLogitCap: 50,
+			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
+			NumHiddenLayers: 1, OutputProjDims: 3,
+			GradientClipping: 1e10, ResidualWeight: 0.5, RMSNormEps: 1e-6,
+			SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
+		},
+	}
+	configJSON, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes, err := gemma4metadata.RequiredAudioTensorShapes(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("complete", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeGemma4AudioRuntimeConfigs(t, dir)
+		writeClientSafetensorsWithShapes(t, dir, shapes)
+		if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion", "audio"}; !slices.Equal(got, want) {
+			t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("float32 overflow", func(t *testing.T) {
+		dir := t.TempDir()
+		overflowConfig := []byte(strings.Replace(string(configJSON), `"gradient_clipping":10000000000`, `"gradient_clipping":1e39`, 1))
+		if string(overflowConfig) == string(configJSON) {
+			t.Fatal("failed to construct float32-overflow audio config")
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), overflowConfig, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeGemma4AudioRuntimeConfigs(t, dir)
+		writeClientSafetensorsWithShapes(t, dir, shapes)
+		if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion"}; !slices.Equal(got, want) {
+			t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("partial", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeGemma4AudioRuntimeConfigs(t, dir)
+		partialShapes := maps.Clone(shapes)
+		delete(partialShapes, "model.audio_tower.layers.0.self_attn.q_proj.input_max")
+		writeClientSafetensorsWithShapes(t, dir, partialShapes)
+		if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion"}; !slices.Equal(got, want) {
+			t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("missing processor", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "tokenizer_config.json"), []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeClientSafetensorsWithShapes(t, dir, shapes)
+		if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion"}; !slices.Equal(got, want) {
+			t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+		}
+	})
+}
+
+func TestInferSafetensorsCapabilitiesGemma4UnifiedAudio(t *testing.T) {
+	cfg := gemma4metadata.ConfigFile{
+		Architectures: []string{"Gemma4UnifiedForConditionalGeneration"},
+		ModelType:     "gemma4_unified",
+		TextConfig:    gemma4metadata.TextConfig{HiddenSize: 3840, VocabSize: 262144},
+		AudioTokenID:  258881,
+		AudioConfig: &gemma4metadata.AudioConfig{
+			ModelType: "gemma4_unified_audio", AudioEmbedDim: 640,
+			AudioSamplesPerToken: 640, HiddenSize: 640, OutputProjDims: 640, RMSNormEps: 1e-6,
+		},
+	}
+	configJSON, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes, err := gemma4metadata.RequiredAudioTensorShapes(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	processor := `{"audio_seq_length":750,"feature_extractor":{"audio_samples_per_token":640,"feature_extractor_type":"Gemma4UnifiedAudioFeatureExtractor","feature_size":640,"padding_side":"right","sampling_rate":16000}}`
+	tokens := `{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`
+	tokenizerData := `{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":258881,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`
+	for name, data := range map[string]string{"processor_config.json": processor, "tokenizer_config.json": tokens, "tokenizer.json": tokenizerData} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeClientSafetensorsWithShapes(t, dir, shapes)
+	if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion", "audio"}; !slices.Equal(got, want) {
+		t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+	}
+
+	writeClientSafetensorsWithShapes(t, dir, map[string][]int32{
+		"model.embed_audio.embedding_projection.weight": {3840, 639},
+	})
+	if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion"}; !slices.Equal(got, want) {
+		t.Fatalf("bad projector capabilities = %#v, want %#v", got, want)
+	}
+}
+
+func writeGemma4AudioRuntimeConfigs(t *testing.T, dir string) {
+	t.Helper()
+	processor := `{"audio_seq_length":750,"feature_extractor":{"feature_extractor_type":"Gemma4AudioFeatureExtractor","feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`
+	tokens := `{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`
+	tokenizerData := `{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`
+	for name, data := range map[string]string{"processor_config.json": processor, "tokenizer_config.json": tokens, "tokenizer.json": tokenizerData} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func gemma4ClientVisionTensorNames(layers int) []string {
+	names := []string{
+		"model.vision_tower.patch_embedder.input_proj.weight",
+		"model.vision_tower.patch_embedder.position_embedding_table",
+		"model.embed_vision.embedding_projection.weight",
+	}
+	for i := range layers {
+		layer := fmt.Sprintf("model.vision_tower.encoder.layers.%d", i)
+		for _, projection := range []string{
+			".self_attn.q_proj.linear.weight", ".self_attn.k_proj.linear.weight",
+			".self_attn.v_proj.linear.weight", ".self_attn.o_proj.linear.weight",
+			".mlp.gate_proj.linear.weight", ".mlp.up_proj.linear.weight", ".mlp.down_proj.linear.weight",
+		} {
+			names = append(names, layer+projection)
+		}
+		for _, norm := range []string{
+			".self_attn.q_norm.weight", ".self_attn.k_norm.weight",
+			".input_layernorm.weight", ".post_attention_layernorm.weight",
+			".pre_feedforward_layernorm.weight", ".post_feedforward_layernorm.weight",
+		} {
+			names = append(names, layer+norm)
+		}
+	}
+	return names
+}
+
+func writeClientSafetensors(t *testing.T, dir string, names ...string) {
+	t.Helper()
+
+	tensors := make([]*safetensors.TensorData, 0, len(names))
+	for _, name := range names {
+		tensors = append(tensors, safetensors.NewTensorDataFromBytes(name, "U8", []int32{1}, []byte{0}))
+	}
+
+	data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader(tensors))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeClientSafetensorsWithShapes(t *testing.T, dir string, shapes map[string][]int32) {
+	t.Helper()
+	tensors := make([]*safetensors.TensorData, 0, len(shapes))
+	for name, shape := range shapes {
+		elements := 1
+		for _, dim := range shape {
+			elements *= int(dim)
+		}
+		tensors = append(tensors, safetensors.NewTensorDataFromBytes(name, "F32", shape, make([]byte, elements*4)))
+	}
+	data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader(tensors))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -593,8 +881,8 @@ func TestDetectCapabilities(t *testing.T) {
 			want:       modelCapabilities{thinking: true},
 		},
 		{
-			name:       "vision config",
-			configJSON: `{"architectures": ["Gemma4ForConditionalGeneration"], "vision_config": {}}`,
+			name:       "non-gemma vision config",
+			configJSON: `{"architectures": ["SomeVisionModel"], "model_type": "other", "vision_config": {}}`,
 			want:       modelCapabilities{vision: true},
 		},
 		{
@@ -668,7 +956,6 @@ func TestInferSafetensorsCapabilitiesFromParser(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{}`), 0o644); err != nil {
 				t.Fatal(err)
 			}
-
 			if got := inferSafetensorsCapabilities(dir, tt.parserName); !slices.Equal(got, tt.want) {
 				t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, tt.want)
 			}

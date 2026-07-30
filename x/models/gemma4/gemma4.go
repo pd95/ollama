@@ -67,6 +67,10 @@ type TextConfig struct {
 	ExpertIntermediateSize int32                  `json:"moe_intermediate_size"`
 	RopeParameters         map[string]*RopeParams `json:"rope_parameters"`
 	ImageTokenIDValue      int32                  `json:"image_token_id"`
+	AudioTokenIDValue      int32                  `json:"-"`
+	BOITokenIDValue        int32                  `json:"-"`
+	EOITokenIDValue        int32                  `json:"-"`
+	VisionSoftTokens       int32                  `json:"-"`
 
 	// Quantization parameters.
 	QuantGroupSize int                               `json:"-"`
@@ -375,10 +379,15 @@ type DecoderLayer struct {
 
 // Model is the Gemma 4 model (text + optional vision).
 type Model struct {
-	EmbedTokens nn.EmbeddingLayer
-	Layers      []*DecoderLayer
-	Norm        *nn.RMSNorm
-	LMHead      nn.LinearLayer
+	EmbedTokens   nn.EmbeddingLayer
+	Layers        []*DecoderLayer
+	Norm          *nn.RMSNorm
+	LMHead        nn.LinearLayer
+	Vision        *VisionModel
+	UnifiedVision *UnifiedVisionEmbedder
+	EmbedVision   *MultimodalEmbedder
+	Audio         *AudioModel
+	EmbedAudio    *MultimodalEmbedder
 
 	// PLE model-level components (nil if no PLE).
 	EmbedTokensPerLayer nn.EmbeddingLayer
@@ -391,9 +400,13 @@ type Model struct {
 
 	tok *tokenizer.Tokenizer
 	*TextConfig
+	VisionConfig         *VisionConfig
+	AudioConfig          *AudioConfig
+	AudioProcessorConfig *AudioProcessorConfig
 
 	SuppressLogitBias *mlx.Array
 	weightPrefix      string
+	mediaTokens       gemma4MediaTokens
 }
 
 func parseTextConfig(configData []byte) (TextConfig, error) {
@@ -412,6 +425,23 @@ func parseTextConfig(configData []byte) (TextConfig, error) {
 	if wrapped.TextConfig != nil {
 		cfg = *wrapped.TextConfig
 	}
+	var top struct {
+		ImageTokenID             int32 `json:"image_token_id"`
+		AudioTokenID             int32 `json:"audio_token_id"`
+		BOITokenID               int32 `json:"boi_token_id"`
+		EOITokenID               int32 `json:"eoi_token_id"`
+		VisionSoftTokensPerImage int32 `json:"vision_soft_tokens_per_image"`
+	}
+	if err := json.Unmarshal(configData, &top); err != nil {
+		return TextConfig{}, fmt.Errorf("parse top-level multimodal config: %w", err)
+	}
+	if cfg.ImageTokenIDValue == 0 {
+		cfg.ImageTokenIDValue = top.ImageTokenID
+	}
+	cfg.AudioTokenIDValue = top.AudioTokenID
+	cfg.BOITokenIDValue = top.BOITokenID
+	cfg.EOITokenIDValue = top.EOITokenID
+	cfg.VisionSoftTokens = top.VisionSoftTokensPerImage
 
 	// Apply defaults.
 	if cfg.HeadDim == 0 {
@@ -437,6 +467,21 @@ func parseTextConfig(configData []byte) (TextConfig, error) {
 	}
 	if cfg.MaxPositionEmbeddings == 0 {
 		cfg.MaxPositionEmbeddings = 131072
+	}
+	if cfg.ImageTokenIDValue == 0 {
+		cfg.ImageTokenIDValue = 258880
+	}
+	if cfg.AudioTokenIDValue == 0 {
+		cfg.AudioTokenIDValue = 258881
+	}
+	if cfg.BOITokenIDValue == 0 {
+		cfg.BOITokenIDValue = 255999
+	}
+	if cfg.EOITokenIDValue == 0 {
+		cfg.EOITokenIDValue = 258882
+	}
+	if cfg.VisionSoftTokens == 0 {
+		cfg.VisionSoftTokens = 280
 	}
 
 	// Gemma 4 uses scaling=1.0 (no 1/sqrt(head_dim) scaling); the Q/K norms
@@ -615,6 +660,20 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	visionConfig, err := parseVisionConfig(configData)
+	if err != nil {
+		return nil, err
+	}
+	audioConfig, audioConfigErr := parseAudioConfig(configData)
+	if audioConfigErr != nil {
+		audioConfig = nil
+	}
+	var audioProcessorConfig *AudioProcessorConfig
+	if audioConfig != nil {
+		if processorData, readErr := root.Manifest.ReadConfig("processor_config.json"); readErr == nil {
+			audioProcessorConfig, _ = parseAudioProcessorConfig(processorData)
+		}
+	}
 
 	if qt := root.QuantType(); qt != "" {
 		cfg.QuantGroupSize, cfg.QuantBits, cfg.QuantMode = model.QuantizationParams(qt)
@@ -637,20 +696,31 @@ func newModel(root *model.Root) (base.Model, error) {
 		tokConfig.GenerationConfigJSON = genConfigData
 		suppressTokens = parseSuppressTokens(genConfigData)
 	}
+	mediaTokens := defaultGemma4MediaTokens()
 	if tokConfigData, err := root.Manifest.ReadConfig("tokenizer_config.json"); err == nil {
 		tokConfig.TokenizerConfigJSON = tokConfigData
+		mediaTokens = parseGemma4MediaTokens(tokConfigData, mediaTokens)
 	}
 
 	tok, err := tokenizer.LoadFromBytesWithConfig(tokData, tokConfig)
 	if err != nil {
 		return nil, fmt.Errorf("parse tokenizer: %w", err)
 	}
+	if audioConfig != nil && audioProcessorConfig != nil &&
+		!validGemma4AudioTokenizer(tok, mediaTokens, cfg.AudioTokenIDValue) {
+		audioConfig = nil
+		audioProcessorConfig = nil
+	}
 
 	m := &Model{
-		Layers:            make([]*DecoderLayer, cfg.NumHiddenLayers),
-		TextConfig:        &cfg,
-		tok:               tok,
-		SuppressLogitBias: makeSuppressLogitBias(suppressTokens, cfg.VocabSize),
+		Layers:               make([]*DecoderLayer, cfg.NumHiddenLayers),
+		TextConfig:           &cfg,
+		VisionConfig:         visionConfig,
+		AudioConfig:          audioConfig,
+		AudioProcessorConfig: audioProcessorConfig,
+		tok:                  tok,
+		mediaTokens:          mediaTokens,
+		SuppressLogitBias:    makeSuppressLogitBias(suppressTokens, cfg.VocabSize),
 	}
 
 	for i := range m.Layers {
@@ -667,6 +737,13 @@ func newModel(root *model.Root) (base.Model, error) {
 	}
 
 	return m, nil
+}
+
+func validGemma4AudioTokenizer(tok *tokenizer.Tokenizer, tokens gemma4MediaTokens, audioTokenID int32) bool {
+	boa := tok.Encode(tokens.BOA, false)
+	audio := tok.Encode(tokens.Audio, false)
+	eoa := tok.Encode(tokens.EOA, false)
+	return len(boa) == 1 && len(audio) == 1 && len(eoa) == 1 && audio[0] == audioTokenID
 }
 
 // LoadWeights receives all tensors loaded from the manifest and assigns them
@@ -698,6 +775,41 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	} else {
 		// Gemma 4 ties output projection to embeddings.
 		m.LMHead = m.EmbedTokens.AsLinear()
+	}
+
+	if m.VisionConfig != nil && hasCompleteGemma4VisionWeights(tensors, m.VisionConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant) {
+		if m.VisionConfig.unified() {
+			vision, err := loadUnifiedVisionEmbedder(tensors, m.VisionConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+			if err != nil {
+				return err
+			}
+			m.UnifiedVision = vision
+		} else {
+			vision, err := loadVisionModel(tensors, m.VisionConfig, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+			if err != nil {
+				return err
+			}
+			m.Vision = vision
+		}
+		embedVision, err := loadMultimodalEmbedder(tensors, "embed_vision", m.VisionConfig.RMSNormEps, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+		if err != nil {
+			return err
+		}
+		m.EmbedVision = embedVision
+	}
+	if m.AudioConfig != nil && m.AudioProcessorConfig != nil && hasCompleteGemma4AudioWeights(tensors, m.AudioConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant) {
+		if !m.AudioConfig.unified() {
+			audio, err := loadAudioModel(tensors, m.AudioConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+			if err != nil {
+				return err
+			}
+			m.Audio = audio
+		}
+		embedAudio, err := loadMultimodalEmbedder(tensors, "embed_audio", m.AudioConfig.RMSNormEps, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+		if err != nil {
+			return err
+		}
+		m.EmbedAudio = embedAudio
 	}
 
 	// PLE model-level weights.
@@ -988,13 +1100,19 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
 	dims := b.InputIDs.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
 	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
-	h := m.EmbedTokens.Forward(b.InputIDs)
-	h = mlx.MulScalar(h, m.EmbedScale)
+	h := b.InputEmbeddings
+	if h == nil {
+		h = m.TokenEmbeddings(b.InputIDs)
+	}
 
 	// Compute PLE inputs if configured.
 	var perLayerInputs *mlx.Array
 	if m.HiddenSizePerLayer > 0 && m.EmbedTokensPerLayer != nil {
-		perLayerInputs = m.computePLEInputs(b.InputIDs, h)
+		pleTokens := b.InputIDs
+		if b.PLEInputIDs != nil {
+			pleTokens = b.PLEInputIDs
+		}
+		perLayerInputs = m.computePLEInputs(pleTokens, h)
 	}
 
 	// KV sharing: each donor layer stores its KVHistory here so later
@@ -1284,7 +1402,7 @@ func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positio
 		// kernel only handles L < 4 (generation). For prefill, we fall back
 		// to explicit matmul+softmax+matmul on CUDA.
 		var k, v *mlx.Array
-		mask := nn.CausalMask().Intersect(nn.QPaddingMask(b, q.DType()))
+		mask := gemma4AttentionMask(b, isSliding).Intersect(nn.QPaddingMask(b, q.DType()))
 		if kv.history != nil {
 			k, v = kv.history.K(), kv.history.V()
 			mask = kv.history.Mask(mask)
@@ -1314,7 +1432,7 @@ func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positio
 		out = mlx.Reshape(out, B, cfg.NumAttentionHeads, L, headDim)
 	} else {
 		var opt nn.SDPAOption
-		mask := nn.CausalMask()
+		mask := gemma4AttentionMask(b, isSliding)
 		if kv.history != nil {
 			opt = nn.WithKVHistory(kv.history)
 		} else {
@@ -1330,6 +1448,20 @@ func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positio
 		out = mlx.Contiguous(out, false)
 	}
 	return a.OProj.Forward(out), kv
+}
+
+func gemma4AttentionMask(b *batch.Batch, isSliding bool) nn.AttentionMask {
+	mask := nn.CausalMask()
+	// Gemma 4 unified deliberately differs from Gemma 3 here: the official
+	// create_masks_for_vision_model keeps full-attention layers causal and
+	// applies the blockwise visual overlay only to sliding-attention layers.
+	if !isSliding {
+		return mask
+	}
+	for _, span := range b.BidirectionalSpans {
+		mask = mask.Relax(0, span.Start, span.End, span.Start, span.End)
+	}
+	return mask
 }
 
 func (m *MLP) Forward(x *mlx.Array) *mlx.Array {

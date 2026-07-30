@@ -31,6 +31,7 @@ import (
 	"github.com/ollama/ollama/thinking"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/version"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/transfer"
 )
 
@@ -72,6 +73,10 @@ type Model struct {
 	PreferChatTemplate bool // set when GGUF chat_template should take precedence over Go TEMPLATE
 	AdapterPaths       []string
 	ProjectorPaths     []string
+	TensorLayerNames   []string
+	Gemma4VisionConfig *gemma4metadata.ConfigFile `json:"-"`
+	Gemma4AudioConfig  *gemma4metadata.ConfigFile `json:"-"`
+	Gemma4AudioReady   bool                       `json:"-"`
 	System             string
 	License            []string
 	Digest             string
@@ -450,23 +455,37 @@ func (m *Model) modelFamilyCapabilities(capabilities []model.Capability) []model
 }
 
 func (m *Model) filterUnsupportedCapabilities(capabilities []model.Capability, modelArch string) []model.Capability {
+	if suppressGemma4SafetensorsVisionCapability(m) {
+		capabilities = slices.DeleteFunc(capabilities, func(c model.Capability) bool {
+			return c == model.CapabilityVision
+		})
+	}
+
 	if suppressAudioCapability(m, modelArch) {
 		capabilities = slices.DeleteFunc(capabilities, func(c model.Capability) bool {
 			return c == model.CapabilityAudio
-		})
-	}
-	if isGemma4Renderer(m.Config.Renderer) && m.Config.ModelFormat == "safetensors" {
-		capabilities = slices.DeleteFunc(capabilities, func(c model.Capability) bool {
-			return c == model.CapabilityVision
 		})
 	}
 
 	return capabilities
 }
 
+func suppressGemma4SafetensorsVisionCapability(m *Model) bool {
+	if m == nil || !isLocalGemma4SafetensorsConfig(m.Config) {
+		return false
+	}
+
+	return m.Gemma4VisionConfig == nil || gemma4metadata.ValidateVisionTensors(*m.Gemma4VisionConfig, m.TensorLayerNames) != nil
+}
+
 func suppressAudioCapability(m *Model, arch string) bool {
 	if isGemma4Renderer(m.Config.Renderer) && m.Config.ModelFormat == "safetensors" {
-		return true
+		if !isLocalGemma4SafetensorsConfig(m.Config) {
+			return true
+		}
+		return m.Gemma4AudioConfig == nil ||
+			!m.Gemma4AudioReady ||
+			gemma4metadata.ValidateAudioTensors(*m.Gemma4AudioConfig, m.TensorLayerNames) != nil
 	}
 
 	if arch == "nemotron_h_omni" ||
@@ -477,6 +496,43 @@ func suppressAudioCapability(m *Model, arch string) bool {
 	}
 
 	return false
+}
+
+func isLocalGemma4SafetensorsConfig(cfg model.ConfigV2) bool {
+	return cfg.ModelFormat == "safetensors" &&
+		isGemma4Renderer(cfg.Renderer) &&
+		cfg.RemoteHost == "" &&
+		cfg.RemoteModel == ""
+}
+
+func hasGemma4VisionTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifest.Layer) bool {
+	names := make([]string, 0, len(layers))
+	for _, layer := range layers {
+		if layer.MediaType == manifest.MediaTypeImageTensor {
+			names = append(names, layer.Name)
+		}
+	}
+
+	return gemma4metadata.ValidateVisionTensors(cfg, names) == nil
+}
+
+func hasGemma4AudioTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifest.Layer) bool {
+	names := make([]string, 0, len(layers))
+	for _, layer := range layers {
+		if layer.MediaType == manifest.MediaTypeImageTensor {
+			names = append(names, layer.Name)
+		}
+	}
+
+	return gemma4metadata.ValidateAudioTensors(cfg, names) == nil
+}
+
+func hasGemma4AudioRuntimeMetadata(cfg gemma4metadata.ConfigFile, mf *manifest.Manifest) bool {
+	var processorData, tokenizerConfigData, tokenizerData json.RawMessage
+	return mf.ReadConfigJSON("processor_config.json", &processorData) == nil &&
+		mf.ReadConfigJSON("tokenizer_config.json", &tokenizerConfigData) == nil &&
+		mf.ReadConfigJSON("tokenizer.json", &tokenizerData) == nil &&
+		gemma4metadata.ValidateAudioRuntimeMetadata(cfg, processorData, tokenizerConfigData, tokenizerData) == nil
 }
 
 func projectorHasAudio(f *gguf.File) bool {
@@ -542,6 +598,13 @@ func (m *Model) CheckCapabilities(want ...model.Capability) error {
 			// append a message to the existing error
 			return fmt.Errorf("%w. Pull the model again to get the latest version with full thinking support", err)
 		}
+	}
+
+	if slices.Contains(errs, errCapabilityVision) && suppressGemma4SafetensorsVisionCapability(m) {
+		return fmt.Errorf("%w. Recreate or pull the model so it includes Gemma 4 vision tensor layers", err)
+	}
+	if slices.Contains(errs, errCapabilityAudio) && isLocalGemma4SafetensorsConfig(m.Config) && suppressAudioCapability(m, "") {
+		return fmt.Errorf("%w. Recreate or pull the model so it includes Gemma 4 audio tensor layers", err)
 	}
 
 	return err
@@ -668,6 +731,14 @@ func GetModel(name string) (*Model, error) {
 			return nil, err
 		}
 	}
+	if isLocalGemma4SafetensorsConfig(m.Config) {
+		var cfg gemma4metadata.ConfigFile
+		if err := mf.ReadConfigJSON("config.json", &cfg); err == nil {
+			m.Gemma4VisionConfig = &cfg
+			m.Gemma4AudioConfig = &cfg
+			m.Gemma4AudioReady = hasGemma4AudioRuntimeMetadata(cfg, mf)
+		}
+	}
 
 	modelHasPooling := false
 	ggufChatTemplate := ""
@@ -702,6 +773,8 @@ func GetModel(name string) (*Model, error) {
 			m.AdapterPaths = append(m.AdapterPaths, filename)
 		case "application/vnd.ollama.image.projector":
 			m.ProjectorPaths = append(m.ProjectorPaths, filename)
+		case manifest.MediaTypeImageTensor:
+			m.TensorLayerNames = append(m.TensorLayerNames, layer.Name)
 		case "application/vnd.ollama.image.prompt",
 			"application/vnd.ollama.image.template":
 			m.HasGoTemplate = true
