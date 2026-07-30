@@ -18,6 +18,14 @@ import (
 	"github.com/ollama/ollama/x/tokenizer"
 )
 
+type mediaPromptPreparer interface {
+	PrepareMediaPrompt(ctx context.Context, prompt string, media []llm.MediaData) (*batch.PreparedInput, error)
+}
+
+type mediaEmbeddingPreparer interface {
+	PrepareMediaEmbeddings(ctx context.Context, prepared *batch.PreparedInput) error
+}
+
 func prefillChunkSize() int {
 	return 2 << 10
 }
@@ -26,11 +34,34 @@ func prefillChunkSize() int {
 // context length. It is safe to call from any goroutine. On success it
 // populates request.Tokens and adjusts request.Options.NumPredict.
 func (r *Runner) Prepare(request *Request) error {
+	return r.PrepareContext(context.Background(), request)
+}
+
+// PrepareContext prepares a request while allowing media decoding and
+// preprocessing to stop when the caller disconnects.
+func (r *Runner) PrepareContext(ctx context.Context, request *Request) error {
 	if r.Model == nil {
 		return errors.New("model not loaded")
 	}
 
-	tokens := r.Tokenizer.Encode(request.Prompt, r.Tokenizer.AddBOS())
+	var tokens []int32
+	if len(request.Media) > 0 {
+		preparer, ok := r.Model.(mediaPromptPreparer)
+		if !ok {
+			return fmt.Errorf("MLX runner does not support media inputs for this model")
+		}
+		prepared, err := preparer.PrepareMediaPrompt(ctx, request.Prompt, request.Media)
+		if err != nil {
+			return err
+		}
+		if prepared == nil {
+			return errors.New("media prompt preparation returned nil")
+		}
+		request.Prepared = prepared
+		tokens = prepared.Tokens
+	} else {
+		tokens = r.Tokenizer.Encode(request.Prompt, r.Tokenizer.AddBOS())
+	}
 	if len(tokens) == 0 {
 		return errors.New("empty prompt")
 	}
@@ -70,17 +101,56 @@ func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) er
 	}()
 
 	inputs := request.Tokens
+	var embeddings *mlx.Array
+	var pleInputIDs []int32
+	cacheable := len(request.Media) == 0
 
-	session := r.cache.begin(r.Model, inputs)
+	if len(request.Media) > 0 {
+		preparer, ok := r.Model.(mediaEmbeddingPreparer)
+		if !ok {
+			return fmt.Errorf("MLX runner does not support media embeddings for this model")
+		}
+		if request.Prepared == nil {
+			return errors.New("missing prepared media input")
+		}
+		if err := preparer.PrepareMediaEmbeddings(ctx, request.Prepared); err != nil {
+			return err
+		}
+		embeddings = request.Prepared.InputEmbeddings
+		if embeddings == nil {
+			return errors.New("media prompt preparation did not produce input embeddings")
+		}
+		pleInputIDs = request.Prepared.PLEInputIDs
+	}
+
+	var session *cacheSession
+	if cacheable {
+		session = r.cache.begin(r.Model, inputs)
+	} else {
+		session = r.cache.beginEphemeral(r.Model, inputs)
+	}
+	session.inputEmbeddings = embeddings
+	session.pleInputIDs = pleInputIDs
+	if request.Prepared != nil {
+		session.bidirectionalSpans = request.Prepared.BidirectionalSpans
+	}
 	defer session.close()
 	caches := session.caches
 
 	// Built before prefill so a drafter with draft caches follows the prompt
 	// through prefill alongside the target.
-	spec := r.spec.open(request, caches)
+	var spec *speculationSession
+	if cacheable {
+		spec = r.spec.open(request, caches)
+	}
 	defer spec.close()
 
 	seed, position, promptEval, err := r.prefill(ctx, session, spec)
+	session.inputEmbeddings = nil
+	if request.Prepared != nil {
+		request.Prepared.InputEmbeddings = nil
+	}
+	mlx.Sweep()
 	if err != nil {
 		return err
 	}
@@ -98,15 +168,27 @@ func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) er
 	return r.decode(ctx, request, session, d, promptEval)
 }
 
+func pinInputEmbeddings(embeddings *mlx.Array) func() {
+	mlx.Pin(embeddings)
+	return func() { mlx.Unpin(embeddings) }
+}
+
 // prefill evaluates the prompt in chunks, leaving one token for decode to
 // seed from, and schedules the prompt's periodic snapshots. It returns the
 // seed tokens, the resume position, and the prompt-evaluation duration.
 func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *speculationSession) ([]int32, int, time.Duration, error) {
+	if session.inputEmbeddings != nil {
+		release := pinInputEmbeddings(session.inputEmbeddings)
+		defer release()
+	}
 	start := time.Now()
 	inputs := session.inputs
 	tokens := session.remaining
 	caches := session.caches
 	prefillChunk := prefillChunkSize()
+	if err := validateBidirectionalSpans(session.bidirectionalSpans, len(inputs), prefillChunk); err != nil {
+		return nil, 0, 0, err
+	}
 
 	// Request periodic snapshots during prefill and near the end of the
 	// prompt so that long prompts can be partially restored and
@@ -142,14 +224,28 @@ func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *specu
 			return nil, 0, 0, err
 		}
 
-		n := min(prefillChunk, total-processed-1)
+		n, err := nextPrefillChunk(position, total-processed-1, prefillChunk, session.bidirectionalSpans)
+		if err != nil {
+			return nil, 0, 0, err
+		}
 
 		chunkIDs := mlx.FromValues(tokens[processed:processed+n], 1, n)
-		hidden := r.Model.Forward(&batch.Batch{
-			InputIDs:     chunkIDs,
-			SeqOffsets:   []int32{int32(position)},
-			SeqQueryLens: []int32{int32(n)},
-		}, caches)
+		b := &batch.Batch{
+			InputIDs:           chunkIDs,
+			SeqOffsets:         []int32{int32(position)},
+			SeqQueryLens:       []int32{int32(n)},
+			BidirectionalSpans: session.bidirectionalSpans,
+		}
+		if session.inputEmbeddings != nil {
+			b.InputEmbeddings = mlx.SliceStartStop(session.inputEmbeddings,
+				[]int32{0, int32(position), 0},
+				[]int32{1, int32(position + n), int32(session.inputEmbeddings.Dim(2))},
+			)
+		}
+		if len(session.pleInputIDs) > 0 {
+			b.PLEInputIDs = mlx.FromValues(session.pleInputIDs[position:position+n], 1, n)
+		}
+		hidden := r.Model.Forward(b, caches)
 		spec.committed(chunkIDs, hidden, position)
 		mlx.Sweep()
 		materializeCaches()
@@ -168,6 +264,39 @@ func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *specu
 	session.attachPrefillSnapshots()
 
 	return tokens[processed:], position, time.Since(start), nil
+}
+
+func validateBidirectionalSpans(spans []batch.TokenSpan, sequenceLength, maxSpan int) error {
+	previousEnd := 0
+	for _, span := range spans {
+		if span.Start < previousEnd || span.Start < 0 || span.End <= span.Start || span.End >= sequenceLength {
+			return fmt.Errorf("invalid bidirectional token span [%d,%d) for sequence length %d", span.Start, span.End, sequenceLength)
+		}
+		if span.End-span.Start > maxSpan {
+			return fmt.Errorf("bidirectional token span length %d exceeds prefill limit %d", span.End-span.Start, maxSpan)
+		}
+		previousEnd = span.End
+	}
+	return nil
+}
+
+func nextPrefillChunk(position, available, normalChunk int, spans []batch.TokenSpan) (int, error) {
+	n := min(available, normalChunk)
+	for _, span := range spans {
+		switch {
+		case position < span.Start:
+			return min(n, span.Start-position), nil
+		case position == span.Start:
+			spanLength := span.End - span.Start
+			if spanLength > available {
+				return 0, fmt.Errorf("bidirectional token span [%d,%d) cannot be processed as one prefill chunk", span.Start, span.End)
+			}
+			return spanLength, nil
+		case position < span.End:
+			return 0, fmt.Errorf("prefill position %d starts inside bidirectional token span [%d,%d)", position, span.Start, span.End)
+		}
+	}
+	return n, nil
 }
 
 // A decoder produces each run of tokens to emit, owning its own dispatch and
