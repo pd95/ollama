@@ -3,8 +3,10 @@ package gemma4
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"math"
+	"os"
 	"strings"
 	"testing"
 )
@@ -219,7 +221,7 @@ func TestGemma4AudioInputFailures(t *testing.T) {
 		data []byte
 		want string
 	}{
-		{"mp3", []byte("ID3not-wav"), "RIFF/WAVE"},
+		{"malformed mp3", []byte("ID3not-an-mp3"), "decode MP3"},
 		{"truncated chunk", append([]byte("RIFF\x00\x00\x00\x00WAVEdata\xff\xff\xff\x7f"), 0), "truncated"},
 		{"too short", makeTestWAV(t, 1, 16, 16000, make([][]float64, 100)), "too short"},
 	} {
@@ -235,6 +237,25 @@ func TestGemma4AudioInputFailures(t *testing.T) {
 	cancel()
 	if _, err := decodeGemma4WAV(ctx, []byte("anything"), 16000); err != context.Canceled {
 		t.Fatalf("canceled decode error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestPreprocessGemma4MP3(t *testing.T) {
+	encoded, err := os.ReadFile("../../mlxrunner/media/testdata/bcn_weather_first_10_frames.mp3.base64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultAudioProcessorConfig()
+	input, err := preprocessGemma4Audio(context.Background(), data, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.SoftTokens == 0 || input.Frames == 0 || len(input.Features) == 0 {
+		t.Fatalf("MP3 input = %+v", input)
 	}
 }
 
