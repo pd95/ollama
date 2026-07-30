@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"github.com/ollama/ollama/ml"
 
 	"github.com/ollama/ollama/api"
+	"golang.org/x/image/webp"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -3529,6 +3531,9 @@ func TestLlamaServerChatMessageConvertsMediaParts(t *testing.T) {
 	if parts[1]["type"] != "image_url" {
 		t.Fatalf("expected image_url for PNG, got %#v", parts[1])
 	}
+	if got := parts[1]["image_url"].(map[string]any)["url"]; got != "data:image/png;base64,"+base64.StdEncoding.EncodeToString(png) {
+		t.Fatalf("PNG media was modified: %q", got)
+	}
 	for i, want := range []string{"wav", "mp3"} {
 		part := parts[i+2]
 		if part["type"] != "input_audio" {
@@ -3544,6 +3549,55 @@ func TestLlamaServerChatMessageConvertsMediaParts(t *testing.T) {
 		if audio["data"] == "" {
 			t.Fatalf("expected base64 audio data for %s", want)
 		}
+	}
+}
+
+func TestLlamaServerChatMessageConvertsWebPToPNG(t *testing.T) {
+	webpData, err := base64.StdEncoding.DecodeString("UklGRrIBAABXRUJQVlA4TKUBAAAvSsAYAA8w//M///MfeJAkbXvaSG7m8Q3GfYSBJekwQztm/IcZlgwnmWImn2BK7aFmBtnVir6q//8VOkFE/xm4baTIu8c48ArEo6+B3zFKYln3pqClSCKX0begFTAXFOLXHSyF8cCNcZEG4OywuA4KVVfJCiArU7GAgJI8+lJP/OKMT/fBAjevg1cYB7YVkFuWga2lyPi5I0HFy5YTpWIHg0RZpkniRVW9odHAKOwosWuOGdxIyn2OvaCDvhg/we6TwadPBPbqBV58MsLmMJ8yZnOWk8SRz4N+QoyPL+MnamzMvcE1rHNEr91F9GKZPVUcS9w7PhhH36suB9qPeYb/oLk6cuTiJ0wOK3m5h1cKjW6EVZCYMK7dxcKCBdgP9HkKr9gkAO2P8GKZGWVdIAatQa+1IDpt6qyorVwdy01xdW8Jkfk6xjEXmVQQ+HQdFr6OKhIN34dXWq0+0qr6EJSCeeVLH9+gvGTLyqM65PQ44ihzlTXxQKjKbAvshXgir7Lil9w4L2bvMycmjQcqXaMCO6BlY28i+FOLzbfI1vEqxAhotocAAA==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, webpData)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := msg["content"].([]map[string]any)
+	imageURL := parts[0]["image_url"].(map[string]any)["url"].(string)
+	const prefix = "data:image/png;base64,"
+	if !strings.HasPrefix(imageURL, prefix) {
+		t.Fatalf("WebP URL = %q", imageURL[:min(len(imageURL), 64)])
+	}
+	pngData, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(imageURL, prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := png.Decode(bytes.NewReader(pngData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Bounds().Dx() <= 0 || img.Bounds().Dy() <= 0 {
+		t.Fatalf("converted bounds = %v", img.Bounds())
+	}
+	original, err := webp.Decode(bytes.NewReader(webpData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Bounds() != original.Bounds() {
+		t.Fatalf("converted bounds = %v, want %v", img.Bounds(), original.Bounds())
+	}
+	for y := img.Bounds().Min.Y; y < img.Bounds().Max.Y; y++ {
+		for x := img.Bounds().Min.X; x < img.Bounds().Max.X; x++ {
+			gr, gg, gb, ga := img.At(x, y).RGBA()
+			wr, wg, wb, wa := original.At(x, y).RGBA()
+			if gr != wr || gg != wg || gb != wb || ga != wa {
+				t.Fatalf("pixel (%d,%d) = (%d,%d,%d,%d), want (%d,%d,%d,%d)", x, y, gr, gg, gb, ga, wr, wg, wb, wa)
+			}
+		}
+	}
+
+	bad := append([]byte(nil), webpData[:20]...)
+	if _, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, bad)}}); err == nil || !strings.Contains(err.Error(), "WebP") {
+		t.Fatalf("malformed WebP error = %v", err)
 	}
 }
 

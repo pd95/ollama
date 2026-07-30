@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -39,6 +40,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/image/webp"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/ollama/ollama/api"
@@ -2182,13 +2184,17 @@ func llamaServerChatMessage(msg Message) (map[string]any, error) {
 		})
 	}
 	for _, media := range msg.Media {
-		parts = append(parts, llamaServerChatMediaPart(media))
+		part, err := llamaServerChatMediaPart(media)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, part)
 	}
 	converted["content"] = parts
 	return converted, nil
 }
 
-func llamaServerChatMediaPart(media MediaData) map[string]any {
+func llamaServerChatMediaPart(media MediaData) (map[string]any, error) {
 	encoded := base64.StdEncoding.EncodeToString(media.Data)
 	if format, ok := AudioFormat(media.Data); ok {
 		return map[string]any{
@@ -2197,10 +2203,31 @@ func llamaServerChatMediaPart(media MediaData) map[string]any {
 				"data":   encoded,
 				"format": format,
 			},
-		}
+		}, nil
 	}
 
 	mime := http.DetectContentType(media.Data)
+	if mime == "image/webp" {
+		config, err := webp.DecodeConfig(bytes.NewReader(media.Data))
+		if err != nil {
+			return nil, fmt.Errorf("invalid WebP media: %w", err)
+		}
+		const maxDimension = 16384
+		const maxPixels = 64 << 20
+		if config.Width <= 0 || config.Height <= 0 || config.Width > maxDimension || config.Height > maxDimension || int64(config.Width)*int64(config.Height) > maxPixels {
+			return nil, fmt.Errorf("WebP media dimensions %dx%d exceed limits", config.Width, config.Height)
+		}
+		img, err := webp.Decode(bytes.NewReader(media.Data))
+		if err != nil {
+			return nil, fmt.Errorf("invalid WebP media: %w", err)
+		}
+		var converted bytes.Buffer
+		if err := png.Encode(&converted, img); err != nil {
+			return nil, fmt.Errorf("convert WebP media to PNG: %w", err)
+		}
+		mime = "image/png"
+		encoded = base64.StdEncoding.EncodeToString(converted.Bytes())
+	}
 	if !strings.HasPrefix(mime, "image/") {
 		mime = "image/jpeg"
 	}
@@ -2209,7 +2236,7 @@ func llamaServerChatMediaPart(media MediaData) map[string]any {
 		"image_url": map[string]any{
 			"url": "data:" + mime + ";base64," + encoded,
 		},
-	}
+	}, nil
 }
 
 func llamaServerChatToolCalls(tcs []api.ToolCall) ([]llamaServerChatToolCall, error) {
