@@ -1,10 +1,14 @@
 package apertus
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"image"
 	"image/color"
+	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +35,93 @@ func TestApertusImageSize(t *testing.T) {
 		})
 	}
 }
+func TestApertusAdaptiveImageMemoryTiers(t *testing.T) {
+	const gib = uint64(1 << 30)
+	limits := []uint64{12 * gib, 18 * gib, 24 * gib, 36 * gib, 48 * gib, 96 * gib}
+	previousPixels := 0
+	for _, limit := range limits {
+		input := testApertusImageInput(1602, 968)
+		model := Model{mediaMemoryLimit: limit, mediaResident: 8 * gib}
+		if err := model.fitApertusImages([]*apertusImageInput{input}); err != nil {
+			t.Fatalf("limit %d: %v", limit, err)
+		}
+		pixels := input.width * input.height
+		if pixels < minApertusImageArea {
+			t.Fatalf("limit %d produced %d pixels below floor", limit, pixels)
+		}
+		if pixels < previousPixels {
+			t.Fatalf("limit %d produced %d pixels after %d", limit, pixels, previousPixels)
+		}
+		if got := estimateApertusImagePeak(model.mediaResident, []*apertusImageInput{input}); got > limit {
+			t.Fatalf("limit %d admitted estimated peak %d", limit, got)
+		}
+		previousPixels = pixels
+		if limit <= 24*gib && input.width == input.canonicalWidth && input.height == input.canonicalHeight {
+			t.Fatalf("limit %d retained unsafe canonical geometry", limit)
+		}
+		if limit >= 36*gib && (input.width != 1600 || input.height != 976) {
+			t.Fatalf("safe high-memory tier geometry = %dx%d, want 1600x976", input.width, input.height)
+		}
+	}
+}
+
+func TestApertusAdaptiveImageMemoryUsesCommonCap(t *testing.T) {
+	const gib = uint64(1 << 30)
+	large := testApertusImageInput(1602, 968)
+	small := testApertusImageInput(320, 240)
+	model := Model{mediaMemoryLimit: 18 * gib, mediaResident: 8 * gib}
+	if err := model.fitApertusImages([]*apertusImageInput{large, small}); err != nil {
+		t.Fatal(err)
+	}
+	if large.width == large.canonicalWidth && large.height == large.canonicalHeight {
+		t.Fatal("large image was not reduced")
+	}
+	if small.width != small.canonicalWidth || small.height != small.canonicalHeight {
+		t.Fatalf("small image changed from %dx%d to %dx%d", small.canonicalWidth, small.canonicalHeight, small.width, small.height)
+	}
+}
+
+func TestApertusAdaptiveImageMemoryRejectsBelowFloor(t *testing.T) {
+	const gib = uint64(1 << 30)
+	input := testApertusImageInput(1602, 968)
+	model := Model{mediaMemoryLimit: 18 * gib, mediaResident: 19 * gib}
+	err := model.fitApertusImages([]*apertusImageInput{input})
+	if err == nil || !strings.Contains(err.Error(), "minimum resolution") {
+		t.Fatalf("fitApertusImages() error = %v, want minimum-resolution rejection", err)
+	}
+}
+
+func TestInspectApertusImageDefersPixels(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 320, 180))
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	input, err := inspectApertusImage(context.Background(), encoded.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.pixels != nil {
+		t.Fatal("metadata inspection allocated normalized pixels")
+	}
+	pixels, err := materializeApertusImage(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(pixels), input.width*input.height*3; got != want {
+		t.Fatalf("pixel count = %d, want %d", got, want)
+	}
+}
+
+func testApertusImageInput(width, height int) *apertusImageInput {
+	canonicalW, canonicalH := apertusImageSize(width, height)
+	return &apertusImageInput{
+		originalWidth: width, originalHeight: height,
+		canonicalWidth: canonicalW, canonicalHeight: canonicalH,
+		width: canonicalW, height: canonicalH, gridWidth: canonicalW / 16, gridHeight: canonicalH / 16,
+	}
+}
+
 func TestResizeApertusImageMatchesTorchvisionBicubic(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 320, 180))
 	for y := range 180 {

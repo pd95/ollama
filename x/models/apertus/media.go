@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
+	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/x/mlxrunner/batch"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
@@ -34,11 +36,33 @@ type apertusMediaPayload struct {
 }
 
 // PrepareMedia expands each media segment in stream order and retains one
-// cache-identity item per source segment.
+// cache-identity item per source segment. Image geometry is inspected for the
+// whole request before pixels are materialized so every image shares one
+// deterministic memory-budget decision.
 func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
 	if !isApertus1p5Config(*m.Config) {
 		return nil, errors.New("Apertus media is only supported by Apertus 1.5")
 	}
+	images := make(map[int]*apertusImageInput)
+	var imageInputs []*apertusImageInput
+	for source, seg := range segments {
+		if seg.Data == nil || seg.Kind != "image" {
+			continue
+		}
+		if m.Vision == nil {
+			return nil, errors.New("Apertus 1.5 image input requires complete vision tokenizer weights")
+		}
+		image, err := inspectApertusImage(context.Background(), seg.Data)
+		if err != nil {
+			return nil, fmt.Errorf("Apertus 1.5 image: %w", err)
+		}
+		images[source] = image
+		imageInputs = append(imageInputs, image)
+	}
+	if err := m.fitApertusImages(imageInputs); err != nil {
+		return nil, err
+	}
+
 	prepared := &base.PreparedRequest{}
 	for source, seg := range segments {
 		if seg.Data == nil {
@@ -53,10 +77,8 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 		var expansion string
 		switch seg.Kind {
 		case "image":
-			if m.Vision == nil {
-				return nil, errors.New("Apertus 1.5 image input requires complete vision tokenizer weights")
-			}
-			image, err := preprocessApertusImage(context.Background(), seg.Data)
+			image := images[source]
+			pixels, err := materializeApertusImage(context.Background(), image)
 			if err != nil {
 				return nil, fmt.Errorf("Apertus 1.5 image: %w", err)
 			}
@@ -69,7 +91,7 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 				rows[i] = row
 			}
 			expansion = apertusBOI + fmt.Sprintf("%d*%d", image.gridHeight, image.gridWidth) + apertusImageWrapper + strings.Join(rows, apertusImageEOL) + apertusEOI
-			mediaData = image.pixels
+			mediaData = pixels
 			dims = []int{1, image.height, image.width, 3}
 		case "audio":
 			if m.Audio == nil {
@@ -122,6 +144,50 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 		})
 	}
 	return prepared, nil
+}
+
+func (m *Model) fitApertusImages(inputs []*apertusImageInput) error {
+	if len(inputs) == 0 || m.mediaMemoryLimit == 0 {
+		return nil
+	}
+	if estimateApertusImagePeak(m.mediaResident, inputs) <= m.mediaMemoryLimit {
+		return nil
+	}
+	for _, input := range inputs {
+		setApertusImageArea(input, minApertusImageArea)
+	}
+	minimumPeak := estimateApertusImagePeak(m.mediaResident, inputs)
+	if minimumPeak > m.mediaMemoryLimit {
+		return fmt.Errorf("Apertus image minimum resolution requires an estimated %s peak but the safe media budget is %s; unload other models or use the NVFP4 model",
+			format.HumanBytes2(minimumPeak), format.HumanBytes2(m.mediaMemoryLimit))
+	}
+	best := minApertusImageArea
+	for low, high := minApertusImageArea, maxApertusImageArea; low <= high; {
+		candidate := low + (high-low)/2
+		for _, input := range inputs {
+			setApertusImageArea(input, candidate)
+		}
+		if estimateApertusImagePeak(m.mediaResident, inputs) <= m.mediaMemoryLimit {
+			best = candidate
+			low = candidate + 1
+		} else {
+			high = candidate - 1
+		}
+	}
+	var reductions []string
+	for _, input := range inputs {
+		setApertusImageArea(input, best)
+		if input.width != input.canonicalWidth || input.height != input.canonicalHeight {
+			reductions = append(reductions, fmt.Sprintf("original=%dx%d canonical=%dx%d final=%dx%d (%d->%d tokens)",
+				input.originalWidth, input.originalHeight, input.canonicalWidth, input.canonicalHeight, input.width, input.height,
+				input.canonicalWidth/16*(input.canonicalHeight/16), input.gridWidth*input.gridHeight))
+		}
+	}
+	slog.Warn("Apertus image resolution reduced to fit memory budget",
+		"images", strings.Join(reductions, ", "),
+		"estimated_peak", format.HumanBytes2(estimateApertusImagePeak(m.mediaResident, inputs)),
+		"safe_budget", format.HumanBytes2(m.mediaMemoryLimit))
+	return nil
 }
 
 func placeholderSpans(tokens []int32, id int32) [][2]int {
