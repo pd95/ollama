@@ -319,30 +319,66 @@ func (v *VisionTokenizer) encode(ctx context.Context, pixels []float32, width, h
 	}
 	x := mlx.Reshape(mlx.FromValues(pixels, len(pixels)), 1, int32(height), int32(width), 3)
 	h := v.convIn.forward(x)
+	if err := materializeApertusVision(ctx, h); err != nil {
+		return nil, err
+	}
 	for _, level := range v.levels {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		for i, block := range level.blocks {
 			h = block.forward(h)
+			if err := materializeApertusVision(ctx, h); err != nil {
+				return nil, err
+			}
 			if len(level.attn) > 0 {
 				h = level.attn[i].forward(h)
+				if err := materializeApertusVision(ctx, h); err != nil {
+					return nil, err
+				}
 			}
 		}
 		if level.downsample != nil {
 			h = mlx.PadConstant(h, []int{1, 2}, []int{0, 0}, []int{1, 1})
 			h = level.downsample.forward(h)
+			if err := materializeApertusVision(ctx, h); err != nil {
+				return nil, err
+			}
+			// Downsampling makes the previous level's much larger cached
+			// buffers unusable by later levels. Return them before continuing.
+			mlx.ClearCache()
 		}
-		mlx.Eval(h)
 	}
 	h = v.mid1.forward(h)
+	if err := materializeApertusVision(ctx, h); err != nil {
+		return nil, err
+	}
 	h = v.midAttn.forward(h)
+	if err := materializeApertusVision(ctx, h); err != nil {
+		return nil, err
+	}
 	h = v.mid2.forward(h)
+	if err := materializeApertusVision(ctx, h); err != nil {
+		return nil, err
+	}
 	h = v.convOut.forward(mlx.SiLU(v.normOut.forward(h)))
+	if err := materializeApertusVision(ctx, h); err != nil {
+		return nil, err
+	}
 	h = v.quantConv.forward(h)
+	if err := materializeApertusVision(ctx, h); err != nil {
+		return nil, err
+	}
 	d := h.Dims()
 	count := int32(d[1] * d[2])
 	flat := mlx.Reshape(h, count, v.config.EmbedDim)
+	mlx.Eval(flat)
+	mlx.Pin(flat)
+	defer mlx.Unpin(flat)
+	mlx.Sweep()
+	// Encoder buffers cannot be reused by the codebook search and can be very
+	// large for screenshots, so do not leave them in MLX's allocation cache.
+	mlx.ClearCache()
 	var bestScore, bestID *mlx.Array
 	for start := int32(0); start < v.config.CodebookSize; start += visionCodebookChunk {
 		if err := ctx.Err(); err != nil {
@@ -361,8 +397,25 @@ func (v *VisionTokenizer) encode(ctx context.Context, pixels []float32, width, h
 			bestID = mlx.Where(better, chunkID, bestID)
 		}
 		mlx.Eval(bestScore, bestID)
+		mlx.Pin(bestScore, bestID)
+		mlx.Sweep()
+		mlx.Unpin(bestScore, bestID)
 	}
 	return mlx.Reshape(bestID, 1, count), nil
+}
+
+// materializeApertusVision cuts the lazy MLX graph at each encoder stage. The
+// full-resolution tokenizer activations are FP32 and can otherwise keep every
+// preceding residual-block buffer alive until the entire image is encoded.
+func materializeApertusVision(ctx context.Context, output *mlx.Array) error {
+	mlx.Eval(output)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	mlx.Pin(output)
+	mlx.Sweep()
+	mlx.Unpin(output)
+	return nil
 }
 
 type apertusImageInput struct {
@@ -387,14 +440,7 @@ func preprocessApertusImage(ctx context.Context, data []byte) (*apertusImageInpu
 	if width <= 0 || height <= 0 || width > maxApertusImageDimension || height > maxApertusImageDimension || int64(width)*int64(height) > maxApertusImagePixels {
 		return nil, fmt.Errorf("Apertus image dimensions %dx%d are invalid", width, height)
 	}
-	targetArea := max(256*256, min(1400*1400, width*height))
-	aspect := float64(width) / float64(height)
-	targetH := int(math.Sqrt(float64(targetArea) / aspect))
-	targetW := int(float64(targetH) * aspect)
-	targetH = ((targetH + 8) / 16) * 16
-	targetW = ((targetW + 8) / 16) * 16
-	targetH = max(targetH, 16)
-	targetW = max(targetW, 16)
+	targetW, targetH := apertusImageSize(width, height)
 	pixels := resizeApertusImage(img, b, targetW, targetH)
 	for y := range targetH {
 		if y&127 == 0 {
@@ -410,6 +456,18 @@ func preprocessApertusImage(ctx context.Context, data []byte) (*apertusImageInpu
 		}
 	}
 	return &apertusImageInput{pixels: pixels, width: targetW, height: targetH, gridWidth: targetW / 16, gridHeight: targetH / 16}, nil
+}
+
+func apertusImageSize(width, height int) (int, int) {
+	targetArea := max(256*256, min(1400*1400, width*height))
+	aspect := float64(width) / float64(height)
+	targetH := int(math.Sqrt(float64(targetArea) / aspect))
+	targetW := int(float64(targetH) * aspect)
+	targetH = ((targetH + 8) / 16) * 16
+	targetW = ((targetW + 8) / 16) * 16
+	targetH = max(targetH, 16)
+	targetW = max(targetW, 16)
+	return targetW, targetH
 }
 
 type apertureResamplePoint struct {
