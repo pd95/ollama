@@ -112,6 +112,128 @@ func TestApertusRendererThinkingHistorySuppressedWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestApertus1p5RendererPlainChatDefaultSystem(t *testing.T) {
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "Hello"},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "<|system_start|>You are Apertus 1.5 Omni, a multimodal assistant developed by the Swiss AI Initiative. Extended from Apertus 1 via continued pretraining, you understand images and audio and respond in text.<|system_end|>" +
+		"<|developer_start|>Deliberation: disabled\nTool Capabilities: disabled<|developer_end|>" +
+		"<|user_start|>Hello<|user_end|><|assistant_start|>"
+	if got != want {
+		t.Fatalf("rendered prompt mismatch\nwant: %q\n got: %q", want, got)
+	}
+}
+
+func TestApertus1p5RendererPreservesStableMediaOrder(t *testing.T) {
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "first", Images: []api.ImageData{api.ImageData("a")}},
+		{Role: "assistant", Content: "seen"},
+		{Role: "user", Content: "second", Images: []api.ImageData{api.ImageData("b"), api.ImageData("c")}},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[img-0] first", "[img-1][img-2] second"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered prompt missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, apertusImageToken) {
+		t.Fatalf("renderer leaked architecture placeholder before media preparation:\n%s", got)
+	}
+}
+
+func TestApertus1p5RendererToolsAppendGenerationPromptForToolDecision(t *testing.T) {
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "What is the weather in Zurich?"},
+	}, []api.Tool{apertusWeatherTool()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(got, "Tool Capabilities:\n// Get current weather.") {
+		t.Fatalf("rendered prompt missing tools:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "<|assistant_start|>") {
+		t.Fatalf("tool decision prompt should append assistant generation prompt:\n%s", got)
+	}
+}
+
+func TestApertus1p5RendererAssistantToolCallAndOutput(t *testing.T) {
+	args := api.NewToolCallFunctionArguments()
+	args.Set("location", "Zurich")
+
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "Weather?"},
+		{Role: "assistant", ToolCalls: []api.ToolCall{{
+			Function: api.ToolCallFunction{Name: "get_weather", Arguments: args},
+		}}},
+		{Role: "tool", Content: `{"temperature":22}`},
+	}, []api.Tool{apertusWeatherTool()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(got, `<|tools_prefix|>[{"get_weather": {"location":"Zurich"}}]<|tools_suffix|>`) {
+		t.Fatalf("rendered prompt missing tool call:\n%s", got)
+	}
+	if !strings.Contains(got, `<|tool_output_start|>{"temperature":22}<|tool_output_end|><|assistant_end|><|assistant_start|>`) {
+		t.Fatalf("rendered prompt missing 1.5 tool output response continuation:\n%s", got)
+	}
+}
+
+func TestApertus1p5RendererThinkingEnabled(t *testing.T) {
+	think := &api.ThinkValue{Value: true}
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "Question"},
+		{Role: "assistant", Thinking: "Need a short answer.", Content: "Answer."},
+	}, nil, think)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(got, "<|developer_start|>Deliberation: enabled\nTool Capabilities: disabled<|developer_end|>") {
+		t.Fatalf("rendered prompt missing thinking developer flag:\n%s", got)
+	}
+	if !strings.Contains(got, "<|assistant_start|><|inner_prefix|>Need a short answer.<|inner_suffix|>Answer.<|assistant_end|>") {
+		t.Fatalf("rendered prompt missing thinking history:\n%s", got)
+	}
+}
+
+func TestApertus1p5RendererRejectsToolsWithThinking(t *testing.T) {
+	_, err := (&Apertus1p5Renderer{}).Render(
+		[]api.Message{{Role: "user", Content: "Weather?"}},
+		[]api.Tool{apertusWeatherTool()},
+		&api.ThinkValue{Value: true},
+	)
+	if err == nil || err.Error() != "Apertus 1.5 does not support tool calling with thinking enabled" {
+		t.Fatalf("Render error = %v", err)
+	}
+}
+
+func TestApertusRendererStillUsesLegacyToolOutputFraming(t *testing.T) {
+	args := api.NewToolCallFunctionArguments()
+	args.Set("location", "Zurich")
+
+	got, err := (&ApertusRenderer{}).Render([]api.Message{
+		{Role: "user", Content: "Weather?"},
+		{Role: "assistant", ToolCalls: []api.ToolCall{{
+			Function: api.ToolCallFunction{Name: "get_weather", Arguments: args},
+		}}},
+		{Role: "tool", Content: `{"temperature":22}`},
+	}, []api.Tool{apertusWeatherTool()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "<|tool_output_start|>") || !strings.Contains(got, `[{"temperature":22}]`) {
+		t.Fatalf("legacy Apertus renderer should keep bracket tool output framing:\n%s", got)
+	}
+}
+
 func TestApertusRendererMatchesHFChatTemplate(t *testing.T) {
 	if os.Getenv("VERIFY_APERTUS_HF_TEMPLATE") == "" {
 		t.Skip("set VERIFY_APERTUS_HF_TEMPLATE=1 to compare against the local Apertus HF chat template")

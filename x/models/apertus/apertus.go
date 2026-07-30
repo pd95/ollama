@@ -18,6 +18,7 @@ import (
 
 func init() {
 	base.Register("ApertusForCausalLM", newModel)
+	base.Register("Apertus1p5ForConditionalGeneration", newModel)
 }
 
 // RopeScaling carries the Llama 3 RoPE scaling block used by Apertus.
@@ -26,31 +27,40 @@ type RopeScaling struct {
 	HighFreqFactor                float32 `json:"high_freq_factor"`
 	LowFreqFactor                 float32 `json:"low_freq_factor"`
 	OriginalMaxPositionEmbeddings int32   `json:"original_max_position_embeddings"`
+	RopeTheta                     float32 `json:"rope_theta,omitempty"`
 	RopeType                      string  `json:"rope_type,omitempty"`
 	Type                          string  `json:"type,omitempty"`
 }
 
 // Config holds Apertus model configuration.
 type Config struct {
-	Architecture          string      `json:"-"`
-	ModelType             string      `json:"model_type"`
-	DType                 string      `json:"dtype"`
-	HiddenSize            int32       `json:"hidden_size"`
-	IntermediateSize      int32       `json:"intermediate_size"`
-	NumHiddenLayers       int32       `json:"num_hidden_layers"`
-	NumAttentionHeads     int32       `json:"num_attention_heads"`
-	NumKeyValueHeads      int32       `json:"num_key_value_heads"`
-	VocabSize             int32       `json:"vocab_size"`
-	MaxPositionEmbeddings int32       `json:"max_position_embeddings"`
-	RMSNormEps            float32     `json:"rms_norm_eps"`
-	RopeTheta             float32     `json:"rope_theta"`
-	RopeScaling           RopeScaling `json:"rope_scaling"`
-	HiddenAct             string      `json:"hidden_act"`
-	QKNorm                bool        `json:"qk_norm"`
-	PostNorm              bool        `json:"post_norm"`
-	AttentionBias         bool        `json:"attention_bias"`
-	MLPBias               bool        `json:"mlp_bias"`
-	TieWordEmbeddings     bool        `json:"tie_word_embeddings"`
+	Architecture          string                `json:"-"`
+	ModelType             string                `json:"model_type"`
+	DType                 string                `json:"dtype"`
+	HiddenSize            int32                 `json:"hidden_size"`
+	IntermediateSize      int32                 `json:"intermediate_size"`
+	NumHiddenLayers       int32                 `json:"num_hidden_layers"`
+	NumAttentionHeads     int32                 `json:"num_attention_heads"`
+	NumKeyValueHeads      int32                 `json:"num_key_value_heads"`
+	VocabSize             int32                 `json:"vocab_size"`
+	OutputVocabSize       int32                 `json:"output_vocab_size"`
+	MaxPositionEmbeddings int32                 `json:"max_position_embeddings"`
+	RMSNormEps            float32               `json:"rms_norm_eps"`
+	RopeTheta             float32               `json:"rope_theta"`
+	RopeScaling           RopeScaling           `json:"rope_scaling"`
+	RopeParameters        RopeScaling           `json:"rope_parameters"`
+	HiddenAct             string                `json:"hidden_act"`
+	QKNorm                bool                  `json:"qk_norm"`
+	PostNorm              bool                  `json:"post_norm"`
+	AttentionBias         bool                  `json:"attention_bias"`
+	MLPBias               bool                  `json:"mlp_bias"`
+	TieWordEmbeddings     bool                  `json:"tie_word_embeddings"`
+	ImageTokenID          int32                 `json:"-"`
+	AudioTokenID          int32                 `json:"-"`
+	ImageTokenOffset      int32                 `json:"-"`
+	AudioTokenOffset      int32                 `json:"-"`
+	VisionTokenizer       VisionTokenizerConfig `json:"-"`
+	AudioTokenizer        AudioTokenizerConfig  `json:"-"`
 
 	QuantGroupSize int                               `json:"-"`
 	QuantBits      int                               `json:"-"`
@@ -60,17 +70,29 @@ type Config struct {
 	HeadDim   int32      `json:"-"`
 	Scale     float32    `json:"-"`
 	RopeFreqs *mlx.Array `json:"-"`
+	prefix    string
 }
 
 // Model is an Apertus text model.
 type Model struct {
-	EmbedTokens nn.EmbeddingLayer
-	Layers      []*Layer
-	Norm        *nn.RMSNorm
-	LMHead      nn.LinearLayer
+	EmbedTokens      nn.EmbeddingLayer
+	Layers           []*Layer
+	Norm             *nn.RMSNorm
+	LMHead           nn.LinearLayer
+	Vision           *VisionTokenizer
+	Audio            *AudioTokenizer
+	mediaMemoryLimit uint64
+	mediaResident    uint64
 
 	tok *tokenizer.Tokenizer
 	*Config
+}
+
+// ConfigureMediaMemory receives the runner's stable per-process media budget
+// after model weights have been materialized.
+func (m *Model) ConfigureMediaMemory(limit, resident uint64) {
+	m.mediaMemoryLimit = limit
+	m.mediaResident = resident
 }
 
 type Layer struct {
@@ -165,6 +187,10 @@ func newModel(root *model.Root) (base.Model, error) {
 	}, nil
 }
 
+func isApertus1p5Config(cfg Config) bool {
+	return strings.EqualFold(cfg.Architecture, "Apertus1p5ForConditionalGeneration")
+}
+
 func parseConfig(configData []byte) (Config, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(configData, &raw); err != nil {
@@ -182,8 +208,14 @@ func parseConfig(configData []byte) (Config, error) {
 	}
 
 	var archConfig struct {
-		Architectures []string `json:"architectures"`
-		ModelType     string   `json:"model_type"`
+		Architectures    []string              `json:"architectures"`
+		ModelType        string                `json:"model_type"`
+		ImageTokenID     int32                 `json:"image_token_id"`
+		AudioTokenID     int32                 `json:"audio_token_id"`
+		ImageTokenOffset int32                 `json:"image_token_offset"`
+		AudioTokenOffset int32                 `json:"audio_token_offset"`
+		VisionTokenizer  VisionTokenizerConfig `json:"vision_tokenizer_config"`
+		AudioTokenizer   AudioTokenizerConfig  `json:"audio_tokenizer_config"`
 	}
 	if err := json.Unmarshal(configData, &archConfig); err != nil {
 		return Config{}, fmt.Errorf("parse architecture: %w", err)
@@ -193,6 +225,12 @@ func parseConfig(configData []byte) (Config, error) {
 	} else {
 		cfg.Architecture = archConfig.ModelType
 	}
+	cfg.ImageTokenID = archConfig.ImageTokenID
+	cfg.AudioTokenID = archConfig.AudioTokenID
+	cfg.ImageTokenOffset = archConfig.ImageTokenOffset
+	cfg.AudioTokenOffset = archConfig.AudioTokenOffset
+	cfg.VisionTokenizer = archConfig.VisionTokenizer
+	cfg.AudioTokenizer = archConfig.AudioTokenizer
 
 	if cfg.Architecture == "" {
 		return Config{}, fmt.Errorf("missing architecture in config.json")
@@ -222,14 +260,37 @@ func parseConfig(configData []byte) (Config, error) {
 	if cfg.RMSNormEps == 0 {
 		cfg.RMSNormEps = 1e-5
 	}
-	if cfg.RopeTheta == 0 {
-		cfg.RopeTheta = 12000000
+	if isApertus1p5Config(cfg) {
+		if cfg.RopeParameters.RopeTheta == 0 {
+			return Config{}, fmt.Errorf("missing rope_parameters.rope_theta")
+		}
+		cfg.RopeTheta = cfg.RopeParameters.RopeTheta
+		cfg.RopeScaling = cfg.RopeParameters
+	} else {
+		if cfg.RopeTheta == 0 {
+			cfg.RopeTheta = cfg.RopeParameters.RopeTheta
+		}
+		if cfg.RopeScaling.Factor == 0 && cfg.RopeParameters.Factor != 0 {
+			cfg.RopeScaling = cfg.RopeParameters
+		}
+		if cfg.RopeTheta == 0 {
+			cfg.RopeTheta = 12000000
+		}
 	}
 	if cfg.MaxPositionEmbeddings <= 0 {
 		return Config{}, fmt.Errorf("invalid max_position_embeddings: %d", cfg.MaxPositionEmbeddings)
 	}
 	if cfg.HiddenAct != "xielu" {
 		return Config{}, fmt.Errorf("unsupported hidden_act %q", cfg.HiddenAct)
+	}
+	if cfg.VocabSize <= 0 {
+		return Config{}, fmt.Errorf("invalid vocab_size: %d", cfg.VocabSize)
+	}
+	if cfg.OutputVocabSize == 0 {
+		cfg.OutputVocabSize = cfg.VocabSize
+	}
+	if cfg.OutputVocabSize <= 0 || cfg.OutputVocabSize > cfg.VocabSize {
+		return Config{}, fmt.Errorf("invalid output_vocab_size: %d (vocab_size: %d)", cfg.OutputVocabSize, cfg.VocabSize)
 	}
 	if !cfg.QKNorm {
 		return Config{}, fmt.Errorf("unsupported qk_norm=false")
@@ -316,14 +377,31 @@ func Llama3Freqs(headDim int32, base, factor, lowFreqFactor, highFreqFactor floa
 	return freqs, nil
 }
 
+func tensorPrefix(tensors map[string]*mlx.Array) (string, error) {
+	for _, prefix := range []string{"model.language_model.", "model."} {
+		if tensors[prefix+"embed_tokens.weight"] != nil && tensors[prefix+"norm.weight"] != nil {
+			return prefix, nil
+		}
+	}
+	return "", fmt.Errorf("missing required tensor namespace: expected model.embed_tokens.weight or model.language_model.embed_tokens.weight")
+}
+
 func checkRequiredTensors(tensors map[string]*mlx.Array, cfg *Config) error {
+	prefix := cfg.prefix
+	if prefix == "" {
+		var err error
+		prefix, err = tensorPrefix(tensors)
+		if err != nil {
+			return err
+		}
+	}
 	required := []string{
-		"model.embed_tokens.weight",
-		"model.norm.weight",
+		prefix + "embed_tokens.weight",
+		prefix + "norm.weight",
 		"lm_head.weight",
 	}
 	for i := range cfg.NumHiddenLayers {
-		layerPrefix := fmt.Sprintf("model.layers.%d", i)
+		layerPrefix := fmt.Sprintf("%slayers.%d", prefix, i)
 		required = append(required,
 			layerPrefix+".attention_layernorm.weight",
 			layerPrefix+".feedforward_layernorm.weight",
@@ -365,21 +443,26 @@ func XIELUScalar(x, alphaPParam, alphaNParam, beta, eps float64) float64 {
 // LoadWeights receives all tensors loaded from the manifest and assigns them
 // to model fields.
 func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
+	prefix, err := tensorPrefix(tensors)
+	if err != nil {
+		return err
+	}
+	m.Config.prefix = prefix
 	if err := checkRequiredTensors(tensors, m.Config); err != nil {
 		return err
 	}
 
 	linears := model.NewLinearFactory(tensors, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 
-	embedTokens := model.MakeEmbeddingLayer(tensors, "model.embed_tokens", m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+	embedTokens := model.MakeEmbeddingLayer(tensors, prefix+"embed_tokens", m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 	if embedTokens == nil {
-		return fmt.Errorf("missing embedding weight: model.embed_tokens.weight")
+		return fmt.Errorf("missing embedding weight: %sembed_tokens.weight", prefix)
 	}
 	m.EmbedTokens = embedTokens
 
-	normWeight := tensors["model.norm.weight"]
+	normWeight := tensors[prefix+"norm.weight"]
 	if normWeight == nil {
-		return fmt.Errorf("missing final norm weight: model.norm.weight")
+		return fmt.Errorf("missing final norm weight: %snorm.weight", prefix)
 	}
 	m.Norm = nn.NewRMSNorm(normWeight, m.RMSNormEps)
 
@@ -389,8 +472,21 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	}
 	m.LMHead = lmHead
 
+	if canLoadVisionTokenizer(tensors, m.VisionTokenizer) {
+		m.Vision, err = loadVisionTokenizer(tensors, m.VisionTokenizer)
+		if err != nil {
+			return fmt.Errorf("load Apertus 1.5 vision tokenizer: %w", err)
+		}
+	}
+	if canLoadAudioTokenizer(tensors, m.AudioTokenizer) {
+		m.Audio, err = loadAudioTokenizer(tensors, m.AudioTokenizer)
+		if err != nil {
+			return fmt.Errorf("load Apertus 1.5 audio tokenizer: %w", err)
+		}
+	}
+
 	for i := range m.NumHiddenLayers {
-		layerPrefix := fmt.Sprintf("model.layers.%d", i)
+		layerPrefix := fmt.Sprintf("%slayers.%d", prefix, i)
 		layer := &Layer{
 			Attention: &Attention{},
 			MLP:       &MLP{},
@@ -447,12 +543,102 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	return nil
 }
 
+func hasCompleteVisionTokenizerInventory(tensors map[string]*mlx.Array) bool {
+	has := func(name string) bool { return tensors[name] != nil }
+	return completeApertusVisionNames(has)
+}
+
+func canLoadVisionTokenizer(tensors map[string]*mlx.Array, cfg VisionTokenizerConfig) bool {
+	return hasCompleteVisionTokenizerInventory(tensors) && cfg.validate() == nil
+}
+
+func hasCompleteAudioTokenizerInventory(tensors map[string]*mlx.Array) bool {
+	has := func(name string) bool { return tensors[name] != nil }
+	return completeApertusAudioNames(has)
+}
+
+func canLoadAudioTokenizer(tensors map[string]*mlx.Array, cfg AudioTokenizerConfig) bool {
+	return hasCompleteAudioTokenizerInventory(tensors) && cfg.validate() == nil
+}
+
+func completeApertusVisionNames(has func(string) bool) bool {
+	const p = "model.vision_tokenizer."
+	linear := func(path string) bool { return has(path+".weight") && has(path+".bias") }
+	norm := linear
+	if !linear(p+"encoder.conv_in") || !linear(p+"encoder.conv_out") || !norm(p+"encoder.norm_out") ||
+		!linear(p+"quant_conv") || !has(p+"quantize.embedding.weight") {
+		return false
+	}
+	for level := range 5 {
+		for block := range 4 {
+			path := fmt.Sprintf("%sencoder.down.%d.block.%d", p, level, block)
+			if !norm(path+".norm1") || !linear(path+".conv1") || !norm(path+".norm2") || !linear(path+".conv2") {
+				return false
+			}
+			if block == 0 && (level == 2 || level == 4) && !linear(path+".nin_shortcut") {
+				return false
+			}
+			if level == 4 {
+				attn := fmt.Sprintf("%sencoder.down.%d.attn.%d", p, level, block)
+				if !norm(attn+".norm") || !linear(attn+".q") || !linear(attn+".k") || !linear(attn+".v") || !linear(attn+".proj_out") {
+					return false
+				}
+			}
+		}
+		if level < 4 && !linear(fmt.Sprintf("%sencoder.down.%d.downsample.conv", p, level)) {
+			return false
+		}
+	}
+	for _, block := range []string{"block_1", "block_2"} {
+		path := p + "encoder.mid." + block
+		if !norm(path+".norm1") || !linear(path+".conv1") || !norm(path+".norm2") || !linear(path+".conv2") {
+			return false
+		}
+	}
+	attn := p + "encoder.mid.attn_1"
+	return norm(attn+".norm") && linear(attn+".q") && linear(attn+".k") && linear(attn+".v") && linear(attn+".proj_out")
+}
+
+func completeApertusAudioNames(has func(string) bool) bool {
+	const p = "model.audio_tokenizer.encoder.layers."
+	conv := func(path string) bool {
+		return has(path+".conv.bias") && has(path+".conv.parametrizations.weight.original0") && has(path+".conv.parametrizations.weight.original1")
+	}
+	if !conv(p+"0") || !conv(p+"15") || !has("model.audio_tokenizer.quantizer.codebook.embed") {
+		return false
+	}
+	for _, index := range []int{1, 4, 7, 10} {
+		path := fmt.Sprintf("%s%d", p, index)
+		if !conv(path+".block.1") || !conv(path+".block.3") || !conv(path+".shortcut") {
+			return false
+		}
+	}
+	for _, index := range []int{3, 6, 9, 12} {
+		if !conv(fmt.Sprintf("%s%d", p, index)) {
+			return false
+		}
+	}
+	for layer := range 2 {
+		for _, kind := range []string{"weight_ih", "weight_hh", "bias_ih", "bias_hh"} {
+			if !has(fmt.Sprintf("%s13.lstm.%s_l%d", p, kind, layer)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
 	dims := b.InputIDs.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
 	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
 
-	h := mlx.Reshape(m.EmbedTokens.Forward(b.InputIDs), B, L, m.HiddenSize)
+	var h *mlx.Array
+	if b.InputEmbeddings != nil {
+		h = mlx.Reshape(b.InputEmbeddings, B, L, m.HiddenSize)
+	} else {
+		h = mlx.Reshape(m.EmbedTokens.Forward(b.InputIDs), B, L, m.HiddenSize)
+	}
 	for i, layer := range m.Layers {
 		var c cache.Cache
 		if caches != nil && i < len(caches) {
@@ -467,7 +653,7 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
 	dims := x.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
-	return mlx.Reshape(m.LMHead.Forward(x), B, L, m.VocabSize)
+	return mlx.Reshape(m.LMHead.Forward(x), B, L, m.OutputVocabSize)
 }
 
 func (m *Model) NumLayers() int {
