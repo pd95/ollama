@@ -2108,8 +2108,23 @@ func (s *llamaServerRunner) llamaServerChatRequest(req ChatRequest, stream bool)
 	}
 
 	messages := make([]map[string]any, 0, len(req.Messages))
+	rawMediaBytes := 0
 	for _, msg := range req.Messages {
-		converted, err := llamaServerChatMessage(MessageFromAPI(msg))
+		for _, data := range msg.Images {
+			var err error
+			rawMediaBytes, err = addLlamaServerMediaBytes(rawMediaBytes, len(data))
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	mediaBytes := 0
+	for _, msg := range req.Messages {
+		converted, size, err := llamaServerChatMessage(MessageFromAPI(msg))
+		if err != nil {
+			return nil, err
+		}
+		mediaBytes, err = addLlamaServerMediaBytes(mediaBytes, size)
 		if err != nil {
 			return nil, err
 		}
@@ -2169,7 +2184,7 @@ func llamaServerChatTemplateKwargs(think *api.ThinkValue) map[string]any {
 	return kwargs
 }
 
-func llamaServerChatMessage(msg Message) (map[string]any, error) {
+func llamaServerChatMessage(msg Message) (map[string]any, int, error) {
 	converted := map[string]any{
 		"role": msg.Role,
 	}
@@ -2182,14 +2197,14 @@ func llamaServerChatMessage(msg Message) (map[string]any, error) {
 	if len(msg.ToolCalls) > 0 {
 		toolCalls, err := llamaServerChatToolCalls(msg.ToolCalls)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		converted["tool_calls"] = toolCalls
 	}
 
 	if len(msg.Media) == 0 {
 		converted["content"] = msg.Content
-		return converted, nil
+		return converted, 0, nil
 	}
 
 	parts := make([]map[string]any, 0, len(msg.Media)+1)
@@ -2203,16 +2218,16 @@ func llamaServerChatMessage(msg Message) (map[string]any, error) {
 	for _, media := range msg.Media {
 		part, size, err := llamaServerChatMediaPart(media)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		mediaBytes, err = addLlamaServerMediaBytes(mediaBytes, size)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		parts = append(parts, part)
 	}
 	converted["content"] = parts
-	return converted, nil
+	return converted, mediaBytes, nil
 }
 
 func llamaServerChatMediaPart(media MediaData) (map[string]any, int, error) {
