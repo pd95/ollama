@@ -1369,6 +1369,13 @@ type llamaServerCompletionRequest struct {
 	PreservedTokens []string        `json:"preserved_tokens,omitempty"`
 }
 
+const (
+	maxLlamaServerWebPInputBytes    = 32 << 20
+	maxLlamaServerWebPPixels        = 8 << 20
+	maxLlamaServerConvertedPNGBytes = 32 << 20
+	maxLlamaServerMediaRequestBytes = 64 << 20
+)
+
 func llamaServerPreservedTokens(parserTokens []string, toolCallTag string) []string {
 	tokens := append([]string{}, parserTokens...)
 	tokens = append(tokens, llamaServerPreservedTokensForToolTag(toolCallTag)...)
@@ -1558,10 +1565,15 @@ func (s *llamaServerRunner) Completion(ctx context.Context, req CompletionReques
 	if len(req.Media) > 0 {
 		promptStr := lsReq.Prompt.(string)
 		var mediaData []string
+		mediaBytes := 0
 		for _, media := range req.Media {
 			marker := fmt.Sprintf("[img-%d]", media.ID)
 			promptStr = strings.Replace(promptStr, marker, s.llamaServerMediaMarker(), 1)
 			data, _, err := normalizeLlamaServerImageData(media.Data)
+			if err != nil {
+				return err
+			}
+			mediaBytes, err = addLlamaServerMediaBytes(mediaBytes, len(data))
 			if err != nil {
 				return err
 			}
@@ -2181,6 +2193,7 @@ func llamaServerChatMessage(msg Message) (map[string]any, error) {
 	}
 
 	parts := make([]map[string]any, 0, len(msg.Media)+1)
+	mediaBytes := 0
 	if msg.Content != "" {
 		parts = append(parts, map[string]any{
 			"type": "text",
@@ -2188,7 +2201,11 @@ func llamaServerChatMessage(msg Message) (map[string]any, error) {
 		})
 	}
 	for _, media := range msg.Media {
-		part, err := llamaServerChatMediaPart(media)
+		part, size, err := llamaServerChatMediaPart(media)
+		if err != nil {
+			return nil, err
+		}
+		mediaBytes, err = addLlamaServerMediaBytes(mediaBytes, size)
 		if err != nil {
 			return nil, err
 		}
@@ -2198,7 +2215,7 @@ func llamaServerChatMessage(msg Message) (map[string]any, error) {
 	return converted, nil
 }
 
-func llamaServerChatMediaPart(media MediaData) (map[string]any, error) {
+func llamaServerChatMediaPart(media MediaData) (map[string]any, int, error) {
 	encoded := base64.StdEncoding.EncodeToString(media.Data)
 	if format, ok := AudioFormat(media.Data); ok {
 		return map[string]any{
@@ -2207,12 +2224,12 @@ func llamaServerChatMediaPart(media MediaData) (map[string]any, error) {
 				"data":   encoded,
 				"format": format,
 			},
-		}, nil
+		}, len(media.Data), nil
 	}
 
 	data, mime, err := normalizeLlamaServerImageData(media.Data)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	encoded = base64.StdEncoding.EncodeToString(data)
 	return map[string]any{
@@ -2220,26 +2237,28 @@ func llamaServerChatMediaPart(media MediaData) (map[string]any, error) {
 		"image_url": map[string]any{
 			"url": "data:" + mime + ";base64," + encoded,
 		},
-	}, nil
+	}, len(data), nil
 }
 
 func normalizeLlamaServerImageData(data []byte) ([]byte, string, error) {
 	mime := http.DetectContentType(data)
 	if mime == "image/webp" {
+		if len(data) > maxLlamaServerWebPInputBytes {
+			return nil, "", fmt.Errorf("WebP media is %d bytes, limit %d", len(data), maxLlamaServerWebPInputBytes)
+		}
 		config, err := webp.DecodeConfig(bytes.NewReader(data))
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid WebP media: %w", err)
 		}
 		const maxDimension = 16384
-		const maxPixels = 64 << 20
-		if config.Width <= 0 || config.Height <= 0 || config.Width > maxDimension || config.Height > maxDimension || int64(config.Width)*int64(config.Height) > maxPixels {
+		if config.Width <= 0 || config.Height <= 0 || config.Width > maxDimension || config.Height > maxDimension || int64(config.Width)*int64(config.Height) > maxLlamaServerWebPPixels {
 			return nil, "", fmt.Errorf("WebP media dimensions %dx%d exceed limits", config.Width, config.Height)
 		}
 		img, err := webp.Decode(bytes.NewReader(data))
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid WebP media: %w", err)
 		}
-		var converted bytes.Buffer
+		converted := limitedBytesBuffer{max: maxLlamaServerConvertedPNGBytes}
 		if err := png.Encode(&converted, img); err != nil {
 			return nil, "", fmt.Errorf("convert WebP media to PNG: %w", err)
 		}
@@ -2250,6 +2269,25 @@ func normalizeLlamaServerImageData(data []byte) ([]byte, string, error) {
 		mime = "image/jpeg"
 	}
 	return data, mime, nil
+}
+
+type limitedBytesBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (w *limitedBytesBuffer) Write(p []byte) (int, error) {
+	if len(p) > w.max-w.Len() {
+		return 0, fmt.Errorf("converted PNG exceeds limit of %d bytes", w.max)
+	}
+	return w.Buffer.Write(p)
+}
+
+func addLlamaServerMediaBytes(total, size int) (int, error) {
+	if total < 0 || size < 0 || size > maxLlamaServerMediaRequestBytes-total {
+		return 0, fmt.Errorf("llama-server media exceeds cumulative limit of %d bytes", maxLlamaServerMediaRequestBytes)
+	}
+	return total + size, nil
 }
 
 func llamaServerChatToolCalls(tcs []api.ToolCall) ([]llamaServerChatToolCall, error) {
