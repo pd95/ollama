@@ -10,40 +10,65 @@ import (
 )
 
 const (
-	apertusSystemStart    = "<|system_start|>"
-	apertusSystemEnd      = "<|system_end|>"
-	apertusDeveloperStart = "<|developer_start|>"
-	apertusDeveloperEnd   = "<|developer_end|>"
-	apertusUserStart      = "<|user_start|>"
-	apertusUserEnd        = "<|user_end|>"
-	apertusAssistantStart = "<|assistant_start|>"
-	apertusAssistantEnd   = "<|assistant_end|>"
-	apertusInnerPrefix    = "<|inner_prefix|>"
-	apertusInnerSuffix    = "<|inner_suffix|>"
-	apertusToolsPrefix    = "<|tools_prefix|>"
-	apertusToolsSuffix    = "<|tools_suffix|>"
-	apertusImageToken     = "<|image|>"
+	apertusSystemStart     = "<|system_start|>"
+	apertusSystemEnd       = "<|system_end|>"
+	apertusDeveloperStart  = "<|developer_start|>"
+	apertusDeveloperEnd    = "<|developer_end|>"
+	apertusUserStart       = "<|user_start|>"
+	apertusUserEnd         = "<|user_end|>"
+	apertusAssistantStart  = "<|assistant_start|>"
+	apertusAssistantEnd    = "<|assistant_end|>"
+	apertusInnerPrefix     = "<|inner_prefix|>"
+	apertusInnerSuffix     = "<|inner_suffix|>"
+	apertusToolsPrefix     = "<|tools_prefix|>"
+	apertusToolsSuffix     = "<|tools_suffix|>"
+	apertusToolOutputStart = "<|tool_output_start|>"
+	apertusToolOutputEnd   = "<|tool_output_end|>"
+	apertusImageToken      = "<|image|>"
 )
 
-type ApertusRenderer struct{}
+type (
+	ApertusRenderer    struct{}
+	Apertus1p5Renderer struct{}
+)
 
 func (r *ApertusRenderer) LeadingBOS() string {
 	return ""
 }
 
 func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
+	return renderApertus(messages, tools, think, false)
+}
+
+func (r *Apertus1p5Renderer) LeadingBOS() string {
+	return ""
+}
+
+func (r *Apertus1p5Renderer) Render(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
+	return renderApertus(messages, tools, think, true)
+}
+
+func renderApertus(messages []api.Message, tools []api.Tool, think *api.ThinkValue, v1p5 bool) (string, error) {
 	thinkingEnabled := think != nil && think.Bool()
+	if v1p5 && thinkingEnabled && len(tools) > 0 {
+		return "", fmt.Errorf("Apertus 1.5 does not support tool calling with thinking enabled")
+	}
 	var sb strings.Builder
+	mediaOffset := 0
 	messageStart := 0
 	if len(messages) > 0 && messages[0].Role == "system" {
 		sb.WriteString(apertusSystemStart)
-		sb.WriteString(r.renderContent(messages[0]))
+		sb.WriteString(renderApertusContent(messages[0], v1p5, &mediaOffset))
 		sb.WriteString(apertusSystemEnd)
 		messageStart = 1
 	} else {
 		sb.WriteString(apertusSystemStart)
-		sb.WriteString("You are Apertus, a helpful assistant created by the SwissAI initiative.\nKnowledge cutoff: 2024-04\nCurrent date: ")
-		sb.WriteString(time.Now().Format("2006-01-02"))
+		if v1p5 {
+			sb.WriteString("You are Apertus 1.5 Omni, a multimodal assistant developed by the Swiss AI Initiative. Extended from Apertus 1 via continued pretraining, you understand images and audio and respond in text.")
+		} else {
+			sb.WriteString("You are Apertus, a helpful assistant created by the SwissAI initiative.\nKnowledge cutoff: 2024-04\nCurrent date: ")
+			sb.WriteString(time.Now().Format("2006-01-02"))
+		}
 		sb.WriteString(apertusSystemEnd)
 	}
 
@@ -67,7 +92,11 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 
 	closeToolOutputs := func() {
 		if inTool {
-			sb.WriteString("]")
+			if v1p5 {
+				sb.WriteString(apertusToolOutputEnd)
+			} else {
+				sb.WriteString("]")
+			}
 			inTool = false
 		}
 	}
@@ -84,13 +113,13 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 		case "user":
 			closeAssistant()
 			sb.WriteString(apertusUserStart)
-			sb.WriteString(r.renderContent(message))
+			sb.WriteString(renderApertusContent(message, v1p5, &mediaOffset))
 			sb.WriteString(apertusUserEnd)
 			waitingForToolOutputs = false
 		case "system":
 			closeAssistant()
 			sb.WriteString(apertusSystemStart)
-			sb.WriteString(r.renderContent(message))
+			sb.WriteString(renderApertusContent(message, v1p5, &mediaOffset))
 			sb.WriteString(apertusSystemEnd)
 			waitingForToolOutputs = false
 		case "assistant":
@@ -118,7 +147,11 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 				return "", fmt.Errorf("apertus tool message outside assistant turn")
 			}
 			if !inTool {
-				sb.WriteString("[")
+				if v1p5 {
+					sb.WriteString(apertusToolOutputStart)
+				} else {
+					sb.WriteString("[")
+				}
 				inTool = true
 			} else {
 				sb.WriteString(", ")
@@ -140,7 +173,7 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 	if len(messages) > 0 {
 		lastRole = messages[len(messages)-1].Role
 	}
-	toolDecisionPrompt := len(tools) > 0 && lastRole == "user"
+	toolDecisionPrompt := !v1p5 && len(tools) > 0 && lastRole == "user"
 	if lastRole != "assistant" && !toolDecisionPrompt {
 		sb.WriteString(apertusAssistantStart)
 	}
@@ -148,7 +181,12 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 	return sb.String(), nil
 }
 
-func (r *ApertusRenderer) renderContent(message api.Message) string {
+func renderApertusContent(message api.Message, v1p5 bool, mediaOffset *int) string {
+	if v1p5 {
+		content, next := renderContentWithImageTags(message.Content, len(message.Images), *mediaOffset)
+		*mediaOffset = next
+		return content
+	}
 	var sb strings.Builder
 	for range message.Images {
 		sb.WriteString(apertusImageToken)
