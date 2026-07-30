@@ -17,6 +17,30 @@ func TestVisionEncodeCancellation(t *testing.T) {
 	}
 }
 
+func TestApertusImageSize(t *testing.T) {
+	tests := []struct {
+		name          string
+		width, height int
+		wantW, wantH  int
+		wantTokens    int
+	}{
+		{name: "small COCO landscape", width: 640, height: 432, wantW: 640, wantH: 432, wantTokens: 1080},
+		{name: "small COCO four by three", width: 640, height: 480, wantW: 640, wantH: 480, wantTokens: 1200},
+		{name: "desktop screenshot", width: 1602, height: 968, wantW: 1600, wantH: 976, wantTokens: 6100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotW, gotH := apertusImageSize(tt.width, tt.height)
+			if gotW != tt.wantW || gotH != tt.wantH {
+				t.Fatalf("apertusImageSize(%d, %d) = %dx%d, want %dx%d", tt.width, tt.height, gotW, gotH, tt.wantW, tt.wantH)
+			}
+			if got := gotW / 16 * (gotH / 16); got != tt.wantTokens {
+				t.Fatalf("visual tokens = %d, want %d", got, tt.wantTokens)
+			}
+		})
+	}
+}
+
 func TestResizeApertusImageMatchesTorchvisionBicubic(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 320, 180))
 	for y := range 180 {
