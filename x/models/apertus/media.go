@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 
+	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/llm"
 	"github.com/ollama/ollama/x/mlxrunner/batch"
 	shared "github.com/ollama/ollama/x/mlxrunner/media"
@@ -44,7 +46,6 @@ func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, inputs []
 		return nil, fmt.Errorf("Apertus 1.5 media markers: %w", err)
 	}
 	items := make([]apertusMediaItem, len(bindings))
-	total := 0
 	for i := range bindings {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -56,17 +57,10 @@ func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, inputs []
 			if m.Vision == nil {
 				return nil, errors.New("Apertus 1.5 image input requires complete vision tokenizer weights")
 			}
-			item.image, err = preprocessApertusImage(ctx, binding.Media.Data)
+			item.image, err = inspectApertusImage(ctx, binding.Media.Data)
 			if err != nil {
 				return nil, fmt.Errorf("Apertus 1.5 image %d: %w", binding.Media.ID, err)
 			}
-			item.expected = item.image.gridWidth * item.image.gridHeight
-			rows := make([]string, item.image.gridHeight)
-			row := strings.Repeat(apertusImageToken, item.image.gridWidth)
-			for j := range rows {
-				rows[j] = row
-			}
-			binding.Sequence = apertusBOI + fmt.Sprintf("%d*%d", item.image.gridHeight, item.image.gridWidth) + apertusImageWrapper + strings.Join(rows, apertusImageEOL) + apertusEOI
 		case llm.MediaKindAudio:
 			if m.Audio == nil {
 				return nil, errors.New("Apertus 1.5 audio input requires complete audio tokenizer weights")
@@ -75,17 +69,35 @@ func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, inputs []
 			if err != nil {
 				return nil, fmt.Errorf("Apertus 1.5 audio %d: %w", binding.Media.ID, err)
 			}
-			item.expected = item.audio.codes
-			binding.Sequence = apertusBOA + strings.Repeat(apertusAudioToken, item.expected) + apertusEOA
 		default:
 			return nil, fmt.Errorf("Apertus 1.5 media %d has unsupported kind %q", binding.Media.ID, binding.Media.Kind)
+		}
+		items[i] = item
+	}
+	if err := m.fitApertusImages(items); err != nil {
+		return nil, err
+	}
+	total := 0
+	for i := range items {
+		item, binding := &items[i], &bindings[i]
+		switch item.kind {
+		case llm.MediaKindImage:
+			item.expected = item.image.gridWidth * item.image.gridHeight
+			rows := make([]string, item.image.gridHeight)
+			row := strings.Repeat(apertusImageToken, item.image.gridWidth)
+			for j := range rows {
+				rows[j] = row
+			}
+			binding.Sequence = apertusBOI + fmt.Sprintf("%d*%d", item.image.gridHeight, item.image.gridWidth) + apertusImageWrapper + strings.Join(rows, apertusImageEOL) + apertusEOI
+		case llm.MediaKindAudio:
+			item.expected = item.audio.codes
+			binding.Sequence = apertusBOA + strings.Repeat(apertusAudioToken, item.expected) + apertusEOA
 		}
 		binding.ExpectedTokens = item.expected
 		total, err = shared.AddTokenBudget(total, item.expected)
 		if err != nil {
 			return nil, fmt.Errorf("Apertus 1.5 media budget: %w", err)
 		}
-		items[i] = item
 	}
 	expanded, err := shared.ExpandPrompt(prompt, bindings)
 	if err != nil {
@@ -137,6 +149,57 @@ func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, inputs []
 		return nil, fmt.Errorf("Apertus 1.5 assigned media tokens %d, want %d", assigned, total)
 	}
 	return &batch.PreparedInput{Tokens: tokens, Payload: &apertusMediaPayload{items: items}}, nil
+}
+
+func (m *Model) fitApertusImages(items []apertusMediaItem) error {
+	inputs := make([]*apertusImageInput, 0, len(items))
+	for i := range items {
+		if items[i].image != nil {
+			inputs = append(inputs, items[i].image)
+		}
+	}
+	if len(inputs) == 0 || m.mediaMemoryLimit == 0 {
+		return nil
+	}
+	canonicalPeak := estimateApertusImagePeak(m.mediaResident, inputs)
+	if canonicalPeak <= m.mediaMemoryLimit {
+		return nil
+	}
+	for _, input := range inputs {
+		setApertusImageArea(input, minApertusImageArea)
+	}
+	minimumPeak := estimateApertusImagePeak(m.mediaResident, inputs)
+	if minimumPeak > m.mediaMemoryLimit {
+		return fmt.Errorf("Apertus image minimum resolution requires an estimated %s peak but the safe media budget is %s; unload other models or use the NVFP4 model",
+			format.HumanBytes2(minimumPeak), format.HumanBytes2(m.mediaMemoryLimit))
+	}
+	best := minApertusImageArea
+	for low, high := minApertusImageArea, maxApertusImageArea; low <= high; {
+		candidate := low + (high-low)/2
+		for _, input := range inputs {
+			setApertusImageArea(input, candidate)
+		}
+		if estimateApertusImagePeak(m.mediaResident, inputs) <= m.mediaMemoryLimit {
+			best = candidate
+			low = candidate + 1
+		} else {
+			high = candidate - 1
+		}
+	}
+	var reductions []string
+	for _, input := range inputs {
+		setApertusImageArea(input, best)
+		if input.width != input.canonicalWidth || input.height != input.canonicalHeight {
+			reductions = append(reductions, fmt.Sprintf("original=%dx%d canonical=%dx%d final=%dx%d (%d->%d tokens)",
+				input.originalWidth, input.originalHeight, input.canonicalWidth, input.canonicalHeight, input.width, input.height,
+				input.canonicalWidth/16*(input.canonicalHeight/16), input.gridWidth*input.gridHeight))
+		}
+	}
+	slog.Warn("Apertus image resolution reduced to fit memory budget",
+		"images", strings.Join(reductions, ", "),
+		"estimated_peak", format.HumanBytes2(estimateApertusImagePeak(m.mediaResident, inputs)),
+		"safe_budget", format.HumanBytes2(m.mediaMemoryLimit))
+	return nil
 }
 
 func placeholderSpans(tokens []int32, id int32) []batch.TokenSpan {
@@ -193,8 +256,11 @@ func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.Prep
 			if m.Vision == nil || item.image == nil {
 				return fmt.Errorf("Apertus 1.5 image %d payload is invalid", item.id)
 			}
-			var err error
-			codes, err = m.Vision.encode(ctx, item.image.pixels, item.image.width, item.image.height)
+			pixels, err := materializeApertusImage(ctx, item.image)
+			if err != nil {
+				return fmt.Errorf("Apertus 1.5 image %d decode: %w", item.id, err)
+			}
+			codes, err = m.Vision.encode(ctx, pixels, item.image.width, item.image.height)
 			if err != nil {
 				return fmt.Errorf("Apertus 1.5 image %d encode: %w", item.id, err)
 			}
