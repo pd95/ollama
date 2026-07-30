@@ -3,17 +3,19 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testMP3(t *testing.T) []byte {
 	t.Helper()
-	encoded, err := os.ReadFile("testdata/bcn_weather_first_10_frames.mp3.base64")
+	encoded, err := os.ReadFile("testdata/synthetic_silence.mp3.base64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +40,47 @@ func TestDecodeMP3(t *testing.T) {
 				t.Fatalf("decoded sample count = %d", len(samples))
 			}
 		})
+	}
+}
+
+func TestDecodeMP3StereoDownmix(t *testing.T) {
+	data := testMP3(t)
+	for offset := 3; offset < len(data); offset += 768 {
+		data[offset] &= 0x3f // MPEG channel mode 00: stereo.
+	}
+	samples, err := DecodeMP3(context.Background(), data, MP3DecodeOptions{
+		TargetSampleRate: 16000, MaxInputBytes: len(data), MaxSamples: 10000,
+	})
+	if err != nil || len(samples) == 0 {
+		t.Fatalf("stereo MP3 decode = %d samples, %v", len(samples), err)
+	}
+}
+
+type cancelAfterErrChecks struct {
+	checks int
+	limit  int
+}
+
+func (c *cancelAfterErrChecks) Err() error {
+	c.checks++
+	if c.checks > c.limit {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *cancelAfterErrChecks) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelAfterErrChecks) Done() <-chan struct{}       { return nil }
+func (c *cancelAfterErrChecks) Value(any) any               { return nil }
+
+func TestDecodeMP3MidStreamCancellation(t *testing.T) {
+	data := bytes.Repeat(testMP3(t), 2)
+	ctx := &cancelAfterErrChecks{limit: 2}
+	_, err := DecodeMP3(ctx, data, MP3DecodeOptions{
+		TargetSampleRate: 16000, MaxInputBytes: len(data), MaxSamples: 10000,
+	})
+	if err != context.Canceled || ctx.checks < 3 {
+		t.Fatalf("mid-stream cancellation = %v after %d checks", err, ctx.checks)
 	}
 }
 
