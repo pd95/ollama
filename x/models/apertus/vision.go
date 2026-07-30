@@ -23,6 +23,15 @@ const (
 	maxApertusImageDimension = 16_384
 	maxApertusImagePixels    = 64 << 20
 	visionCodebookChunk      = 4096
+	minApertusImageArea      = 256 * 256
+	maxApertusImageArea      = 1400 * 1400
+
+	// The FP32 VQ encoder's first level dominates its working set. These
+	// conservative coefficients include the measured Metal/process overhead
+	// of the 1600x976 regression screenshot plus headroom for prompt prefill.
+	apertusVisionFixedBytes    = uint64(1 << 30)
+	apertusVisionBytesPerPixel = uint64(16 << 10)
+	apertusVisionBytesPerToken = uint64(128 << 10)
 )
 
 type VisionTokenizerConfig struct {
@@ -138,6 +147,40 @@ func (b *apertureVisionResBlock) forward(x *mlx.Array) *mlx.Array {
 		residual = b.shortcut.forward(x)
 	}
 	return mlx.Add(residual, h)
+}
+
+func (b *apertureVisionResBlock) forwardMaterialized(ctx context.Context, x *mlx.Array) (*mlx.Array, error) {
+	mlx.Pin(x)
+	defer mlx.Unpin(x)
+
+	normalized := mlx.SiLU(b.norm1.forward(x))
+	if err := materializeApertusVisionKeeping(ctx, normalized, x); err != nil {
+		return nil, err
+	}
+	h := b.conv1.forward(normalized)
+	if err := materializeApertusVisionKeeping(ctx, h, x); err != nil {
+		return nil, err
+	}
+	normalized = mlx.SiLU(b.norm2.forward(h))
+	if err := materializeApertusVisionKeeping(ctx, normalized, x); err != nil {
+		return nil, err
+	}
+	h = b.conv2.forward(normalized)
+	if err := materializeApertusVisionKeeping(ctx, h, x); err != nil {
+		return nil, err
+	}
+	residual := x
+	if b.shortcut != nil {
+		residual = b.shortcut.forward(x)
+		if err := materializeApertusVisionKeeping(ctx, residual, h); err != nil {
+			return nil, err
+		}
+	}
+	output := mlx.Add(residual, h)
+	if err := materializeApertusVision(ctx, output); err != nil {
+		return nil, err
+	}
+	return output, nil
 }
 
 type apertureVisionAttention struct {
@@ -327,10 +370,11 @@ func (v *VisionTokenizer) encode(ctx context.Context, pixels []float32, width, h
 			return nil, err
 		}
 		for i, block := range level.blocks {
-			h = block.forward(h)
-			if err := materializeApertusVision(ctx, h); err != nil {
+			next, err := block.forwardMaterialized(ctx, h)
+			if err != nil {
 				return nil, err
 			}
+			h = next
 			if len(level.attn) > 0 {
 				h = level.attn[i].forward(h)
 				if err := materializeApertusVision(ctx, h); err != nil {
@@ -408,39 +452,69 @@ func (v *VisionTokenizer) encode(ctx context.Context, pixels []float32, width, h
 // full-resolution tokenizer activations are FP32 and can otherwise keep every
 // preceding residual-block buffer alive until the entire image is encoded.
 func materializeApertusVision(ctx context.Context, output *mlx.Array) error {
+	return materializeApertusVisionKeeping(ctx, output)
+}
+
+func materializeApertusVisionKeeping(ctx context.Context, output *mlx.Array, keep ...*mlx.Array) error {
 	mlx.Eval(output)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	mlx.Pin(output)
+	mlx.Pin(keep...)
 	mlx.Sweep()
+	mlx.Unpin(keep...)
 	mlx.Unpin(output)
 	return nil
 }
 
 type apertusImageInput struct {
+	data                  []byte
+	originalWidth         int
+	originalHeight        int
+	canonicalWidth        int
+	canonicalHeight       int
 	pixels                []float32
 	width, height         int
 	gridWidth, gridHeight int
 }
 
-func preprocessApertusImage(ctx context.Context, data []byte) (*apertusImageInput, error) {
+func inspectApertusImage(ctx context.Context, data []byte) (*apertusImageInput, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(data) == 0 || len(data) > maxApertusImageBytes {
 		return nil, fmt.Errorf("Apertus image size %d is invalid", len(data))
 	}
-	img, _, err := image.Decode(bytes.NewReader(data))
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("decode Apertus image: %w", err)
+		return nil, fmt.Errorf("decode Apertus image config: %w", err)
 	}
-	b := img.Bounds()
-	width, height := b.Dx(), b.Dy()
+	width, height := cfg.Width, cfg.Height
 	if width <= 0 || height <= 0 || width > maxApertusImageDimension || height > maxApertusImageDimension || int64(width)*int64(height) > maxApertusImagePixels {
 		return nil, fmt.Errorf("Apertus image dimensions %dx%d are invalid", width, height)
 	}
 	targetW, targetH := apertusImageSize(width, height)
+	return &apertusImageInput{
+		data: data, originalWidth: width, originalHeight: height,
+		canonicalWidth: targetW, canonicalHeight: targetH,
+		width: targetW, height: targetH, gridWidth: targetW / 16, gridHeight: targetH / 16,
+	}, nil
+}
+
+func materializeApertusImage(ctx context.Context, input *apertusImageInput) ([]float32, error) {
+	if input == nil || len(input.data) == 0 {
+		return nil, errors.New("Apertus image input is empty")
+	}
+	img, _, err := image.Decode(bytes.NewReader(input.data))
+	if err != nil {
+		return nil, fmt.Errorf("decode Apertus image: %w", err)
+	}
+	b := img.Bounds()
+	if b.Dx() != input.originalWidth || b.Dy() != input.originalHeight {
+		return nil, fmt.Errorf("Apertus image dimensions changed from %dx%d to %dx%d while decoding", input.originalWidth, input.originalHeight, b.Dx(), b.Dy())
+	}
+	targetW, targetH := input.width, input.height
 	pixels := resizeApertusImage(img, b, targetW, targetH)
 	for y := range targetH {
 		if y&127 == 0 {
@@ -455,11 +529,27 @@ func preprocessApertusImage(ctx context.Context, data []byte) (*apertusImageInpu
 			pixels[i+2] = pixels[i+2]/127.5 - 1
 		}
 	}
-	return &apertusImageInput{pixels: pixels, width: targetW, height: targetH, gridWidth: targetW / 16, gridHeight: targetH / 16}, nil
+	return pixels, nil
+}
+
+func preprocessApertusImage(ctx context.Context, data []byte) (*apertusImageInput, error) {
+	input, err := inspectApertusImage(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	input.pixels, err = materializeApertusImage(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return input, nil
 }
 
 func apertusImageSize(width, height int) (int, int) {
-	targetArea := max(256*256, min(1400*1400, width*height))
+	return apertusImageSizeForArea(width, height, maxApertusImageArea)
+}
+
+func apertusImageSizeForArea(width, height, maxArea int) (int, int) {
+	targetArea := max(minApertusImageArea, min(maxArea, width*height))
 	aspect := float64(width) / float64(height)
 	targetH := int(math.Sqrt(float64(targetArea) / aspect))
 	targetW := int(float64(targetH) * aspect)
@@ -468,6 +558,22 @@ func apertusImageSize(width, height int) (int, int) {
 	targetH = max(targetH, 16)
 	targetW = max(targetW, 16)
 	return targetW, targetH
+}
+
+func setApertusImageArea(input *apertusImageInput, maxArea int) {
+	input.width, input.height = apertusImageSizeForArea(input.originalWidth, input.originalHeight, maxArea)
+	input.gridWidth, input.gridHeight = input.width/16, input.height/16
+}
+
+func estimateApertusImagePeak(resident uint64, inputs []*apertusImageInput) uint64 {
+	var maxPixels, totalTokens uint64
+	for _, input := range inputs {
+		pixels := uint64(input.width) * uint64(input.height)
+		tokens := uint64(input.gridWidth) * uint64(input.gridHeight)
+		maxPixels = max(maxPixels, pixels)
+		totalTokens += tokens
+	}
+	return resident + apertusVisionFixedBytes + maxPixels*apertusVisionBytesPerPixel + totalTokens*apertusVisionBytesPerToken
 }
 
 type apertureResamplePoint struct {
