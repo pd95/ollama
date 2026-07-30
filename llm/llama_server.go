@@ -1606,7 +1606,11 @@ func (s *llamaServerRunner) Completion(ctx context.Context, req CompletionReques
 		for _, media := range req.Media {
 			marker := fmt.Sprintf("[img-%d]", media.ID)
 			promptStr = strings.Replace(promptStr, marker, s.llamaServerMediaMarker(), 1)
-			mediaData = append(mediaData, base64.StdEncoding.EncodeToString(media.Data))
+			data, _, err := normalizeLlamaServerImageData(media.Data)
+			if err != nil {
+				return err
+			}
+			mediaData = append(mediaData, base64.StdEncoding.EncodeToString(data))
 		}
 		lsReq.Prompt = llamaServerMultimodalPrompt{
 			PromptString:   promptStr,
@@ -2251,37 +2255,46 @@ func llamaServerChatMediaPart(media MediaData) (map[string]any, error) {
 		}, nil
 	}
 
-	mime := http.DetectContentType(media.Data)
-	if mime == "image/webp" {
-		config, err := webp.DecodeConfig(bytes.NewReader(media.Data))
-		if err != nil {
-			return nil, fmt.Errorf("invalid WebP media: %w", err)
-		}
-		const maxDimension = 16384
-		const maxPixels = 64 << 20
-		if config.Width <= 0 || config.Height <= 0 || config.Width > maxDimension || config.Height > maxDimension || int64(config.Width)*int64(config.Height) > maxPixels {
-			return nil, fmt.Errorf("WebP media dimensions %dx%d exceed limits", config.Width, config.Height)
-		}
-		img, err := webp.Decode(bytes.NewReader(media.Data))
-		if err != nil {
-			return nil, fmt.Errorf("invalid WebP media: %w", err)
-		}
-		var converted bytes.Buffer
-		if err := png.Encode(&converted, img); err != nil {
-			return nil, fmt.Errorf("convert WebP media to PNG: %w", err)
-		}
-		mime = "image/png"
-		encoded = base64.StdEncoding.EncodeToString(converted.Bytes())
+	data, mime, err := normalizeLlamaServerImageData(media.Data)
+	if err != nil {
+		return nil, err
 	}
-	if !strings.HasPrefix(mime, "image/") {
-		mime = "image/jpeg"
-	}
+	encoded = base64.StdEncoding.EncodeToString(data)
 	return map[string]any{
 		"type": "image_url",
 		"image_url": map[string]any{
 			"url": "data:" + mime + ";base64," + encoded,
 		},
 	}, nil
+}
+
+func normalizeLlamaServerImageData(data []byte) ([]byte, string, error) {
+	mime := http.DetectContentType(data)
+	if mime == "image/webp" {
+		config, err := webp.DecodeConfig(bytes.NewReader(data))
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid WebP media: %w", err)
+		}
+		const maxDimension = 16384
+		const maxPixels = 64 << 20
+		if config.Width <= 0 || config.Height <= 0 || config.Width > maxDimension || config.Height > maxDimension || int64(config.Width)*int64(config.Height) > maxPixels {
+			return nil, "", fmt.Errorf("WebP media dimensions %dx%d exceed limits", config.Width, config.Height)
+		}
+		img, err := webp.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid WebP media: %w", err)
+		}
+		var converted bytes.Buffer
+		if err := png.Encode(&converted, img); err != nil {
+			return nil, "", fmt.Errorf("convert WebP media to PNG: %w", err)
+		}
+		mime = "image/png"
+		data = converted.Bytes()
+	}
+	if !strings.HasPrefix(mime, "image/") {
+		mime = "image/jpeg"
+	}
+	return data, mime, nil
 }
 
 func llamaServerChatToolCalls(tcs []api.ToolCall) ([]llamaServerChatToolCall, error) {
