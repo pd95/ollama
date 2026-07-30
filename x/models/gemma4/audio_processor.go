@@ -9,6 +9,8 @@ import (
 	"math"
 	"math/cmplx"
 
+	"github.com/ollama/ollama/llm"
+	mlxmedia "github.com/ollama/ollama/x/mlxrunner/media"
 	"gonum.org/v1/gonum/dsp/fourier"
 )
 
@@ -96,7 +98,18 @@ func preprocessGemma4Audio(ctx context.Context, data []byte, cfg *AudioProcessor
 	if cfg == nil {
 		return nil, errors.New("Gemma4 MLX model has no supported audio processor configuration")
 	}
-	samples, err := decodeGemma4WAV(ctx, data, cfg.FeatureExtractor.SamplingRate)
+	var samples []float32
+	var err error
+	if format, ok := llm.AudioFormat(data); ok && format == "mp3" {
+		samples, err = mlxmedia.DecodeMP3(ctx, data, mlxmedia.MP3DecodeOptions{
+			TargetSampleRate: cfg.FeatureExtractor.SamplingRate,
+			MaxInputBytes:    maxGemma4AudioBytes,
+			MaxSamples:       maxGemma4AudioSamples,
+			Overflow:         mlxmedia.AudioOverflowTruncate,
+		})
+	} else {
+		samples, err = decodeGemma4WAV(ctx, data, cfg.FeatureExtractor.SamplingRate)
+	}
 	if err != nil {
 		return nil, err
 	}
