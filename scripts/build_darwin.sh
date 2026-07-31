@@ -368,34 +368,17 @@ _build_macapp() {
     ditto -c -k --norsrc --keepParent dist/Ollama.app dist/Ollama-darwin.zip
     (cd dist/Ollama.app/Contents/Resources/; tar -cf - ollama llama-server llama-quantize *.so *.dylib *.metallib *_LICENSE *_NOTICE mlx_metal_v*/ 2>/dev/null) | gzip -9vc > dist/ollama-darwin.tgz
 
-    # Notarize and Staple
+    # Notarize, staple, and create the signed DMG through the resumable helper.
     if [ -n "$APPLE_IDENTITY" ]; then
-        $(xcrun -f notarytool) submit dist/Ollama-darwin.zip --wait --timeout 20m --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
-        rm -f dist/Ollama-darwin.zip
-        $(xcrun -f stapler) staple dist/Ollama.app
-        ditto -c -k --norsrc --keepParent dist/Ollama.app dist/Ollama-darwin.zip
-
+        # Do not leave a previous DMG available for the caller to mistake for
+        # the output of this notarization attempt.
         rm -f dist/Ollama.dmg
-
-        (cd dist && ../scripts/create-dmg.sh \
-            --volname "${VOL_NAME}" \
-            --volicon Ollama.app/Contents/Resources/icon.icns \
-            --background ../app/assets/background.png \
-            --window-pos 200 120 \
-            --window-size 800 400 \
-            --icon-size 128 \
-            --icon "Ollama.app" 200 190 \
-            --hide-extension "Ollama.app" \
-            --app-drop-link 600 190 \
-            --text-size 12 \
-            "Ollama.dmg" \
-            "Ollama.app" \
-        ; )
-        rm -f dist/rw*.dmg
-
-        codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.dmg
-        $(xcrun -f notarytool) submit dist/Ollama.dmg --wait --timeout 20m --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
-        $(xcrun -f stapler) staple dist/Ollama.dmg
+        ./scripts/notarize_darwin.sh \
+            --release-revision "${MLX_RELEASE_REVISION:-$(git rev-parse HEAD)}" \
+            --release-version "$VERSION" \
+            --app-version "$OLLAMA_APP_VERSION" \
+            --app-build-version "$OLLAMA_APP_BUILD_VERSION" \
+            --timeout "${MLX_NOTARY_TIMEOUT:-20m}" || return $?
     else
         echo "WARNING: Code signing disabled, this bundle will not work for upgrade testing"
     fi
