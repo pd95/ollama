@@ -1766,25 +1766,11 @@ func (s *Server) buildChatRequest(chat *store.Chat, model string, think any, ava
 		msgs = append(msgs, apiMsg)
 	}
 
-	var thinkValue *api.ThinkValue
-	if think != nil {
-		// Only set Think if it's actually requesting thinking
-		if boolValue, ok := think.(bool); ok {
-			if boolValue {
-				thinkValue = &api.ThinkValue{Value: boolValue}
-			}
-		} else if stringValue, ok := think.(string); ok {
-			if stringValue != "" && stringValue != "none" {
-				thinkValue = &api.ThinkValue{Value: stringValue}
-			}
-		}
-	}
-
 	req := &api.ChatRequest{
 		Model:    model,
 		Messages: msgs,
 		Stream:   ptr(true),
-		Think:    thinkValue,
+		Think:    chatThinkValue(think),
 	}
 
 	if len(availableTools) > 0 {
