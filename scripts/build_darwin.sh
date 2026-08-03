@@ -12,7 +12,11 @@
 #    VOL_NAME="$(date)" ./scripts/build_darwin.sh
 #
 VOL_NAME=${VOL_NAME:-"Ollama"}
-export VERSION=${VERSION:-$(git describe --tags --first-parent --abbrev=7 --long --dirty --always | sed -e "s/^v//g")}
+if [ -z "${VERSION:-}" ]; then
+    VERSION=$(git describe --tags --first-parent --abbrev=7 --long --dirty --always 2>/dev/null | sed -e "s/^v//g" || true)
+    VERSION=${VERSION:-0.0.0-local}
+fi
+export VERSION
 export CGO_CFLAGS="-O3 -mmacosx-version-min=14.0"
 export CGO_CXXFLAGS="-O3 -mmacosx-version-min=14.0"
 export CGO_LDFLAGS="-mmacosx-version-min=14.0"
@@ -47,6 +51,7 @@ _build_darwin() {
     BUILD_CPUS=$(getconf _NPROCESSORS_ONLN)
     BUILD_JOBS=${OLLAMA_BUILD_PARALLEL:-$BUILD_CPUS}
     BUILD_LOAD=${OLLAMA_BUILD_LOAD:-$BUILD_CPUS}
+    status "Build version: $VERSION"
     status "Build parallelism: $BUILD_JOBS, load limit: $BUILD_LOAD"
 
     SOURCE_BUILD=build/darwin-sources
@@ -97,7 +102,7 @@ _build_darwin() {
 }
 
 _merge_darwin_payload() {
-    status "Preparing universal Darwin runtime payload"
+    status "Preparing Darwin runtime payload"
     rm -rf dist/darwin/lib
     mkdir -p dist/darwin/lib/ollama
 
@@ -142,20 +147,11 @@ _merge_darwin_payload() {
 }
 
 _prepare_darwin_runtime() {
-    status "Creating universal binary..."
+    status "Preparing Darwin runtime binaries"
     mkdir -p dist/darwin
-    lipo -create -output dist/darwin/ollama dist/darwin-amd64/ollama dist/darwin-arm64/ollama
-    chmod +x dist/darwin/ollama
-    lipo dist/darwin/ollama -verify_arch x86_64 arm64
-
-    lipo -create -output dist/darwin/llama-server dist/darwin-amd64/lib/ollama/llama-server dist/darwin-arm64/lib/ollama/llama-server
-    chmod +x dist/darwin/llama-server
-    lipo dist/darwin/llama-server -verify_arch x86_64 arm64
-
-    lipo -create -output dist/darwin/llama-quantize dist/darwin-amd64/lib/ollama/llama-quantize dist/darwin-arm64/lib/ollama/llama-quantize
-    chmod +x dist/darwin/llama-quantize
-    lipo dist/darwin/llama-quantize -verify_arch x86_64 arm64
-
+    _create_available_darwin_binary dist/darwin/ollama dist/darwin-amd64/ollama dist/darwin-arm64/ollama
+    _create_available_darwin_binary dist/darwin/llama-server dist/darwin-amd64/lib/ollama/llama-server dist/darwin-arm64/lib/ollama/llama-server
+    _create_available_darwin_binary dist/darwin/llama-quantize dist/darwin-amd64/lib/ollama/llama-quantize dist/darwin-arm64/lib/ollama/llama-quantize
     _merge_darwin_payload
 }
 
@@ -191,6 +187,79 @@ _prepare_darwin_app_runtime() {
     _create_available_darwin_binary dist/darwin/llama-server dist/darwin-amd64/lib/ollama/llama-server dist/darwin-arm64/lib/ollama/llama-server
     _create_available_darwin_binary dist/darwin/llama-quantize dist/darwin-amd64/lib/ollama/llama-quantize dist/darwin-arm64/lib/ollama/llama-quantize
     _merge_darwin_payload
+}
+
+_build_darwin_app_launcher() {
+    APP_INPUTS=
+
+    for ARCH in $ARCHS; do
+        case "$ARCH" in
+            arm64|amd64) ;;
+            *)
+                echo "unsupported Darwin app architecture: $ARCH" >&2
+                exit 1
+                ;;
+        esac
+
+        OUT="dist/darwin-app-$ARCH"
+        GOARCH=$ARCH CGO_ENABLED=1 GOOS=darwin go build -o "$OUT" -ldflags="$APP_LDFLAGS" ./app/cmd/app
+        APP_INPUTS="$APP_INPUTS $OUT"
+    done
+
+    mkdir -p dist/Ollama.app/Contents/MacOS
+    # shellcheck disable=SC2086
+    set -- $APP_INPUTS
+    if [ "$#" -gt 1 ]; then
+        lipo -create -output dist/Ollama.app/Contents/MacOS/Ollama "$@"
+    else
+        cp "$1" dist/Ollama.app/Contents/MacOS/Ollama
+    fi
+    chmod +x dist/Ollama.app/Contents/MacOS/Ollama
+    rm -f dist/darwin-app-amd64 dist/darwin-app-arm64
+}
+
+_codesign_one() {
+    IDENTITY=$1
+    IDENTIFIER=$2
+    TARGET=$3
+
+    if [ "$IDENTITY" = "-" ]; then
+        codesign -f -s - --identifier "$IDENTIFIER" "$TARGET"
+    else
+        codesign -f --timestamp -s "$IDENTITY" --identifier "$IDENTIFIER" --options=runtime "$TARGET"
+    fi
+}
+
+_sign_app_bundle() {
+    IDENTITY=$1
+
+    _codesign_one "$IDENTITY" com.electron.ollama dist/Ollama.app/Contents/MacOS/Ollama
+    _codesign_one "$IDENTITY" ai.ollama.ollama dist/Ollama.app/Contents/Resources/ollama
+    _codesign_one "$IDENTITY" ai.ollama.ollama dist/Ollama.app/Contents/Resources/llama-server
+    _codesign_one "$IDENTITY" ai.ollama.ollama dist/Ollama.app/Contents/Resources/llama-quantize
+
+    for lib in dist/Ollama.app/Contents/Resources/*.so dist/Ollama.app/Contents/Resources/*.dylib dist/Ollama.app/Contents/Resources/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.dylib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.so; do
+        [ -f "$lib" ] || continue
+        _codesign_one "$IDENTITY" ai.ollama.ollama "$lib"
+    done
+
+    _codesign_one "$IDENTITY" com.electron.ollama dist/Ollama.app/Contents/Frameworks/Squirrel.framework/Versions/A/Squirrel
+    if [ "$IDENTITY" = "-" ]; then
+        codesign -f -s - --deep dist/Ollama.app
+    else
+        codesign -f --timestamp -s "$IDENTITY" --identifier com.electron.ollama --deep --options=runtime dist/Ollama.app
+    fi
+}
+
+_prepare_local_app_for_launch() {
+    xattr -cr dist/Ollama.app
+
+    if xattr -lr dist/Ollama.app 2>/dev/null | grep -q com.apple.quarantine; then
+        echo "failed to remove quarantine metadata from dist/Ollama.app" >&2
+        exit 1
+    fi
+
+    codesign --verify --deep --strict --verbose=2 dist/Ollama.app
 }
 
 _create_darwin_runtime_tarball() {
@@ -321,11 +390,7 @@ _build_macapp() {
         status "Building app with automatic updates disabled"
         APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.DisableUpdates=true"
     fi
-    GOARCH=amd64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-amd64 -ldflags="$APP_LDFLAGS" ./app/cmd/app
-    GOARCH=arm64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-arm64 -ldflags="$APP_LDFLAGS" ./app/cmd/app
-    mkdir -p dist/Ollama.app/Contents/MacOS
-    lipo -create -output dist/Ollama.app/Contents/MacOS/Ollama dist/darwin-app-amd64 dist/darwin-app-arm64
-    rm -f dist/darwin-app-amd64 dist/darwin-app-arm64
+    _build_darwin_app_launcher
 
     # Create a mock Squirrel.framework bundle
     mkdir -p dist/Ollama.app/Contents/Frameworks/Squirrel.framework/Versions/A/Resources/
@@ -351,16 +416,14 @@ _build_macapp() {
     fi
     chmod a+x dist/Ollama.app/Contents/Resources/ollama
 
-    # Sign
+    LOCAL_SIGN=${OLLAMA_LOCAL_SIGN:-1}
     if [ -n "$APPLE_IDENTITY" ]; then
-        codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/ollama
-        codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/llama-server
-        codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/llama-quantize
-        for lib in dist/Ollama.app/Contents/Resources/*.so dist/Ollama.app/Contents/Resources/*.dylib dist/Ollama.app/Contents/Resources/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.dylib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.so; do
-            [ -f "$lib" ] || continue
-            codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime "$lib"
-        done
-        codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier com.electron.ollama --deep --options=runtime dist/Ollama.app
+        _sign_app_bundle "$APPLE_IDENTITY"
+    elif truthy "$LOCAL_SIGN"; then
+        status "Ad-hoc signing local app bundle"
+        _sign_app_bundle -
+        _prepare_local_app_for_launch
+        status "Local app is ad-hoc signed and not notarized; do not redistribute it"
     fi
 
     rm -f dist/Ollama-darwin.zip
@@ -379,7 +442,11 @@ _build_macapp() {
             --app-build-version "$OLLAMA_APP_BUILD_VERSION" \
             --timeout "${MLX_NOTARY_TIMEOUT:-20m}" || return $?
     else
-        echo "WARNING: Code signing disabled, this bundle will not work for upgrade testing"
+        if truthy "$LOCAL_SIGN"; then
+            echo "WARNING: Developer ID signing and notarization disabled; local app is ad-hoc signed only"
+        else
+            echo "WARNING: Code signing disabled, this bundle will not work for upgrade testing"
+        fi
     fi
 }
 
