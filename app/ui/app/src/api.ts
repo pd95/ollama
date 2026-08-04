@@ -261,6 +261,9 @@ export async function* sendMessage(
 
 export async function getSettings(): Promise<{
   settings: Settings;
+  manualUpdatesOnly: boolean;
+  updateReady: boolean;
+  updateVersion?: string;
 }> {
   const response = await fetch(`${API_BASE}/api/v1/settings`);
   if (!response.ok) {
@@ -269,6 +272,10 @@ export async function getSettings(): Promise<{
   const data = await response.json();
   return {
     settings: new Settings(data.settings),
+    manualUpdatesOnly: Boolean(data.manualUpdatesOnly),
+    updateReady: Boolean(data.updateReady),
+    updateVersion:
+      typeof data.updateVersion === "string" ? data.updateVersion : undefined,
   };
 }
 
@@ -292,14 +299,56 @@ export async function updateSettings(settings: Settings): Promise<{
   };
 }
 
-export async function checkForUpdates(): Promise<void> {
+export type UpdateCheckResult =
+  | { status: "up_to_date" }
+  | { status: "ready"; version: string };
+
+async function responseError(response: Response, fallback: string) {
+  const body = await response.text();
+  if (!body) return fallback;
+  try {
+    const parsed = JSON.parse(body) as { error?: string };
+    return parsed.error || fallback;
+  } catch {
+    return body;
+  }
+}
+
+export async function checkForUpdates(): Promise<UpdateCheckResult> {
   const response = await fetch(`${API_BASE}/api/v1/update/check`, {
     method: "POST",
   });
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(error || "Failed to check for updates");
+    throw new Error(
+      await responseError(response, "Failed to check for updates"),
+    );
   }
+  const result = (await response.json()) as UpdateCheckResult;
+  if (result.status !== "up_to_date" && result.status !== "ready") {
+    throw new Error("Ollama returned an invalid update status");
+  }
+  if (result.status === "ready" && !result.version) {
+    throw new Error("Ollama did not identify the downloaded update");
+  }
+  return result;
+}
+
+export type InstallUpdateResult = { status: "cancelled" | "started" };
+
+export async function installUpdate(): Promise<InstallUpdateResult> {
+  const response = await fetch(`${API_BASE}/api/v1/update/install`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(
+      await responseError(response, "Failed to start update installation"),
+    );
+  }
+  const result = (await response.json()) as InstallUpdateResult;
+  if (result.status !== "cancelled" && result.status !== "started") {
+    throw new Error("Ollama returned an invalid installation status");
+  }
+  return result;
 }
 
 export async function updateCloudSetting(
