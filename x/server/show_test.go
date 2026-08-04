@@ -485,17 +485,17 @@ func TestGetTensorInfoFromManifest_Quantized(t *testing.T) {
 	// Create a combined quantized blob with __metadata__
 	header := map[string]any{
 		"__metadata__": map[string]string{
-			"quant_type": "int4",
-			"group_size": "32",
+			"quant_type": "int3",
+			"group_size": "64",
 		},
 		"model.layers.0.mlp.up_proj.weight": map[string]any{
 			"dtype":        "U32",
-			"shape":        []int64{2560, 320}, // packed: 2560 / 8 = 320
+			"shape":        []int64{2560, 240}, // packed: 2560 * 3 / 32 = 240
 			"data_offsets": []int64{0, 3276800},
 		},
 		"model.layers.0.mlp.up_proj.weight.scale": map[string]any{
 			"dtype":        "BF16",
-			"shape":        []int64{2560, 80}, // 2560 / 32 = 80
+			"shape":        []int64{2560, 40}, // 2560 / 64 = 40
 			"data_offsets": []int64{3276800, 3686400},
 		},
 		"model.layers.0.mlp.up_proj.weight.bias": map[string]any{
@@ -545,10 +545,10 @@ func TestGetTensorInfoFromManifest_Quantized(t *testing.T) {
 	if tensor.Name != "model.layers.0.mlp.up_proj.weight" {
 		t.Errorf("Name = %v, want model.layers.0.mlp.up_proj.weight", tensor.Name)
 	}
-	if tensor.Type != "int4" {
-		t.Errorf("Type = %v, want int4", tensor.Type)
+	if tensor.Type != "int3" {
+		t.Errorf("Type = %v, want int3", tensor.Type)
 	}
-	// Shape should be unpacked: 320 * 8 = 2560
+	// Shape should use the exact rational expansion: 240 * 32 / 3 = 2560.
 	if len(tensor.Shape) != 2 || tensor.Shape[0] != 2560 || tensor.Shape[1] != 2560 {
 		t.Errorf("Shape = %v, want [2560, 2560]", tensor.Shape)
 	}
@@ -663,27 +663,33 @@ func TestGetParameterCountFromManifest_MixedQuantizedPacked(t *testing.T) {
 	}
 
 	// Packed mixed-precision blob (no global metadata):
-	// - gate_proj: int4 packed [5,8] + scale [5,2] => unpacked [5,64] = 320 params
-	// - down_proj: int8 packed [5,16] + scale [5,1] => unpacked [5,64] = 320 params
+	// - gate_proj: int3 packed [5,6] + scale [5,1] => unpacked [5,64] = 320 params
+	// - down_proj: int6 packed [5,12] + scale [5,1] => unpacked [5,64] = 320 params
 	header := map[string]any{
+		"__metadata__": map[string]string{
+			"model.layers.0.mlp.experts.0.gate_proj.weight.quant_type": "int3",
+			"model.layers.0.mlp.experts.0.gate_proj.weight.group_size": "64",
+			"model.layers.0.mlp.experts.0.down_proj.weight.quant_type": "int6",
+			"model.layers.0.mlp.experts.0.down_proj.weight.group_size": "64",
+		},
 		"model.layers.0.mlp.experts.0.gate_proj.weight": map[string]any{
 			"dtype":        "U32",
-			"shape":        []int64{5, 8},
+			"shape":        []int64{5, 6},
 			"data_offsets": []int64{0, 160},
 		},
 		"model.layers.0.mlp.experts.0.gate_proj.weight.scale": map[string]any{
 			"dtype":        "BF16",
-			"shape":        []int64{5, 2},
+			"shape":        []int64{5, 1},
 			"data_offsets": []int64{160, 180},
 		},
 		"model.layers.0.mlp.experts.0.gate_proj.weight.bias": map[string]any{
 			"dtype":        "BF16",
-			"shape":        []int64{5, 2},
+			"shape":        []int64{5, 1},
 			"data_offsets": []int64{180, 200},
 		},
 		"model.layers.0.mlp.experts.0.down_proj.weight": map[string]any{
 			"dtype":        "U32",
-			"shape":        []int64{5, 16},
+			"shape":        []int64{5, 12},
 			"data_offsets": []int64{200, 520},
 		},
 		"model.layers.0.mlp.experts.0.down_proj.weight.scale": map[string]any{
@@ -1123,12 +1129,12 @@ func TestGetSafetensorsDtypeChoosesLowestPrecisionQuantizedBlob(t *testing.T) {
 
 	quantized := writeSafetensorsLayer(t, map[string]any{
 		"__metadata__": map[string]string{
-			"quant_type": "mxfp8",
-			"group_size": "32",
+			"quant_type": "int6",
+			"group_size": "64",
 		},
 		"model.layers.0.mlp.down_proj.weight": map[string]any{
 			"dtype":        "U32",
-			"shape":        []int64{16, 4},
+			"shape":        []int64{16, 12},
 			"data_offsets": []int64{0, 256},
 		},
 		"model.layers.0.mlp.down_proj.weight.scale": map[string]any{
@@ -1140,16 +1146,16 @@ func TestGetSafetensorsDtypeChoosesLowestPrecisionQuantizedBlob(t *testing.T) {
 
 	lowerPrecision := writeSafetensorsLayer(t, map[string]any{
 		"__metadata__": map[string]string{
-			"quant_type": "nvfp4",
-			"group_size": "16",
+			"quant_type": "int3",
+			"group_size": "64",
 		},
 		"model.layers.0.mlp.up_proj.weight": map[string]any{
 			"dtype":        "U32",
-			"shape":        []int64{16, 2},
+			"shape":        []int64{16, 6},
 			"data_offsets": []int64{0, 128},
 		},
 		"model.layers.0.mlp.up_proj.weight.scale": map[string]any{
-			"dtype":        "U8",
+			"dtype":        "BF16",
 			"shape":        []int64{16, 1},
 			"data_offsets": []int64{128, 144},
 		},
@@ -1164,7 +1170,7 @@ func TestGetSafetensorsDtypeChoosesLowestPrecisionQuantizedBlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSafetensorsDtype() error = %v", err)
 	}
-	if got != "nvfp4" {
-		t.Fatalf("GetSafetensorsDtype() = %q, want nvfp4", got)
+	if got != "int3" {
+		t.Fatalf("GetSafetensorsDtype() = %q, want int3", got)
 	}
 }

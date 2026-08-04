@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/ollama/ollama/envconfig"
+	"github.com/ollama/ollama/x/quant"
 	"github.com/ollama/ollama/x/safetensors"
 )
 
@@ -372,6 +373,59 @@ type sourceQuantization struct {
 			Type           string  `json:"type"`
 		} `json:"weights"`
 	} `json:"config_groups"`
+	Overrides map[string]sourceQuantization `json:"-"`
+}
+
+func (q *sourceQuantization) UnmarshalJSON(data []byte) error {
+	type plain sourceQuantization
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*q = sourceQuantization(decoded)
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for name, raw := range fields {
+		switch name {
+		case "bits", "group_size", "mode", "format", "quant_method", "weight_block_size", "config_groups":
+			continue
+		}
+		var override sourceQuantization
+		if err := json.Unmarshal(raw, &override); err != nil || !override.present() {
+			continue
+		}
+		if q.Overrides == nil {
+			q.Overrides = make(map[string]sourceQuantization)
+		}
+		q.Overrides[name] = override
+	}
+	return nil
+}
+
+func (q sourceQuantization) present() bool {
+	return q.Bits != 0 || q.GroupSize != 0 || q.Mode != "" || q.QuantMethod != "" || q.Format != "" || len(q.Overrides) != 0
+}
+
+func (q sourceQuantization) resolved() (quantType string, groupSize int, err error) {
+	mode := q.Mode
+	if mode == "" {
+		mode = q.QuantMethod
+	}
+	if mode == "" && q.Bits > 0 {
+		mode = "affine"
+	}
+	quantType = sourceQuantType(mode, q.Bits)
+	if quantType == "" {
+		return "", 0, fmt.Errorf("unsupported MLX quantization mode %q with %d bits", mode, q.Bits)
+	}
+	groupSize = q.GroupSize
+	if groupSize == 0 {
+		groupSize, _, _ = quant.Params(quantType)
+	}
+	return quantType, groupSize, nil
 }
 
 type sourceModelConfig struct {
@@ -427,20 +481,47 @@ func (cfg sourceModelConfig) QuantMetadata() map[string]string {
 		}
 	}
 
-	mode := q.Mode
-	if mode == "" {
-		mode = q.QuantMethod
-	}
-	quantType := sourceQuantType(mode, q.Bits)
-	if quantType == "" {
+	quantType, groupSize, err := q.resolved()
+	if err != nil {
 		return nil
 	}
 
-	metadata := map[string]string{"quant_type": quantType}
-	if q.GroupSize > 0 {
-		metadata["group_size"] = strconv.Itoa(q.GroupSize)
+	return map[string]string{
+		"quant_type": quantType,
+		"group_size": strconv.Itoa(groupSize),
 	}
-	return metadata
+}
+
+// TensorQuantMetadata resolves MLX-LM's default quantization dictionary and
+// any standalone module override for a source weight. The first populated
+// config retains the established top-level/text_config precedence.
+func (cfg sourceModelConfig) TensorQuantMetadata(weightName string) (map[string]string, bool, error) {
+	var q sourceQuantization
+	for _, candidate := range cfg.quantizationConfigs() {
+		if candidate.present() {
+			q = candidate
+			break
+		}
+	}
+	if !q.present() {
+		return nil, false, nil
+	}
+
+	module := strings.TrimSuffix(weightName, ".weight")
+	if override, ok := q.Overrides[module]; ok {
+		// MLX-LM stores each override as a complete, standalone quantization
+		// choice; absent mode/group fields take MLX affine defaults rather
+		// than inheriting the model dictionary.
+		q = override
+	}
+	quantType, groupSize, err := q.resolved()
+	if err != nil {
+		return nil, true, fmt.Errorf("tensor %s: %w", weightName, err)
+	}
+	return map[string]string{
+		"quant_type": quantType,
+		"group_size": strconv.Itoa(groupSize),
+	}, true, nil
 }
 
 func (cfg sourceModelConfig) quantizationConfigs() []sourceQuantization {
