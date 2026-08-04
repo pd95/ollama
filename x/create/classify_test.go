@@ -109,6 +109,14 @@ func TestClassifyErrors(t *testing.T) {
 			wantErr:   "cannot requantize",
 		},
 		{
+			name: "explicit mlx affine missing scales",
+			cfg: sourceModelConfig{
+				Quantization: sourceQuantization{Bits: 3, Mode: "affine", GroupSize: 64},
+			},
+			tensors: map[string]string{"model.layers.0.weight": "U32", "model.layers.0.biases": "BF16"},
+			wantErr: "missing required scale",
+		},
+		{
 			name:      "modelopt nvfp4 rejects requantize",
 			tensors:   map[string]string{"model.layers.0.weight": "U8", "model.layers.0.weight_scale": "F8_E4M3"},
 			requested: "nvfp4",
