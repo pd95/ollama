@@ -1,6 +1,7 @@
 package parsers
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ollama/ollama/api"
@@ -316,6 +317,98 @@ func TestApertusParserUnknownTool(t *testing.T) {
 
 	if _, _, _, err := parser.Add(`<|tools_prefix|>[{"other": {}}]<|tools_suffix|>`, true); err == nil {
 		t.Fatal("expected unknown tool error")
+	}
+}
+
+func TestApertus1p1ParserThinkingAndToolCall(t *testing.T) {
+	parser := newApertus1p1Parser()
+	parser.Init([]api.Tool{parserWeatherTool()}, nil, &api.ThinkValue{Value: true})
+
+	content, thinking, calls, err := parser.Add(
+		`<SPECIAL_67><SPECIAL_69>Need weather.<SPECIAL_71>[{"get_weather":{"location":"Zurich"}}]<SPECIAL_72><SPECIAL_68>`,
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || thinking != "Need weather." || len(calls) != 1 {
+		t.Fatalf("content=%q thinking=%q calls=%d", content, thinking, len(calls))
+	}
+	if calls[0].Function.Name != "get_weather" {
+		t.Fatalf("tool name = %q, want get_weather", calls[0].Function.Name)
+	}
+}
+
+func TestApertus1p1ParserCanonicalToolCallThenResponse(t *testing.T) {
+	parser := newApertus1p1Parser()
+	parser.Init([]api.Tool{parserWeatherTool()}, nil, &api.ThinkValue{Value: true})
+
+	var content, thinking strings.Builder
+	var calls []api.ToolCall
+	for i, chunk := range []string{
+		`<SPECIAL_67><SPECIAL_69>Need weather.<SPECIAL_7`,
+		`1>[{"get_weather":{"location":"Zurich"}}]<SPECIAL_72><SPEC`,
+		`IAL_70>It is sunny.<SPECIAL_68>`,
+	} {
+		gotContent, gotThinking, gotCalls, err := parser.Add(chunk, i == 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content.WriteString(gotContent)
+		thinking.WriteString(gotThinking)
+		calls = append(calls, gotCalls...)
+	}
+	if content.String() != "It is sunny." || thinking.String() != "Need weather." || len(calls) != 1 {
+		t.Fatalf("content=%q thinking=%q calls=%d", content.String(), thinking.String(), len(calls))
+	}
+	if calls[0].Function.Name != "get_weather" {
+		t.Fatalf("tool name = %q, want get_weather", calls[0].Function.Name)
+	}
+}
+
+func TestApertus1p1ParserStreamingSplitTags(t *testing.T) {
+	parser := newApertus1p1Parser()
+	parser.Init([]api.Tool{parserWeatherTool()}, nil, nil)
+
+	content, _, calls, err := parser.Add("Let me check.<SPEC", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "Let me check." || len(calls) != 0 {
+		t.Fatalf("first chunk content=%q calls=%d", content, len(calls))
+	}
+
+	content, _, calls, err = parser.Add(`IAL_71>[{"get_weather":{"location":"Bern"}}]<SPECIAL_`, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || len(calls) != 0 {
+		t.Fatalf("second chunk content=%q calls=%d", content, len(calls))
+	}
+
+	content, _, calls, err = parser.Add("72>", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || len(calls) != 1 {
+		t.Fatalf("final chunk content=%q calls=%d", content, len(calls))
+	}
+}
+
+func TestApertus1p1ParserRegistrationAndTokens(t *testing.T) {
+	parser := ParserForName("apertus1p1")
+	if parser == nil || !parser.HasToolSupport() || !parser.HasThinkingSupport() {
+		t.Fatalf("ParserForName(apertus1p1) = %T with incomplete capabilities", parser)
+	}
+	want := []string{"<SPECIAL_71>", "<SPECIAL_72>", "<SPECIAL_67>", "<SPECIAL_68>", "<SPECIAL_69>", "<SPECIAL_70>"}
+	got := parser.PreservedTokens()
+	if len(got) != len(want) {
+		t.Fatalf("PreservedTokens() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("PreservedTokens()[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
