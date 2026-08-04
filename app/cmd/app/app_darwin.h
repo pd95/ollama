@@ -29,6 +29,8 @@ void ShowUI();
 bool IsOnboardingActive(void);
 void StopUI();
 void StartUpdate();
+bool ManualUpdatesOnly();
+int confirmUpdateInstall();
 void darwinStartHiddenTasks();
 void launchApp(const char *appPath);
 void updateAvailable();
