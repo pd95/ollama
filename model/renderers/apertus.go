@@ -25,10 +25,24 @@ const (
 	apertusToolOutputStart = "<|tool_output_start|>"
 	apertusToolOutputEnd   = "<|tool_output_end|>"
 	apertusImageToken      = "<|image|>"
+
+	apertus1p1SystemStart    = "<SPECIAL_61>"
+	apertus1p1SystemEnd      = "<SPECIAL_62>"
+	apertus1p1DeveloperStart = "<SPECIAL_63>"
+	apertus1p1DeveloperEnd   = "<SPECIAL_64>"
+	apertus1p1UserStart      = "<SPECIAL_65>"
+	apertus1p1UserEnd        = "<SPECIAL_66>"
+	apertus1p1AssistantStart = "<SPECIAL_67>"
+	apertus1p1AssistantEnd   = "<SPECIAL_68>"
+	apertus1p1InnerPrefix    = "<SPECIAL_69>"
+	apertus1p1InnerSuffix    = "<SPECIAL_70>"
+	apertus1p1ToolsPrefix    = "<SPECIAL_71>"
+	apertus1p1ToolsSuffix    = "<SPECIAL_72>"
 )
 
 type (
 	ApertusRenderer    struct{}
+	Apertus1p1Renderer struct{}
 	Apertus1p5Renderer struct{}
 )
 
@@ -40,12 +54,156 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 	return renderApertus(messages, tools, think, false)
 }
 
+func (r *Apertus1p1Renderer) LeadingBOS() string {
+	return ""
+}
+
+func (r *Apertus1p1Renderer) Render(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
+	return renderApertus1p1(messages, tools, think)
+}
+
 func (r *Apertus1p5Renderer) LeadingBOS() string {
 	return ""
 }
 
 func (r *Apertus1p5Renderer) Render(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
 	return renderApertus(messages, tools, think, true)
+}
+
+func renderApertus1p1(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
+	thinkingEnabled := think != nil && think.Bool()
+	var sb strings.Builder
+	messageStart := 0
+	hasInstruction := false
+	sb.WriteString(apertus1p1SystemStart)
+	for messageStart < len(messages) && (messages[messageStart].Role == "system" || messages[messageStart].Role == "developer") {
+		if messages[messageStart].Content != "" {
+			if hasInstruction {
+				sb.WriteString("\n\n")
+			}
+			sb.WriteString(messages[messageStart].Content)
+			hasInstruction = true
+		}
+		messageStart++
+	}
+	sb.WriteString(apertus1p1SystemEnd)
+
+	sb.WriteString(apertus1p1DeveloperStart)
+	if thinkingEnabled {
+		sb.WriteString("Deliberation: enabled\n")
+	} else {
+		sb.WriteString("Deliberation: disabled\n")
+	}
+	if len(tools) > 0 {
+		sb.WriteString("Tool Capabilities:\n")
+		renderApertusTools(&sb, tools)
+	} else {
+		sb.WriteString("Tool Capabilities: disabled")
+	}
+	sb.WriteString(apertus1p1DeveloperEnd)
+
+	inAssistant := false
+	inTool := false
+	inInner := false
+	waitingForToolOutputs := false
+	closeToolOutputs := func() {
+		if inTool {
+			sb.WriteString("]")
+			inTool = false
+		}
+	}
+	closeAssistant := func() {
+		closeToolOutputs()
+		if inAssistant {
+			sb.WriteString(apertus1p1AssistantEnd)
+			inAssistant = false
+			inInner = false
+		}
+	}
+
+	for _, message := range messages[messageStart:] {
+		switch message.Role {
+		case "user":
+			closeAssistant()
+			sb.WriteString(apertus1p1UserStart)
+			sb.WriteString(message.Content)
+			sb.WriteString(apertus1p1UserEnd)
+			waitingForToolOutputs = false
+		case "system", "developer":
+			closeAssistant()
+			sb.WriteString(apertus1p1SystemStart)
+			sb.WriteString(message.Content)
+			sb.WriteString(apertus1p1SystemEnd)
+			waitingForToolOutputs = false
+		case "assistant":
+			if !inAssistant {
+				sb.WriteString(apertus1p1AssistantStart)
+				inAssistant = true
+			}
+			hadToolOutputs := inTool
+			closeToolOutputs()
+			if hadToolOutputs {
+				sb.WriteString(" ")
+			}
+			if thinkingEnabled && message.Thinking != "" {
+				if !inInner {
+					sb.WriteString(apertus1p1InnerPrefix)
+					inInner = true
+				}
+				sb.WriteString(message.Thinking)
+			}
+			if message.Content != "" {
+				if inInner {
+					sb.WriteString(apertus1p1InnerSuffix)
+					inInner = false
+				}
+				sb.WriteString(message.Content)
+			}
+			if len(message.ToolCalls) > 0 {
+				isDisplayAnswers := len(message.ToolCalls) == 1 && message.ToolCalls[0].Function.Name == "display_answers"
+				if inInner && isDisplayAnswers {
+					sb.WriteString(apertus1p1InnerSuffix)
+					inInner = false
+				}
+				if err := renderApertusToolCallsWithTags(&sb, message.ToolCalls, apertus1p1ToolsPrefix, apertus1p1ToolsSuffix); err != nil {
+					return "", err
+				}
+				waitingForToolOutputs = !isDisplayAnswers
+			} else {
+				waitingForToolOutputs = false
+			}
+		case "tool":
+			if !inAssistant {
+				return "", fmt.Errorf("apertus 1.1 tool message outside assistant turn")
+			}
+			if !inTool {
+				sb.WriteString("[")
+				inTool = true
+			} else {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(message.Content)
+			waitingForToolOutputs = false
+		default:
+			return "", fmt.Errorf("unsupported apertus 1.1 message role %q", message.Role)
+		}
+	}
+
+	closeToolOutputs()
+	if inAssistant && !waitingForToolOutputs {
+		sb.WriteString(apertus1p1AssistantEnd)
+		inAssistant = false
+		inInner = false
+	}
+
+	lastRole := ""
+	if len(messages) > 0 {
+		lastRole = messages[len(messages)-1].Role
+	}
+	if lastRole != "assistant" {
+		sb.WriteString(apertus1p1AssistantStart)
+	}
+	return sb.String(), nil
 }
 
 func renderApertus(messages []api.Message, tools []api.Tool, think *api.ThinkValue, v1p5 bool) (string, error) {
@@ -335,7 +493,11 @@ func apertusObjectType(properties *api.ToolPropertiesMap, required []string) str
 }
 
 func renderApertusToolCalls(sb *strings.Builder, toolCalls []api.ToolCall) error {
-	sb.WriteString(apertusToolsPrefix)
+	return renderApertusToolCallsWithTags(sb, toolCalls, apertusToolsPrefix, apertusToolsSuffix)
+}
+
+func renderApertusToolCallsWithTags(sb *strings.Builder, toolCalls []api.ToolCall, openTag, closeTag string) error {
+	sb.WriteString(openTag)
 	sb.WriteString("[")
 	for i, toolCall := range toolCalls {
 		if i > 0 {
@@ -356,6 +518,6 @@ func renderApertusToolCalls(sb *strings.Builder, toolCalls []api.ToolCall) error
 		sb.WriteString("}")
 	}
 	sb.WriteString("]")
-	sb.WriteString(apertusToolsSuffix)
+	sb.WriteString(closeTag)
 	return nil
 }
