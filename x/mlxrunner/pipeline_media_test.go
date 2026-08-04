@@ -216,6 +216,22 @@ func TestMediaInputEmbeddingsSurviveChunkedPrefill(t *testing.T) {
 	}
 }
 
+func TestPrefillSeedSurvivesPipelineSweep(t *testing.T) {
+	skipIfNoMLX(t)
+
+	seed := mlx.FromValues([]int32{7}, 1)
+	mlx.Pin(seed)
+	defer mlx.Unpin(seed)
+	mlx.Sweep()
+
+	if got := seed.Dims(); !slices.Equal(got, []int{1}) {
+		t.Fatalf("seed dimensions after sweep = %v, want [1]", got)
+	}
+	if got := seed.ExpandDims(-1).Dims(); !slices.Equal(got, []int{1, 1}) {
+		t.Fatalf("expanded seed dimensions = %v, want [1 1]", got)
+	}
+}
+
 func TestBidirectionalMediaPrefillChunksAroundCompleteSpan(t *testing.T) {
 	skipIfNoMLX(t)
 
