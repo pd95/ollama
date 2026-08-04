@@ -103,6 +103,13 @@ func DoUpgrade(interactive bool) error {
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
 	}
+	// Always verify at the point of use. Ready-state verification is cached for
+	// display, but must not authorize a later installation.
+	if err := VerifyDownload(bundle); err != nil {
+		_ = os.Remove(bundle)
+		forgetReadyUpdate(bundle)
+		return fmt.Errorf("staged update verification failed: %w", err)
+	}
 
 	slog.Info("starting upgrade", "app", BundlePath, "update", bundle, "pid", os.Getpid(), "log", UpgradeLogFile)
 
@@ -266,8 +273,7 @@ func DoPostUpgradeCleanup() error {
 	return os.Remove(UpgradeMarkerFile)
 }
 
-func verifyDownload() error {
-	bundle := getStagedUpdate()
+func verifyDownload(bundle string) error {
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
 	}
@@ -406,12 +412,6 @@ func DoUpgradeAtStartup() error {
 		return fmt.Errorf("unable to upgrade at startup, app in development mode")
 	}
 
-	// [Re]verify before proceeding
-	if err := VerifyDownload(); err != nil {
-		_ = os.Remove(bundle)
-		slog.Warn("verification failure", "bundle", bundle, "error", err)
-		return nil
-	}
 	slog.Info("performing update at startup", "bundle", bundle)
 	return DoUpgrade(false)
 }

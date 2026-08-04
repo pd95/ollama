@@ -124,8 +124,9 @@ func DoUpgrade(interactive bool) error {
 		return fmt.Errorf("failed to lookup downloads")
 	}
 
-	if err := VerifyDownload(); err != nil {
+	if err := VerifyDownload(bundle); err != nil {
 		_ = os.Remove(bundle)
+		forgetReadyUpdate(bundle)
 		slog.Warn("verification failure", "bundle", bundle, "error", err)
 		return fmt.Errorf("staged update verification failed: %w", err)
 	}
@@ -214,8 +215,7 @@ func DoPostUpgradeCleanup() error {
 	return nil
 }
 
-func verifyDownload() error {
-	bundle := getStagedUpdate()
+func verifyDownload(bundle string) error {
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
 	}
