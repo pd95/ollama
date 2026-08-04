@@ -206,7 +206,7 @@ func TestAffineQuantizedLinearEmbeddingAndTiedOutputMatchDequantized(t *testing.
 	for _, bits := range []int{2, 3, 4, 5, 6, 8} {
 		t.Run(strconv.Itoa(bits)+"bit", func(t *testing.T) {
 			quantized := NewQuantizedLinear(weight, nil, 64, bits, "affine")
-			dequantized := mlx.Dequantize(quantized.Weight, quantized.Scales, quantized.QBiases, 64, bits, "affine")
+			dequantized := mlx.Dequantize(quantized.Weight, quantized.Scales, quantized.QBiases, 64, bits, "affine", nil)
 			mlx.Eval(dequantized)
 
 			wantLinear := NewLinear(dequantized, nil).Forward(input).AsType(mlx.DTypeFloat32)
