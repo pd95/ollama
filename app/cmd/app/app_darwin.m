@@ -15,6 +15,7 @@ extern NSString *SystemWidePath;
 @property(strong, nonatomic) NSStatusItem *statusItem;
 @property(assign, nonatomic) BOOL updateAvailable;
 @property(assign, nonatomic) BOOL systemShutdownInProgress;
+- (BOOL)confirmUpdateInstall;
 @end
 
 @implementation AppDelegate
@@ -292,7 +293,25 @@ static NSBundle *OllamaResourceBundle(void) {
     StartUI([path UTF8String]);
 }
 
+- (BOOL)confirmUpdateInstall {
+    if (ManualUpdatesOnly()) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Install official Ollama?";
+        alert.informativeText = @"This will replace the MLX preview build with the latest official Ollama release. Features available only in this preview will no longer be available.";
+        [alert addButtonWithTitle:@"Install and Restart"];
+        [alert addButtonWithTitle:@"Cancel"];
+        [NSApp activateIgnoringOtherApps:YES];
+        if ([alert runModal] != NSAlertFirstButtonReturn) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
 - (void)startUpdate {
+    if (![self confirmUpdateInstall]) {
+        return;
+    }
     StartUpdate();
     [NSApp activateIgnoringOtherApps:YES];
 }
@@ -1011,6 +1030,17 @@ void updateAvailable() {
     dispatch_async(dispatch_get_main_queue(), ^{
       [appDelegate showUpdateAvailable];
     });
+}
+
+int confirmUpdateInstall() {
+    __block BOOL confirmed = NO;
+    if ([NSThread isMainThread]) {
+        return [appDelegate confirmUpdateInstall] ? 1 : 0;
+    }
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        confirmed = [appDelegate confirmUpdateInstall];
+    });
+    return confirmed ? 1 : 0;
 }
 
 void quit() {
