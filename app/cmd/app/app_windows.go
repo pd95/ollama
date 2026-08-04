@@ -161,6 +161,12 @@ func UpdateAvailable(ver string) error {
 	return app.t.UpdateAvailable(ver)
 }
 
+func RequestUpdateInstall() error {
+	// DoUpgrade verifies and starts the installer before exiting. Unlike the
+	// tray callback, keep the current session alive when startup fails.
+	return updater.DoUpgrade(true)
+}
+
 func osRun(shutdown func(), hasCompletedFirstRun, startHidden bool) {
 	var err error
 	app.shutdown = shutdown
@@ -172,7 +178,7 @@ func osRun(shutdown func(), hasCompletedFirstRun, startHidden bool) {
 	// Check for pending updates now that the tray is initialized.
 	// The platform-independent check in app.go fires before osRun,
 	// when app.t is still nil, so we must re-check here.
-	if updater.IsUpdatePending() {
+	if updater.ReadyUpdatePending() {
 		slog.Debug("update pending on startup, showing tray notification")
 		UpdateAvailable("")
 	}

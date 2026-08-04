@@ -29,6 +29,8 @@ import {
   updateSettings,
   getInferenceCompute,
   checkForUpdates,
+  installUpdate,
+  type UpdateCheckResult,
 } from "@/api";
 
 function AnimatedDots() {
@@ -42,6 +44,87 @@ function AnimatedDots() {
         .
       </span>
     </span>
+  );
+}
+
+export function UpdateSettingsControl({
+  manualUpdatesOnly,
+  autoUpdateEnabled,
+  isPending,
+  isInstalling,
+  result,
+  error,
+  onCheck,
+  onInstall,
+  onToggle,
+}: {
+  manualUpdatesOnly: boolean;
+  autoUpdateEnabled: boolean;
+  isPending: boolean;
+  isInstalling: boolean;
+  result?: UpdateCheckResult;
+  error?: Error | null;
+  onCheck: () => void;
+  onInstall: () => void;
+  onToggle: (checked: boolean) => void;
+}) {
+  const updateReady = manualUpdatesOnly && result?.status === "ready";
+  const manualStatus = isPending
+    ? "Ollama is checking and may be downloading the official release."
+    : error
+      ? error.message
+      : result?.status === "up_to_date"
+        ? "No newer official Ollama release is available."
+        : result?.status === "ready"
+          ? `${result.version ? `${result.version} is` : "An official Ollama update is"} downloaded and ready. Installing this update replaces the MLX preview with official Ollama. Some preview-only features will no longer be available.`
+          : undefined;
+
+  return (
+    <Field>
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start space-x-3 flex-1">
+          <ArrowDownTrayIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
+          <div>
+            <Label>
+              {manualUpdatesOnly
+                ? "Official Ollama updates"
+                : "Auto-download updates"}
+            </Label>
+            <Description>
+              {manualUpdatesOnly
+                ? "This MLX preview does not check for or download official updates automatically."
+                : autoUpdateEnabled
+                  ? "Automatically download updates when available."
+                  : "Updates will not be downloaded automatically."}
+            </Description>
+            {manualUpdatesOnly && manualStatus && (
+              <Description>{manualStatus}</Description>
+            )}
+          </div>
+        </div>
+        <div className="flex-shrink-0">
+          <div className="flex items-center gap-3">
+            <Button
+              outline
+              type="button"
+              disabled={isPending || isInstalling}
+              onClick={updateReady ? onInstall : onCheck}
+            >
+              {isInstalling
+                ? "Opening…"
+                : isPending
+                  ? "Checking…"
+                  : updateReady
+                    ? "Update now"
+                    : "Check now"}
+            </Button>
+            {!manualUpdatesOnly && (
+              <Switch checked={autoUpdateEnabled} onChange={onToggle} />
+            )}
+          </div>
+        </div>
+      </div>
+    </Field>
   );
 }
 
@@ -79,6 +162,7 @@ export default function Settings() {
   });
 
   const settings = settingsData?.settings || null;
+  const manualUpdatesOnly = settingsData?.manualUpdatesOnly ?? false;
 
   const { data: inferenceComputeResponse } = useQuery({
     queryKey: ["inferenceCompute"],
@@ -142,6 +226,13 @@ export default function Settings() {
 
   const checkForUpdatesMutation = useMutation({
     mutationFn: checkForUpdates,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+
+  const installUpdateMutation = useMutation({
+    mutationFn: installUpdate,
   });
 
   useEffect(() => {
@@ -452,39 +543,33 @@ export default function Settings() {
               </Field>
 
               {/* Auto Update */}
-              <Field>
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex items-start space-x-3 flex-1">
-                    <ArrowDownTrayIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
-                    <div>
-                      <Label>Auto-download updates</Label>
-                      <Description>
-                        {settings.AutoUpdateEnabled
-                          ? "Automatically download updates when available."
-                          : "Updates will not be downloaded automatically."}
-                      </Description>
-                    </div>
-                  </div>
-                  <div className="flex-shrink-0">
-                    <div className="flex items-center gap-3">
-                      <Button
-                        outline
-                        type="button"
-                        disabled={checkForUpdatesMutation.isPending}
-                        onClick={() => checkForUpdatesMutation.mutate()}
-                      >
-                        Check now
-                      </Button>
-                      <Switch
-                        checked={settings.AutoUpdateEnabled}
-                        onChange={(checked) =>
-                          handleChange("AutoUpdateEnabled", checked)
-                        }
-                      />
-                    </div>
-                  </div>
-                </div>
-              </Field>
+              <UpdateSettingsControl
+                manualUpdatesOnly={manualUpdatesOnly}
+                autoUpdateEnabled={settings.AutoUpdateEnabled}
+                isPending={checkForUpdatesMutation.isPending}
+                isInstalling={installUpdateMutation.isPending}
+                result={
+                  checkForUpdatesMutation.data ??
+                  (manualUpdatesOnly && settingsData?.updateReady
+                    ? {
+                        status: "ready",
+                        version: settingsData.updateVersion ?? "",
+                      }
+                    : undefined)
+                }
+                error={
+                  installUpdateMutation.error instanceof Error
+                    ? installUpdateMutation.error
+                    : checkForUpdatesMutation.error instanceof Error
+                      ? checkForUpdatesMutation.error
+                      : null
+                }
+                onCheck={() => checkForUpdatesMutation.mutate()}
+                onInstall={() => installUpdateMutation.mutate()}
+                onToggle={(checked) =>
+                  handleChange("AutoUpdateEnabled", checked)
+                }
+              />
 
               {/* Expose Ollama */}
               <Field>

@@ -112,6 +112,8 @@ type Server struct {
 	// Updater for checking and downloading updates
 	Updater             *updater.Updater
 	UpdateAvailableFunc func()
+	InstallUpdateFunc   func() error
+	installUpdateLock   sync.Mutex
 }
 
 func (s *Server) log() *slog.Logger {
@@ -291,6 +293,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/settings", handle(s.getSettings))
 	mux.Handle("POST /api/v1/settings", handle(s.settings))
 	mux.Handle("POST /api/v1/update/check", handle(s.checkForUpdates))
+	mux.Handle("POST /api/v1/update/install", handle(s.installUpdate))
 	mux.Handle("GET /api/v1/cloud", handle(s.getCloudSetting))
 	mux.Handle("POST /api/v1/cloud", handle(s.cloudSetting))
 
@@ -1453,9 +1456,13 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) error {
 	settings.Tools = s.Tools
 	settings.WorkingDir = s.WorkingDir
 
+	staged, updateReady := updater.StagedUpdate()
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(responses.SettingsResponse{
-		Settings: settings,
+		Settings:          settings,
+		ManualUpdatesOnly: updater.AutomaticUpdatesDisabled(),
+		UpdateReady:       updateReady,
+		UpdateVersion:     staged.Version,
 	})
 }
 
@@ -1483,7 +1490,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 			}
 		} else {
 			// Auto-update re-enabled: show notification if update is already staged, or trigger immediate check
-			if (updater.IsUpdatePending() || updater.UpdateDownloaded) && s.UpdateAvailableFunc != nil {
+			if updater.ReadyUpdatePending() && s.UpdateAvailableFunc != nil {
 				s.UpdateAvailableFunc()
 			} else if s.Updater != nil {
 				// Trigger the background checker to run immediately
@@ -1498,9 +1505,13 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 		s.Restart()
 	}
 
+	staged, updateReady := updater.StagedUpdate()
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(responses.SettingsResponse{
-		Settings: settings,
+		Settings:          settings,
+		ManualUpdatesOnly: updater.AutomaticUpdatesDisabled(),
+		UpdateReady:       updateReady,
+		UpdateVersion:     staged.Version,
 	})
 }
 
@@ -1509,9 +1520,42 @@ func (s *Server) checkForUpdates(w http.ResponseWriter, r *http.Request) error {
 		return fmt.Errorf("updater is not available")
 	}
 
-	s.Updater.TriggerImmediateCheck()
+	result, err := s.Updater.CheckForUpdates(r.Context())
+	if err != nil {
+		return fmt.Errorf("check for official Ollama update: %w", err)
+	}
+	if result.Status == "ready" && result.NewlyStaged && s.UpdateAvailableFunc != nil {
+		s.UpdateAvailableFunc()
+	}
 	w.Header().Set("Content-Type", "application/json")
-	return json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	return json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) installUpdate(w http.ResponseWriter, r *http.Request) error {
+	if !s.installUpdateLock.TryLock() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		return json.NewEncoder(w).Encode(map[string]string{"error": "an update installation prompt is already open"})
+	}
+	defer s.installUpdateLock.Unlock()
+	if err := r.Context().Err(); err != nil {
+		return err
+	}
+	if !updater.ReadyUpdatePending() {
+		return fmt.Errorf("no verified update is ready to install")
+	}
+	if s.InstallUpdateFunc == nil {
+		return fmt.Errorf("update installation is not available")
+	}
+	if err := s.InstallUpdateFunc(); err != nil {
+		if errors.Is(err, updater.ErrInstallCancelled) {
+			w.Header().Set("Content-Type", "application/json")
+			return json.NewEncoder(w).Encode(map[string]string{"status": "cancelled"})
+		}
+		return fmt.Errorf("install official Ollama update: %w", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]string{"status": "started"})
 }
 
 func (s *Server) cloudSetting(w http.ResponseWriter, r *http.Request) error {
