@@ -11,6 +11,9 @@ import (
 )
 
 func TestDoUpgrade(t *testing.T) {
+	oldVerifyDownload := VerifyDownload
+	VerifyDownload = func(_ string) error { return nil }
+	defer func() { VerifyDownload = oldVerifyDownload }()
 	tmpDir := t.TempDir()
 	BundlePath = filepath.Join(tmpDir, "Ollama.app")
 	appContents := filepath.Join(BundlePath, "Contents")
@@ -223,8 +226,8 @@ func TestDoUpgradeAtStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := DoUpgradeAtStartup(); err != nil {
-		t.Fatalf("unexpected error with verification failure: %s", err)
+	if err := DoUpgradeAtStartup(); err == nil || !strings.Contains(err.Error(), "verification failed") {
+		t.Fatalf("expected verification failure, got %v", err)
 	}
 	if _, err := os.Stat(bundle); err == nil {
 		t.Fatalf("unverified bundle still exists %s", bundle)
@@ -298,7 +301,7 @@ func TestVerifyDownloadFailures(t *testing.T) {
 			if err := zipCreationHelper(bundle, tt.in); err != nil {
 				t.Fatal(err)
 			}
-			err := VerifyDownload()
+			err := VerifyDownload(bundle)
 			if err == nil || !strings.Contains(err.Error(), tt.expected) {
 				t.Fatalf("expected \"%s\" got %s", tt.expected, err)
 			}

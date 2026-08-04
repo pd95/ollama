@@ -12,11 +12,16 @@
 #    VOL_NAME="$(date)" ./scripts/build_darwin.sh
 #
 VOL_NAME=${VOL_NAME:-"Ollama"}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+cd "$REPO_DIR"
+
 if [ -z "${VERSION:-}" ]; then
     VERSION=$(git describe --tags --first-parent --abbrev=7 --long --dirty --always 2>/dev/null | sed -e "s/^v//g" || true)
     VERSION=${VERSION:-0.0.0-local}
 fi
 export VERSION
+export OLLAMA_DISABLE_UPDATES=${OLLAMA_DISABLE_UPDATES:-1}
 export CGO_CFLAGS="-O3 -mmacosx-version-min=14.0"
 export CGO_CXXFLAGS="-O3 -mmacosx-version-min=14.0"
 export CGO_LDFLAGS="-mmacosx-version-min=14.0"
@@ -233,7 +238,6 @@ _codesign_one() {
 _sign_app_bundle() {
     IDENTITY=$1
 
-    _codesign_one "$IDENTITY" com.electron.ollama dist/Ollama.app/Contents/MacOS/Ollama
     _codesign_one "$IDENTITY" ai.ollama.ollama dist/Ollama.app/Contents/Resources/ollama
     _codesign_one "$IDENTITY" ai.ollama.ollama dist/Ollama.app/Contents/Resources/llama-server
     _codesign_one "$IDENTITY" ai.ollama.ollama dist/Ollama.app/Contents/Resources/llama-quantize
@@ -244,6 +248,8 @@ _sign_app_bundle() {
     done
 
     _codesign_one "$IDENTITY" com.electron.ollama dist/Ollama.app/Contents/Frameworks/Squirrel.framework/Versions/A/Squirrel
+    _codesign_one "$IDENTITY" com.github.Squirrel dist/Ollama.app/Contents/Frameworks/Squirrel.framework
+    _codesign_one "$IDENTITY" com.electron.ollama dist/Ollama.app/Contents/MacOS/Ollama
     if [ "$IDENTITY" = "-" ]; then
         codesign -f -s - --deep dist/Ollama.app
     else

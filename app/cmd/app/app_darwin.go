@@ -159,14 +159,32 @@ func StopUI() {
 
 //export StartUpdate
 func StartUpdate() {
-	if err := updater.DoUpgrade(true); err != nil {
+	if err := startUpdate(); err != nil {
 		slog.Error("upgrade failed", "error", err)
-		return
+	}
+}
+
+func startUpdate() error {
+	if err := updater.DoUpgrade(true); err != nil {
+		return err
 	}
 	slog.Debug("launching new version...")
 	// TODO - consider a timer that aborts if this takes too long and we haven't been killed yet...
 	LaunchNewApp()
 	// not reached if upgrade works, the new app will kill this process
+	return nil
+}
+
+//export ManualUpdatesOnly
+func ManualUpdatesOnly() C._Bool {
+	return C._Bool(updater.AutomaticUpdatesDisabled())
+}
+
+func RequestUpdateInstall() error {
+	if updater.AutomaticUpdatesDisabled() && C.confirmUpdateInstall() == 0 {
+		return updater.ErrInstallCancelled
+	}
+	return startUpdate()
 }
 
 //export darwinStartHiddenTasks
