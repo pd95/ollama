@@ -146,6 +146,12 @@ func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) er
 	defer spec.close()
 
 	seed, position, promptEval, err := r.prefill(ctx, session, spec)
+	if err == nil {
+		// prefill returns the decode seed as an MLX array. Keep it alive across
+		// the sweep below and for any decoder graph that still references it.
+		mlx.Pin(seed)
+		defer mlx.Unpin(seed)
+	}
 	session.inputEmbeddings = nil
 	if request.Prepared != nil {
 		request.Prepared.InputEmbeddings = nil
