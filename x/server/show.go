@@ -17,6 +17,9 @@ import (
 )
 
 func canonicalQuantType(quantType string) string {
+	if canonical := quant.Canonical(quantType); canonical != "" {
+		return canonical
+	}
 	return strings.ToLower(strings.TrimSpace(quantType))
 }
 
@@ -268,12 +271,19 @@ func getTensorInfoFromManifest(mf *manifest.Manifest) ([]api.Tensor, error) {
 					shape[i] = uint64(s)
 				}
 
-				// Quantized weights are packed into U32 words; report the
-				// logical unpacked shape. PackFactor covers every quant type
-				// the engine produces (including mxfp4) from one table.
-				packFactor := int64(quant.PackFactor(info.QuantType))
-				if packFactor > 0 && len(shape) >= 2 {
-					shape[len(shape)-1] = uint64(info.Shape[len(info.Shape)-1] * packFactor)
+				// Quantized weights are packed into U32 words. Use the exact
+				// rational expansion because 3- and 6-bit layouts do not have
+				// an integer values-per-word factor.
+				if len(shape) >= 2 {
+					packed := info.Shape[len(info.Shape)-1]
+					if packed < 0 {
+						return nil, fmt.Errorf("tensor %s has negative packed dimension %d", tensorName, packed)
+					}
+					logical, ok := quant.LogicalColumns(uint64(packed), info.QuantType)
+					if !ok {
+						return nil, fmt.Errorf("tensor %s has invalid packed dimension %d for %s", tensorName, packed, info.QuantType)
+					}
+					shape[len(shape)-1] = logical
 				}
 
 				tensors = append(tensors, api.Tensor{
@@ -401,11 +411,11 @@ func parseSafetensorsAllHeaders(r io.Reader) ([]safetensorsTensorInfo, error) {
 
 	// Parse global metadata if present
 	var globalQuantType, globalGroupSize string
+	var metadata map[string]string
 	if metaRaw, ok := header["__metadata__"]; ok {
-		var meta map[string]string
-		if json.Unmarshal(metaRaw, &meta) == nil {
-			globalQuantType = meta["quant_type"]
-			globalGroupSize = meta["group_size"]
+		if json.Unmarshal(metaRaw, &metadata) == nil {
+			globalQuantType = metadata["quant_type"]
+			globalGroupSize = metadata["group_size"]
 		}
 	}
 
@@ -433,7 +443,10 @@ func parseSafetensorsAllHeaders(r io.Reader) ([]safetensorsTensorInfo, error) {
 		}
 		info.Name = name
 
-		if globalQuantType != "" {
+		if quantType := metadata[name+".quant_type"]; quantType != "" {
+			info.QuantType = quantType
+			info.GroupSize = metadata[name+".group_size"]
+		} else if globalQuantType != "" {
 			// Use global metadata
 			info.QuantType = globalQuantType
 			info.GroupSize = globalGroupSize
@@ -488,19 +501,12 @@ func inferQuantType(header map[string]json.RawMessage, name string) string {
 	// For int8: pack=4, group=64. scale_cols = original_cols / 64 = main_cols * 4 / 64 = main_cols / 16
 	mainCols := mainInfo.Shape[len(mainInfo.Shape)-1]
 	scaleCols := scaleInfo.Shape[len(scaleInfo.Shape)-1]
-	if scaleCols == 0 {
+	if mainCols <= 0 || scaleCols <= 0 {
 		return ""
 	}
-
-	ratio := mainCols / scaleCols // main_packed_cols / scale_cols
-	// int4: ratio = (orig/8) / (orig/32) = 32/8 = 4
-	// int8: ratio = (orig/4) / (orig/64) = 64/4 = 16
-	switch ratio {
-	case 4:
-		return "int4"
-	case 16:
-		return "int8"
-	default:
+	_, bits, ok := quant.InferAffineParams(uint64(mainCols), uint64(scaleCols), 0)
+	if !ok {
 		return ""
 	}
+	return fmt.Sprintf("int%d", bits)
 }
