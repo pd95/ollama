@@ -21,6 +21,38 @@ const (
 	apertusToolOutputCloseTag = "<|tool_output_end|>"
 )
 
+type apertusGrammar struct {
+	toolOpen        string
+	toolClose       string
+	assistantOpen   string
+	assistantClose  string
+	innerOpen       string
+	innerClose      string
+	toolOutputOpen  string
+	toolOutputClose string
+}
+
+var (
+	apertusLegacyGrammar = apertusGrammar{
+		toolOpen:        apertusToolOpenTag,
+		toolClose:       apertusToolCloseTag,
+		assistantOpen:   apertusAssistantOpenTag,
+		assistantClose:  apertusAssistantCloseTag,
+		innerOpen:       apertusInnerOpenTag,
+		innerClose:      apertusInnerCloseTag,
+		toolOutputOpen:  apertusToolOutputOpenTag,
+		toolOutputClose: apertusToolOutputCloseTag,
+	}
+	apertus1p1Grammar = apertusGrammar{
+		toolOpen:       "<SPECIAL_71>",
+		toolClose:      "<SPECIAL_72>",
+		assistantOpen:  "<SPECIAL_67>",
+		assistantClose: "<SPECIAL_68>",
+		innerOpen:      "<SPECIAL_69>",
+		innerClose:     "<SPECIAL_70>",
+	}
+)
+
 type apertusParserState int
 
 const (
@@ -31,14 +63,28 @@ const (
 
 type ApertusParser struct {
 	state       apertusParserState
+	returnState apertusParserState
 	acc         strings.Builder
 	allowedTool map[string]bool
 	callIndex   int
 	thinking    bool
+	grammar     apertusGrammar
+}
+
+func newApertus1p1Parser() *ApertusParser {
+	return &ApertusParser{grammar: apertus1p1Grammar}
+}
+
+func (p *ApertusParser) parserGrammar() apertusGrammar {
+	if p.grammar.toolOpen == "" {
+		return apertusLegacyGrammar
+	}
+	return p.grammar
 }
 
 func (p *ApertusParser) Init(tools []api.Tool, lastMessage *api.Message, thinkValue *api.ThinkValue) []api.Tool {
 	p.state = apertusParserStateContent
+	p.returnState = apertusParserStateContent
 	p.acc.Reset()
 	p.allowedTool = make(map[string]bool, len(tools))
 	for _, tool := range tools {
@@ -51,6 +97,7 @@ func (p *ApertusParser) Init(tools []api.Tool, lastMessage *api.Message, thinkVa
 
 func (p *ApertusParser) Add(s string, done bool) (content string, thinking string, calls []api.ToolCall, err error) {
 	p.acc.WriteString(s)
+	tags := p.parserGrammar()
 
 	var contentSB strings.Builder
 	var thinkingSB strings.Builder
@@ -58,32 +105,33 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 		switch p.state {
 		case apertusParserStateContent:
 			current := p.acc.String()
-			innerIdx := strings.Index(current, apertusInnerOpenTag)
-			toolIdx := strings.Index(current, apertusToolOpenTag)
+			innerIdx := strings.Index(current, tags.innerOpen)
+			toolIdx := strings.Index(current, tags.toolOpen)
 			if innerIdx >= 0 && (toolIdx < 0 || innerIdx < toolIdx) {
-				before := cleanApertusContent(current[:innerIdx])
+				before := cleanApertusContentWithGrammar(current[:innerIdx], tags)
 				if before != "" {
 					contentSB.WriteString(before)
 				}
 				p.acc.Reset()
-				p.acc.WriteString(current[innerIdx+len(apertusInnerOpenTag):])
+				p.acc.WriteString(current[innerIdx+len(tags.innerOpen):])
 				p.state = apertusParserStateThinking
 				continue
 			}
 
 			if idx := toolIdx; idx >= 0 {
-				before := cleanApertusContent(current[:idx])
+				before := cleanApertusContentWithGrammar(current[:idx], tags)
 				if before != "" {
 					contentSB.WriteString(before)
 				}
 				p.acc.Reset()
-				p.acc.WriteString(current[idx+len(apertusToolOpenTag):])
+				p.acc.WriteString(current[idx+len(tags.toolOpen):])
+				p.returnState = apertusParserStateContent
 				p.state = apertusParserStateToolCalls
 				continue
 			}
 
 			if done {
-				cleaned := cleanApertusContent(current)
+				cleaned := cleanApertusContentWithGrammar(current, tags)
 				if p.looksLikeToolCall(cleaned) {
 					parsed, parseErr := p.parseToolCalls(cleaned)
 					if parseErr == nil {
@@ -101,7 +149,7 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 				return contentSB.String(), thinkingSB.String(), calls, nil
 			}
 
-			overlapLen := max(overlap(current, apertusToolOpenTag), overlap(current, apertusInnerOpenTag))
+			overlapLen := max(overlap(current, tags.toolOpen), overlap(current, tags.innerOpen))
 			emitLen := len(current) - overlapLen
 			if overlapLen == 0 {
 				wsLen := trailingWhitespaceLen(current)
@@ -112,7 +160,7 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 				if overlapLen > 0 {
 					emit = strings.TrimRightFunc(emit, unicode.IsSpace)
 				}
-				contentSB.WriteString(cleanApertusContent(emit))
+				contentSB.WriteString(cleanApertusContentWithGrammar(emit, tags))
 				keep := current[emitLen:]
 				p.acc.Reset()
 				p.acc.WriteString(keep)
@@ -120,13 +168,34 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 			return contentSB.String(), thinkingSB.String(), calls, nil
 		case apertusParserStateThinking:
 			current := p.acc.String()
-			if idx := strings.Index(current, apertusInnerCloseTag); idx >= 0 {
+			innerIdx := strings.Index(current, tags.innerClose)
+			toolIdx := strings.Index(current, tags.toolOpen)
+			assistantIdx := strings.Index(current, tags.assistantClose)
+			if toolIdx >= 0 && (innerIdx < 0 || toolIdx < innerIdx) && (assistantIdx < 0 || toolIdx < assistantIdx) {
 				if p.thinking {
-					thinkingSB.WriteString(current[:idx])
+					thinkingSB.WriteString(current[:toolIdx])
 				} else {
-					contentSB.WriteString(cleanApertusContent(current[:idx]))
+					contentSB.WriteString(cleanApertusContentWithGrammar(current[:toolIdx], tags))
 				}
-				after := strings.TrimLeftFunc(current[idx+len(apertusInnerCloseTag):], unicode.IsSpace)
+				p.acc.Reset()
+				p.acc.WriteString(current[toolIdx+len(tags.toolOpen):])
+				p.returnState = apertusParserStateThinking
+				p.state = apertusParserStateToolCalls
+				continue
+			}
+			closeIdx := innerIdx
+			closeLen := len(tags.innerClose)
+			if assistantIdx >= 0 && (closeIdx < 0 || assistantIdx < closeIdx) {
+				closeIdx = assistantIdx
+				closeLen = len(tags.assistantClose)
+			}
+			if closeIdx >= 0 {
+				if p.thinking {
+					thinkingSB.WriteString(current[:closeIdx])
+				} else {
+					contentSB.WriteString(cleanApertusContentWithGrammar(current[:closeIdx], tags))
+				}
+				after := strings.TrimLeftFunc(current[closeIdx+closeLen:], unicode.IsSpace)
 				p.acc.Reset()
 				p.acc.WriteString(after)
 				p.state = apertusParserStateContent
@@ -136,14 +205,14 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 				if p.thinking {
 					thinkingSB.WriteString(current)
 				} else {
-					contentSB.WriteString(cleanApertusContent(current))
+					contentSB.WriteString(cleanApertusContentWithGrammar(current, tags))
 				}
 				p.acc.Reset()
 				p.state = apertusParserStateContent
 				return contentSB.String(), thinkingSB.String(), calls, nil
 			}
 
-			overlapLen := overlap(current, apertusInnerCloseTag)
+			overlapLen := max(overlap(current, tags.innerClose), overlap(current, tags.toolOpen), overlap(current, tags.assistantClose))
 			emitLen := len(current) - overlapLen
 			if overlapLen == 0 {
 				emitLen = len(current) - trailingWhitespaceLen(current)
@@ -153,7 +222,7 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 				if p.thinking {
 					thinkingSB.WriteString(emit)
 				} else {
-					contentSB.WriteString(cleanApertusContent(emit))
+					contentSB.WriteString(cleanApertusContentWithGrammar(emit, tags))
 				}
 				keep := current[emitLen:]
 				p.acc.Reset()
@@ -162,39 +231,39 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 			return contentSB.String(), thinkingSB.String(), calls, nil
 		case apertusParserStateToolCalls:
 			current := p.acc.String()
-			if idx := strings.Index(current, apertusToolCloseTag); idx >= 0 {
+			if idx := strings.Index(current, tags.toolClose); idx >= 0 {
 				parsed, parseErr := p.parseToolCalls(current[:idx])
 				if parseErr != nil {
 					if isSoftApertusToolParseError(parseErr) {
-						contentSB.WriteString(cleanApertusContent(current[:idx]))
-						after := strings.TrimLeftFunc(current[idx+len(apertusToolCloseTag):], unicode.IsSpace)
+						contentSB.WriteString(cleanApertusContentWithGrammar(current[:idx], tags))
+						after := strings.TrimLeftFunc(current[idx+len(tags.toolClose):], unicode.IsSpace)
 						p.acc.Reset()
 						p.acc.WriteString(after)
-						p.state = apertusParserStateContent
+						p.state = p.returnState
 						continue
 					}
 					return "", "", nil, parseErr
 				}
 				calls = append(calls, parsed...)
-				after := strings.TrimLeftFunc(current[idx+len(apertusToolCloseTag):], unicode.IsSpace)
+				after := strings.TrimLeftFunc(current[idx+len(tags.toolClose):], unicode.IsSpace)
 				p.acc.Reset()
 				p.acc.WriteString(after)
-				p.state = apertusParserStateContent
+				p.state = p.returnState
 				continue
 			}
 			if done {
 				parsed, parseErr := p.parseToolCalls(current)
 				if parseErr != nil {
 					if isSoftApertusToolParseError(parseErr) {
-						contentSB.WriteString(cleanApertusContent(current))
+						contentSB.WriteString(cleanApertusContentWithGrammar(current, tags))
 						p.acc.Reset()
-						p.state = apertusParserStateContent
+						p.state = p.returnState
 						return contentSB.String(), thinkingSB.String(), calls, nil
 					}
 					return "", "", nil, fmt.Errorf("unterminated apertus tool call: %w", parseErr)
 				}
 				p.acc.Reset()
-				p.state = apertusParserStateContent
+				p.state = p.returnState
 				calls = append(calls, parsed...)
 				return contentSB.String(), thinkingSB.String(), calls, nil
 			}
@@ -205,13 +274,19 @@ func (p *ApertusParser) Add(s string, done bool) (content string, thinking strin
 	}
 }
 
-func cleanApertusContent(s string) string {
-	s = strings.ReplaceAll(s, apertusAssistantOpenTag, "")
-	s = strings.ReplaceAll(s, apertusAssistantCloseTag, "")
-	s = strings.ReplaceAll(s, apertusInnerOpenTag, "")
-	s = strings.ReplaceAll(s, apertusInnerCloseTag, "")
-	s = strings.ReplaceAll(s, apertusToolOutputOpenTag, "")
-	s = strings.ReplaceAll(s, apertusToolOutputCloseTag, "")
+func cleanApertusContentWithGrammar(s string, tags apertusGrammar) string {
+	for _, tag := range []string{
+		tags.assistantOpen,
+		tags.assistantClose,
+		tags.innerOpen,
+		tags.innerClose,
+		tags.toolOutputOpen,
+		tags.toolOutputClose,
+	} {
+		if tag != "" {
+			s = strings.ReplaceAll(s, tag, "")
+		}
+	}
 	return strings.TrimRightFunc(s, unicode.IsSpace)
 }
 
@@ -224,13 +299,14 @@ func (p *ApertusParser) HasThinkingSupport() bool {
 }
 
 func (p *ApertusParser) PreservedTokens() []string {
+	tags := p.parserGrammar()
 	return []string{
-		apertusToolOpenTag,
-		apertusToolCloseTag,
-		apertusAssistantOpenTag,
-		apertusAssistantCloseTag,
-		apertusInnerOpenTag,
-		apertusInnerCloseTag,
+		tags.toolOpen,
+		tags.toolClose,
+		tags.assistantOpen,
+		tags.assistantClose,
+		tags.innerOpen,
+		tags.innerClose,
 	}
 }
 
