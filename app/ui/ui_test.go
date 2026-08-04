@@ -6,9 +6,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -147,6 +150,250 @@ func TestHandlePostApiSettings(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGetSettingsReportsManualUpdatePolicy(t *testing.T) {
+	oldDisableUpdates := updater.DisableUpdates
+	oldStageDir := updater.UpdateStageDir
+	oldVerify := updater.VerifyDownload
+	defer func() {
+		updater.DisableUpdates = oldDisableUpdates
+		updater.UpdateStageDir = oldStageDir
+		updater.VerifyDownload = oldVerify
+	}()
+	updater.DisableUpdates = "true"
+	updater.UpdateStageDir = t.TempDir()
+	updater.VerifyDownload = func(_ string) error { return nil }
+	stagedDir := filepath.Join(updater.UpdateStageDir, "verified")
+	if err := os.MkdirAll(stagedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagedDir, updater.Installer), []byte("archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	testStore := &store.Store{DBPath: filepath.Join(t.TempDir(), "db.sqlite")}
+	defer testStore.Close()
+	server := &Server{Store: testStore}
+	recorder := httptest.NewRecorder()
+	if err := server.getSettings(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		ManualUpdatesOnly bool `json:"manualUpdatesOnly"`
+		UpdateReady       bool `json:"updateReady"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.ManualUpdatesOnly {
+		t.Fatal("manualUpdatesOnly = false, want true")
+	}
+	if !response.UpdateReady {
+		t.Fatal("updateReady = false, want staged update restored")
+	}
+}
+
+func TestCheckForUpdatesReturnsStructuredResults(t *testing.T) {
+	oldURL := updater.UpdateCheckURLBase
+	oldStageDir := updater.UpdateStageDir
+	oldVerify := updater.VerifyDownload
+	oldDownloaded := updater.UpdateDownloaded
+	defer func() {
+		updater.UpdateCheckURLBase = oldURL
+		updater.UpdateStageDir = oldStageDir
+		updater.VerifyDownload = oldVerify
+		updater.UpdateDownloaded = oldDownloaded
+	}()
+
+	t.Run("up to date", func(t *testing.T) {
+		service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer service.Close()
+		updater.UpdateCheckURLBase = service.URL
+
+		var trayCalls atomic.Int32
+		server := &Server{
+			Updater:             &updater.Updater{},
+			UpdateAvailableFunc: func() { trayCalls.Add(1) },
+		}
+		recorder := httptest.NewRecorder()
+		if err := server.checkForUpdates(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/update/check", nil)); err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(recorder.Body.String()) != `{"status":"up_to_date"}` {
+			t.Fatalf("response = %s", recorder.Body.String())
+		}
+		if trayCalls.Load() != 0 {
+			t.Fatal("up-to-date check activated tray")
+		}
+	})
+
+	t.Run("ready", func(t *testing.T) {
+		updater.UpdateStageDir = t.TempDir()
+		updater.UpdateDownloaded = false
+		updater.VerifyDownload = func(_ string) error { return nil }
+		var service *httptest.Server
+		service = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/update" {
+				_, _ = fmt.Fprintf(w, `{"url":%q}`, service.URL+"/v9.9.9/"+updater.Installer)
+				return
+			}
+			w.Header().Set("ETag", `"ready"`)
+			w.WriteHeader(http.StatusOK)
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte("archive"))
+			}
+		}))
+		defer service.Close()
+		updater.UpdateCheckURLBase = service.URL + "/update"
+
+		var trayCalls atomic.Int32
+		var installCalls atomic.Int32
+		server := &Server{
+			Updater:             &updater.Updater{},
+			UpdateAvailableFunc: func() { trayCalls.Add(1) },
+			InstallUpdateFunc: func() error {
+				installCalls.Add(1)
+				return nil
+			},
+		}
+		recorder := httptest.NewRecorder()
+		if err := server.checkForUpdates(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/update/check", nil)); err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(recorder.Body.String()) != `{"status":"ready","version":"v9.9.9"}` {
+			t.Fatalf("response = %s", recorder.Body.String())
+		}
+		if trayCalls.Load() != 1 {
+			t.Fatalf("tray calls = %d, want 1", trayCalls.Load())
+		}
+		installRecorder := httptest.NewRecorder()
+		if err := server.installUpdate(installRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/update/install", nil)); err != nil {
+			t.Fatal(err)
+		}
+		if installCalls.Load() != 1 {
+			t.Fatalf("install calls = %d, want 1", installCalls.Load())
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("not json"))
+		}))
+		defer service.Close()
+		updater.UpdateCheckURLBase = service.URL
+		var trayCalls atomic.Int32
+		server := &Server{Updater: &updater.Updater{}, UpdateAvailableFunc: func() { trayCalls.Add(1) }}
+		err := server.checkForUpdates(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/update/check", nil))
+		if err == nil || !strings.Contains(err.Error(), "decode update response") {
+			t.Fatalf("error = %v", err)
+		}
+		if trayCalls.Load() != 0 {
+			t.Fatal("failed check activated tray")
+		}
+	})
+}
+
+func TestConcurrentReadyChecksActivateTrayOnce(t *testing.T) {
+	oldURL := updater.UpdateCheckURLBase
+	oldStageDir := updater.UpdateStageDir
+	oldVerify := updater.VerifyDownload
+	defer func() {
+		updater.UpdateCheckURLBase = oldURL
+		updater.UpdateStageDir = oldStageDir
+		updater.VerifyDownload = oldVerify
+	}()
+	updater.UpdateStageDir = t.TempDir()
+	updater.VerifyDownload = func(_ string) error { return nil }
+	var service *httptest.Server
+	service = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/update" {
+			_, _ = fmt.Fprintf(w, `{"url":%q}`, service.URL+"/v9.9.9/"+updater.Installer)
+			return
+		}
+		w.Header().Set("ETag", `"once"`)
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte("archive"))
+		}
+	}))
+	defer service.Close()
+	updater.UpdateCheckURLBase = service.URL + "/update"
+
+	var trayCalls atomic.Int32
+	server := &Server{
+		Updater:             &updater.Updater{},
+		UpdateAvailableFunc: func() { trayCalls.Add(1) },
+	}
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			errs <- server.checkForUpdates(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/update/check", nil))
+		}()
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if trayCalls.Load() != 1 {
+		t.Fatalf("tray calls = %d, want 1", trayCalls.Load())
+	}
+}
+
+func TestInstallUpdateIsSingleFlightAndReportsResults(t *testing.T) {
+	oldStageDir := updater.UpdateStageDir
+	oldVerify := updater.VerifyDownload
+	defer func() {
+		updater.UpdateStageDir = oldStageDir
+		updater.VerifyDownload = oldVerify
+	}()
+	updater.UpdateStageDir = t.TempDir()
+	updater.VerifyDownload = func(_ string) error { return nil }
+	bundleDir := filepath.Join(updater.UpdateStageDir, "verified")
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, updater.Installer), []byte("archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := &Server{InstallUpdateFunc: func() error {
+		close(started)
+		<-release
+		return updater.ErrInstallCancelled
+	}}
+	firstRecorder := httptest.NewRecorder()
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- server.installUpdate(firstRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/update/install", nil))
+	}()
+	<-started
+
+	duplicateRecorder := httptest.NewRecorder()
+	if err := server.installUpdate(duplicateRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/update/install", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if duplicateRecorder.Code != http.StatusConflict {
+		t.Fatalf("duplicate status = %d, want 409", duplicateRecorder.Code)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(firstRecorder.Body.String()) != `{"status":"cancelled"}` {
+		t.Fatalf("cancel response = %s", firstRecorder.Body.String())
+	}
+
+	failure := &Server{InstallUpdateFunc: func() error { return errors.New("permission denied") }}
+	err := failure.installUpdate(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/update/install", nil))
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("install failure = %v", err)
 	}
 }
 
@@ -765,10 +1012,26 @@ func TestSettingsToggleAutoUpdateOn_WithPendingUpdate_ShowsNotification(t *testi
 		t.Fatal(err)
 	}
 
-	// Simulate that an update was previously downloaded
+	// Simulate a verified staged update. The in-memory downloaded flag alone is
+	// deliberately insufficient to expose a restart action.
 	oldVal := updater.UpdateDownloaded
 	updater.UpdateDownloaded = true
 	defer func() { updater.UpdateDownloaded = oldVal }()
+	oldStageDir := updater.UpdateStageDir
+	oldVerify := updater.VerifyDownload
+	updater.UpdateStageDir = t.TempDir()
+	updater.VerifyDownload = func(_ string) error { return nil }
+	defer func() {
+		updater.UpdateStageDir = oldStageDir
+		updater.VerifyDownload = oldVerify
+	}()
+	stagedDir := filepath.Join(updater.UpdateStageDir, "verified")
+	if err := os.MkdirAll(stagedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagedDir, "Ollama-darwin.zip"), []byte("archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	var notificationCalled atomic.Bool
 	server := &Server{

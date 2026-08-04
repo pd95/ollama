@@ -94,7 +94,10 @@ type ErrorEvent struct {
 }
 
 type SettingsResponse struct {
-	Settings store.Settings `json:"settings"`
+	Settings          store.Settings `json:"settings"`
+	ManualUpdatesOnly bool           `json:"manualUpdatesOnly"`
+	UpdateReady       bool           `json:"updateReady"`
+	UpdateVersion     string         `json:"updateVersion,omitempty"`
 }
 
 type HealthResponse struct {
