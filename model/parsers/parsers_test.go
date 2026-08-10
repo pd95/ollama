@@ -98,6 +98,10 @@ func TestParserPreservedTokensCoverKnownLlamaServerRegressions(t *testing.T) {
 			name: "gemma4",
 			want: []string{"<|tool_call>", "<tool_call|>"},
 		},
+		{
+			name: "apertus",
+			want: []string{"<|tools_prefix|>", "<|tools_suffix|>"},
+		},
 	}
 
 	for _, tt := range tests {

@@ -154,6 +154,15 @@ func (p *ApertusParser) HasThinkingSupport() bool {
 	return false
 }
 
+func (p *ApertusParser) PreservedTokens() []string {
+	return []string{
+		apertusToolOpenTag,
+		apertusToolCloseTag,
+		apertusAssistantOpenTag,
+		apertusAssistantCloseTag,
+	}
+}
+
 func (p *ApertusParser) parseToolCalls(raw string) ([]api.ToolCall, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
