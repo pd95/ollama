@@ -142,7 +142,7 @@ func Execute(args []string) error {
 			TopLogprobs:      request.TopLogprobs,
 		}
 
-		if err := runner.PrepareContext(r.Context(), &request); err != nil {
+		if err := runner.Prepare(&request); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

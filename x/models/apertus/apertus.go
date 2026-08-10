@@ -447,7 +447,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	return nil
 }
 
-func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
+func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (*mlx.Array, *mlx.Array) {
 	dims := b.InputIDs.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
 	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
@@ -461,7 +461,8 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
 		h = layer.Forward(h, b, c, positions, B, L, m.Config)
 	}
 
-	return mlx.Reshape(m.Norm.Forward(h, m.RMSNormEps), B, L, m.HiddenSize)
+	h = mlx.Reshape(m.Norm.Forward(h, m.RMSNormEps), B, L, m.HiddenSize)
+	return h, h
 }
 
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {

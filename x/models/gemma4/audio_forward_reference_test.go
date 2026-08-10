@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ollama/ollama/llm"
 	"github.com/ollama/ollama/x/mlxrunner/batch"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	runnermodel "github.com/ollama/ollama/x/mlxrunner/model"
@@ -168,17 +169,16 @@ func TestAudioForwardReference(t *testing.T) {
 	if importedModel := os.Getenv("GEMMA4_AUDIO_MODEL_NAME"); importedModel != "" {
 		fullModel := loadImportedGemma4ReferenceModel(t, importedModel)
 		pleIDs := intsToInt32(inputIDs.Ints())
-		for i := start; i < end; i++ {
-			pleIDs[i] = 0
-		}
 		modelBatch := &batch.Batch{
-			InputIDs:        inputIDs,
-			InputEmbeddings: finalEmbeddings,
-			PLEInputIDs:     mlx.FromValues(pleIDs, 1, len(pleIDs)),
-			SeqOffsets:      []int32{0},
-			SeqQueryLens:    []int32{int32(len(pleIDs))},
+			InputIDs:     inputIDs,
+			SeqOffsets:   []int32{0},
+			SeqQueryLens: []int32{int32(len(pleIDs))},
+			Media: []batch.MediaItem{{
+				Seq: 0, Pos: start, Features: projectedForward,
+				Opaque: &gemma4PreparedMedia{Kind: llm.MediaKindAudio, SoftTokens: end - start},
+			}},
 		}
-		hidden := fullModel.Forward(modelBatch, fullModel.NewCaches())
+		hidden, _ := fullModel.Forward(modelBatch, fullModel.NewCaches())
 		logits := fullModel.Unembed(hidden)
 		last := mlx.SliceStartStop(logits, []int32{0, int32(len(pleIDs) - 1), 0}, []int32{1, int32(len(pleIDs)), textConfig.VocabSize})
 		wantLogits := reference.Get("prefill_logits")

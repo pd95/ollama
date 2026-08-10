@@ -334,6 +334,10 @@ func (b *audioConvBlock) Forward(x *mlx.Array, valid []bool) (*mlx.Array, []bool
 
 func (m *AudioModel) Forward(input *gemma4AudioInput) *mlx.Array {
 	x := mlx.FromValues(input.Features, 1, input.Frames, 128)
+	return m.ForwardData(input, x)
+}
+
+func (m *AudioModel) ForwardData(input *gemma4AudioInput, x *mlx.Array) *mlx.Array {
 	valid := append([]bool(nil), input.FeatureMask...)
 	x = mlx.ExpandDims(x, -1)
 	x, valid = m.Conv0.Forward(x, valid)

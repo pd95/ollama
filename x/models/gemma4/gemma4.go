@@ -1100,18 +1100,15 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (hidden, auxHidden
 	dims := b.InputIDs.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
 	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
-	h := b.InputEmbeddings
-	if h == nil {
-		h = m.TokenEmbeddings(b.InputIDs)
+	h := m.TokenEmbeddings(b.InputIDs)
+	if len(b.Media) > 0 {
+		h = m.scatterMedia(h, b)
 	}
 
 	// Compute PLE inputs if configured.
 	var perLayerInputs *mlx.Array
 	if m.HiddenSizePerLayer > 0 && m.EmbedTokensPerLayer != nil {
-		pleTokens := b.InputIDs
-		if b.PLEInputIDs != nil {
-			pleTokens = b.PLEInputIDs
-		}
+		pleTokens := gemma4PLETokenIDs(b)
 		perLayerInputs = m.computePLEInputs(pleTokens, h)
 	}
 
@@ -1153,6 +1150,53 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (hidden, auxHidden
 
 	out := mlx.RMSNormFn(h, m.NormScaled, m.RMSNormEps)
 	return out, out
+}
+
+func (m *Model) scatterMedia(h *mlx.Array, b *batch.Batch) *mlx.Array {
+	for _, item := range b.Media {
+		state, ok := item.Opaque.(*gemma4PreparedMedia)
+		if !ok || state == nil || item.Features == nil {
+			continue
+		}
+		offset := int(b.SeqOffsets[item.Seq])
+		start := max(item.Pos, offset)
+		end := min(item.Pos+state.SoftTokens, offset+int(b.SeqQueryLens[item.Seq]))
+		if end <= start {
+			continue
+		}
+		features := mlx.SliceStartStop(item.Features,
+			[]int32{0, int32(start - item.Pos), 0},
+			[]int32{1, int32(end - item.Pos), int32(item.Features.Dim(2))},
+		).AsType(h.DType())
+		h = h.SliceUpdate(features,
+			mlx.Slice(item.Seq, item.Seq+1),
+			mlx.Slice(start-offset, end-offset),
+			mlx.Slice(),
+		)
+	}
+	return h
+}
+
+func gemma4PLETokenIDs(b *batch.Batch) *mlx.Array {
+	tokens := b.InputIDs
+	for _, item := range b.Media {
+		state, ok := item.Opaque.(*gemma4PreparedMedia)
+		if !ok || state == nil {
+			continue
+		}
+		offset := int(b.SeqOffsets[item.Seq])
+		start := max(item.Pos, offset)
+		end := min(item.Pos+state.SoftTokens, offset+int(b.SeqQueryLens[item.Seq]))
+		if end <= start {
+			continue
+		}
+		zeros := mlx.Zeros(mlx.DTypeInt32, 1, end-start)
+		tokens = tokens.SliceUpdate(zeros,
+			mlx.Slice(item.Seq, item.Seq+1),
+			mlx.Slice(start-offset, end-offset),
+		)
+	}
+	return tokens
 }
 
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
@@ -1455,8 +1499,11 @@ func gemma4AttentionMask(b *batch.Batch, isSliding bool) nn.AttentionMask {
 	if !isSliding {
 		return mask
 	}
-	for _, span := range b.BidirectionalSpans {
-		mask = mask.Relax(0, span.Start, span.End, span.Start, span.End)
+	for _, item := range b.Media {
+		state, ok := item.Opaque.(*gemma4PreparedMedia)
+		if ok && state != nil && state.Bidirectional {
+			mask = mask.Relax(item.Seq, item.Pos, item.Pos+state.SoftTokens, item.Pos, item.Pos+state.SoftTokens)
+		}
 	}
 	return mask
 }

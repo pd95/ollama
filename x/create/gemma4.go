@@ -73,7 +73,7 @@ func (t gemma4ImportTransform) includeTensor(name string) bool {
 }
 
 func isGemma4VisionTensor(name string) bool {
-	return isVisionTower(name) || strings.Contains(name, "embed_vision") || strings.Contains(name, "vision_embedder")
+	return isVision(name) || strings.Contains(name, "embed_vision") || strings.Contains(name, "vision_embedder")
 }
 
 func isGemma4AudioTensor(name string) bool {

@@ -23,7 +23,8 @@ import (
 var mlxTestMu sync.Mutex
 
 func forwardModel(m *Model, tokens *mlx.Array, caches []cache.Cache) *mlx.Array {
-	return m.Forward(testBatch(tokens, 0), caches)
+	h, _ := m.Forward(testBatch(tokens, 0), caches)
+	return h
 }
 
 func testBatch(tokens *mlx.Array, offset int) *batch.Batch {

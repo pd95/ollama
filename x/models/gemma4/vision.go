@@ -28,6 +28,7 @@ import (
 	"github.com/ollama/ollama/x/mlxrunner/batch"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
+	"github.com/ollama/ollama/x/mlxrunner/model/base"
 	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/models/nn"
 )
@@ -104,7 +105,30 @@ type gemma4MediaItem struct {
 	Kind  llm.MediaKind
 	Image *gemma4ImageInput
 	Audio *gemma4AudioInput
-	Span  batch.TokenSpan
+	Span  gemma4Span
+}
+
+type gemma4Span struct {
+	Start int
+	End   int
+}
+
+type gemma4PreparedMedia struct {
+	Kind          llm.MediaKind
+	Image         *gemma4ImageInput
+	Audio         *gemma4AudioInput
+	SoftTokens    int
+	Bidirectional bool
+}
+
+// legacyPreparedInput keeps the pre-v0.32.7 preparation helpers testable while
+// the runtime uses base.MediaModel. It is not part of the runner boundary.
+type legacyPreparedInput struct {
+	Tokens             []int32
+	PLEInputIDs        []int32
+	Payload            any
+	BidirectionalSpans []gemma4Span
+	InputEmbeddings    *mlx.Array
 }
 
 type gemma4MediaPayload struct {
@@ -120,7 +144,7 @@ type gemma4MediaBinding struct {
 }
 
 type gemma4MediaReplacement struct {
-	Span     batch.TokenSpan
+	Span     gemma4Span
 	Features *mlx.Array
 }
 
@@ -520,7 +544,114 @@ func (m *MultimodalEmbedder) Forward(x *mlx.Array) *mlx.Array {
 	return m.Projection.Forward(mlx.RMSNormFn(x, nil, m.Eps))
 }
 
-func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, media []llm.MediaData) (*batch.PreparedInput, error) {
+// PrepareMedia implements the upstream media preparation contract. The runner
+// has already split the prompt into ordered text and media segments.
+func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
+	prepared := &base.PreparedRequest{}
+	var aggregateSoftTokens int64
+	for source, segment := range segments {
+		if segment.Data == nil {
+			prepared.Tokens = append(prepared.Tokens, segment.Tokens...)
+			continue
+		}
+
+		state := &gemma4PreparedMedia{Kind: llm.MediaKind(segment.Kind)}
+		var sequence string
+		var mediaData []float32
+		var dims []int
+		switch state.Kind {
+		case llm.MediaKindImage:
+			if m.VisionConfig == nil || (m.Vision == nil && m.UnifiedVision == nil) || m.EmbedVision == nil {
+				return nil, errors.New("Gemma4 MLX vision weights are not loaded; recreate or pull the model with complete vision tensors")
+			}
+			image, err := preprocessGemma4Image(context.Background(), segment.Data, m.VisionConfig, int(m.VisionSoftTokens))
+			if err != nil {
+				return nil, fmt.Errorf("preprocess Gemma4 image: %w", err)
+			}
+			state.Image = image
+			state.SoftTokens = image.SoftTokens
+			state.Bidirectional = m.VisionConfig.unified()
+			sequence = m.mediaTokens.BOI + strings.Repeat(m.mediaTokens.Image, image.SoftTokens) + m.mediaTokens.EOI
+			if m.UnifiedVision != nil {
+				mediaData = image.Patches
+				dims = []int{1, image.SoftTokens, int(m.UnifiedVision.PatchDim)}
+				image.Patches = nil
+			} else {
+				mediaData = image.Pixels
+				dims = []int{1, 3, image.Height, image.Width}
+				image.Pixels = nil
+			}
+		case llm.MediaKindAudio:
+			if m.AudioConfig == nil || m.AudioProcessorConfig == nil || m.EmbedAudio == nil || (!m.AudioConfig.unified() && m.Audio == nil) {
+				return nil, errors.New("Gemma4 MLX audio weights are not loaded; recreate or pull the model with complete audio tensors")
+			}
+			audio, err := preprocessGemma4Audio(context.Background(), segment.Data, m.AudioProcessorConfig)
+			if err != nil {
+				return nil, fmt.Errorf("preprocess Gemma4 audio: %w", err)
+			}
+			state.Audio = audio
+			state.SoftTokens = audio.SoftTokens
+			sequence = m.mediaTokens.BOA + strings.Repeat(m.mediaTokens.Audio, audio.SoftTokens) + m.mediaTokens.EOA
+			mediaData = audio.Features
+			dims = []int{1, audio.Frames, audio.FeatureSize}
+			audio.Features = nil
+		default:
+			return nil, fmt.Errorf("Gemma4 MLX does not support %s inputs", segment.Kind)
+		}
+
+		aggregateSoftTokens += int64(state.SoftTokens)
+		if maxContext := m.MaxContextLength(); maxContext > 0 && aggregateSoftTokens >= int64(maxContext) {
+			return nil, fmt.Errorf("Gemma4 media requires at least %d tokens, model context length is %d", aggregateSoftTokens, maxContext)
+		}
+		expansion := m.tok.Encode(sequence, false)
+		tokenID := m.ImageTokenIDValue
+		if state.Kind == llm.MediaKindAudio {
+			tokenID = m.AudioTokenIDValue
+		}
+		start, end, err := mediaTokenSpan(expansion, tokenID)
+		if err != nil {
+			return nil, err
+		}
+		if end-start != state.SoftTokens {
+			return nil, fmt.Errorf("Gemma4 %s token count = %d, want %d", state.Kind, end-start, state.SoftTokens)
+		}
+		offset := len(prepared.Tokens)
+		prepared.Tokens = append(prepared.Tokens, expansion...)
+		prepared.Items = append(prepared.Items, base.PreparedItem{
+			Range:     [2]int{offset + start, offset + end},
+			Source:    source,
+			MediaData: mediaData,
+			Dims:      dims,
+			Opaque:    state,
+			Causal:    !state.Bidirectional,
+		})
+	}
+	return prepared, nil
+}
+
+// EncodeMedia builds a lazy feature graph for one attachment.
+func (m *Model) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
+	state := item.Opaque.(*gemma4PreparedMedia)
+	switch state.Kind {
+	case llm.MediaKindImage:
+		var encoded *mlx.Array
+		if m.UnifiedVision != nil {
+			encoded = m.UnifiedVision.ForwardData(state.Image, data)
+		} else {
+			encoded = m.Vision.ForwardData(state.Image, data)
+		}
+		return m.EmbedVision.Forward(encoded)
+	case llm.MediaKindAudio:
+		if m.AudioConfig.unified() {
+			return m.EmbedAudio.Forward(data)
+		}
+		return m.EmbedAudio.Forward(m.Audio.ForwardData(state.Audio, data))
+	default:
+		panic("unsupported Gemma4 media kind")
+	}
+}
+
+func (m *Model) prepareLegacyMediaPrompt(ctx context.Context, prompt string, media []llm.MediaData) (*legacyPreparedInput, error) {
 	bindings, err := bindGemma4Media(prompt, media)
 	if err != nil {
 		return nil, err
@@ -578,7 +709,7 @@ func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, media []l
 	}
 
 	pleIDs := append([]int32(nil), tokens...)
-	var bidirectionalSpans []batch.TokenSpan
+	var bidirectionalSpans []gemma4Span
 	for _, item := range items {
 		for i := item.Span.Start; i < item.Span.End; i++ {
 			pleIDs[i] = 0
@@ -587,7 +718,7 @@ func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, media []l
 			bidirectionalSpans = append(bidirectionalSpans, item.Span)
 		}
 	}
-	prepared := &batch.PreparedInput{
+	prepared := &legacyPreparedInput{
 		Tokens:             tokens,
 		PLEInputIDs:        pleIDs,
 		Payload:            &gemma4MediaPayload{Items: items},
@@ -596,7 +727,7 @@ func (m *Model) PrepareMediaPrompt(ctx context.Context, prompt string, media []l
 	return prepared, nil
 }
 
-func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.PreparedInput) error {
+func (m *Model) prepareLegacyMediaEmbeddings(ctx context.Context, prepared *legacyPreparedInput) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -713,7 +844,7 @@ func (m *Model) PrepareMediaEmbeddings(ctx context.Context, prepared *batch.Prep
 	return nil
 }
 
-func validateGemma4MediaPayload(prepared *batch.PreparedInput) (*gemma4MediaPayload, error) {
+func validateGemma4MediaPayload(prepared *legacyPreparedInput) (*gemma4MediaPayload, error) {
 	if prepared == nil {
 		return nil, errors.New("invalid nil Gemma4 prepared input")
 	}
@@ -889,7 +1020,7 @@ func assignGemma4MediaSpans(tokens []int32, bindings []gemma4MediaBinding, image
 		return nil, fmt.Errorf("Gemma4 image and audio token IDs must differ, both are %d", imageTokenID)
 	}
 
-	var imageSpans, audioSpans []batch.TokenSpan
+	var imageSpans, audioSpans []gemma4Span
 	if hasImage {
 		imageSpans = mediaTokenSpans(tokens, imageTokenID)
 	}
@@ -901,7 +1032,7 @@ func assignGemma4MediaSpans(tokens []int32, bindings []gemma4MediaBinding, image
 	previousEnd := 0
 	for _, binding := range bindings {
 		item := binding.Item
-		var span batch.TokenSpan
+		var span gemma4Span
 		var softTokens int
 		switch item.Kind {
 		case llm.MediaKindImage:
@@ -1257,8 +1388,8 @@ func mediaTokenSpan(tokens []int32, mediaTokenID int32) (int, int, error) {
 	return spans[0].Start, spans[0].End, nil
 }
 
-func mediaTokenSpans(tokens []int32, mediaTokenID int32) []batch.TokenSpan {
-	var spans []batch.TokenSpan
+func mediaTokenSpans(tokens []int32, mediaTokenID int32) []gemma4Span {
+	var spans []gemma4Span
 	for i := 0; i < len(tokens); {
 		if tokens[i] != mediaTokenID {
 			i++
@@ -1268,7 +1399,7 @@ func mediaTokenSpans(tokens []int32, mediaTokenID int32) []batch.TokenSpan {
 		for i < len(tokens) && tokens[i] == mediaTokenID {
 			i++
 		}
-		spans = append(spans, batch.TokenSpan{Start: start, End: i})
+		spans = append(spans, gemma4Span{Start: start, End: i})
 	}
 	return spans
 }
@@ -1279,6 +1410,10 @@ func imageTokenSpan(tokens []int32, imageTokenID int32) (int, int, error) {
 
 func (m *VisionModel) Forward(img *gemma4ImageInput) *mlx.Array {
 	pixels := mlx.FromValues(img.Pixels, 1, 3, img.Height, img.Width)
+	return m.ForwardData(img, pixels)
+}
+
+func (m *VisionModel) ForwardData(img *gemma4ImageInput, pixels *mlx.Array) *mlx.Array {
 	positions := m.positionArrays(img)
 	h := m.PatchEmbedder.Forward(pixels, positions)
 	for _, layer := range m.Layers {
@@ -1293,6 +1428,10 @@ func (m *VisionModel) Forward(img *gemma4ImageInput) *mlx.Array {
 
 func (m *UnifiedVisionEmbedder) Forward(img *gemma4ImageInput) *mlx.Array {
 	patches := mlx.FromValues(img.Patches, 1, img.SoftTokens, int(m.PatchDim))
+	return m.ForwardData(img, patches)
+}
+
+func (m *UnifiedVisionEmbedder) ForwardData(img *gemma4ImageInput, patches *mlx.Array) *mlx.Array {
 	hidden := m.PatchLN1.Forward(patches)
 	hidden = m.PatchDense.Forward(hidden)
 	hidden = m.PatchLN2.Forward(hidden)
@@ -1477,12 +1616,4 @@ func (m *VisionModel) pool(hidden *mlx.Array, patchH, patchW int32) *mlx.Array {
 	return mlx.MulScalar(x, float32(math.Sqrt(float64(m.Config.HiddenSize))))
 }
 
-// Compile-time checks for the media hooks used by x/mlxrunner.
-var (
-	_ interface {
-		PrepareMediaPrompt(context.Context, string, []llm.MediaData) (*batch.PreparedInput, error)
-	} = (*Model)(nil)
-	_ interface {
-		PrepareMediaEmbeddings(context.Context, *batch.PreparedInput) error
-	} = (*Model)(nil)
-)
+var _ base.MediaModel = (*Model)(nil)

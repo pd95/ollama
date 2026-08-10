@@ -10,7 +10,9 @@ import (
 )
 
 func TestGemma4UnifiedVisionMaskOnlyRelaxesSlidingAttention(t *testing.T) {
-	b := &batch.Batch{BidirectionalSpans: []batch.TokenSpan{{Start: 4, End: 12}}}
+	b := &batch.Batch{Media: []batch.MediaItem{{
+		Seq: 0, Pos: 4, Opaque: &gemma4PreparedMedia{SoftTokens: 8, Bidirectional: true},
+	}}}
 	if gemma4AttentionMask(b, true).IsCausal() {
 		t.Fatal("sliding vision mask remained pure causal")
 	}

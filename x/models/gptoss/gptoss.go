@@ -955,9 +955,9 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	return nil
 }
 
-func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
+func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (*mlx.Array, *mlx.Array) {
 	if m == nil || m.Config == nil || m.EmbedTokens == nil || m.Norm == nil || b == nil || b.InputIDs == nil {
-		return nil
+		return nil, nil
 	}
 
 	dims := b.InputIDs.Dims()
@@ -966,7 +966,8 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) *mlx.Array {
 	}
 
 	batchSize, seqLen := dims[0], dims[1]
-	return m.forwardDense(b, caches, batchSize, seqLen)
+	h := m.forwardDense(b, caches, batchSize, seqLen)
+	return h, h
 }
 
 func (m *Model) forwardDense(b *batch.Batch, caches []cache.Cache, batchSize, seqLen int) *mlx.Array {
