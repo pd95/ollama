@@ -173,6 +173,11 @@ func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *specu
 		n = media.extendChunk(position, n)
 
 		chunkIDs := mlx.FromValues(tokens[processed:processed+n], 1, n)
+		// A discrete media tokenizer may evaluate and sweep bounded
+		// intermediates in EncodeMedia. Keep the already-created token input
+		// alive across that call; the consuming forward still owns its normal
+		// evaluation lifetime below.
+		mlx.Pin(chunkIDs)
 		manifest := media.batchMedia(position, n)
 		_, auxHidden := r.Model.Forward(&batch.Batch{
 			InputIDs:     chunkIDs,
@@ -184,7 +189,7 @@ func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *specu
 		// Report to the drafter only after the chunk's eval: a draft flush
 		// evaluates, and an eval before the sweep cannot free any buffer the
 		// chunk's live handles retain — on media chunks, the whole vision tower.
-		mlx.Pin(chunkIDs, auxHidden)
+		mlx.Pin(auxHidden)
 		mlx.Sweep()
 		materializeCaches()
 		spec.committed(chunkIDs, auxHidden, position, manifest)

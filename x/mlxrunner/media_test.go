@@ -1,6 +1,7 @@
 package mlxrunner
 
 import (
+	"runtime"
 	"slices"
 	"testing"
 
@@ -80,6 +81,51 @@ func TestExtendChunkSeparatesSerialMedia(t *testing.T) {
 type encodeCountingModel struct {
 	stubMediaModel
 	calls *int
+}
+
+type sweepingEncodeModel struct{ stubMediaModel }
+
+func (sweepingEncodeModel) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
+	features := mlx.AddScalar(data, 1)
+	mlx.Eval(features)
+	mlx.Pin(features)
+	mlx.Sweep()
+	mlx.Unpin(features)
+	return features
+}
+
+func TestBatchMediaAllowsBoundedEncoderSweep(t *testing.T) {
+	skipIfNoMLX(t)
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if mlx.GPUIsAvailable() {
+		mlx.SetDefaultDeviceGPU()
+	}
+
+	// prefill pins this token array before calling batchMedia. A discrete
+	// media encoder may then sweep its evaluated tokenizer graph without
+	// invalidating the live input to the consuming forward.
+	inputIDs := mlx.FromValues([]int32{1, 2}, 1, 2)
+	mlx.Pin(inputIDs)
+	defer mlx.Unpin(inputIDs)
+
+	prepared := &base.PreparedItem{
+		Range:     [2]int{0, 1},
+		MediaData: []float32{1},
+		Dims:      []int{1},
+	}
+	r := &Runner{Model: sweepingEncodeModel{}}
+	m := r.openMedia(Request{
+		Tokens:     []int32{1, 2},
+		MediaItems: []mediaItem{{pos: 0, length: 1, item: prepared}},
+	})
+	defer m.close()
+	if items := m.batchMedia(0, 1); len(items) != 1 || items[0].Features == nil {
+		t.Fatalf("media manifest = %+v", items)
+	}
+	if !inputIDs.Valid() || inputIDs.NumDims() != 2 {
+		t.Fatal("bounded media encoder sweep invalidated pinned prefill input")
+	}
 }
 
 func (m encodeCountingModel) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
