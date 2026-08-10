@@ -360,7 +360,14 @@ func (v *VisionTokenizer) encode(ctx context.Context, pixels []float32, width, h
 	if len(pixels) != width*height*3 {
 		return nil, errors.New("invalid Apertus image pixels")
 	}
-	x := mlx.Reshape(mlx.FromValues(pixels, len(pixels)), 1, int32(height), int32(width), 3)
+	return v.encodeData(ctx, mlx.FromValues(pixels, len(pixels)), width, height)
+}
+
+func (v *VisionTokenizer) encodeData(ctx context.Context, pixels *mlx.Array, width, height int) (*mlx.Array, error) {
+	if pixels == nil || pixels.Size() != width*height*3 {
+		return nil, errors.New("invalid Apertus image pixels")
+	}
+	x := mlx.Reshape(pixels, 1, int32(height), int32(width), 3)
 	h := v.convIn.forward(x)
 	if err := materializeApertusVision(ctx, h); err != nil {
 		return nil, err

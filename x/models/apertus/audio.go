@@ -280,11 +280,18 @@ func (a *AudioTokenizer) encode(ctx context.Context, samples []float32) (*mlx.Ar
 	if len(samples) == 0 {
 		return nil, errors.New("empty Apertus audio")
 	}
-	x := mlx.Reshape(mlx.FromValues(samples, len(samples)), 1, int32(len(samples)), 1)
+	return a.encodeData(ctx, mlx.FromValues(samples, len(samples)))
+}
+
+func (a *AudioTokenizer) encodeData(ctx context.Context, samples *mlx.Array) (*mlx.Array, error) {
+	if samples == nil || samples.Size() == 0 {
+		return nil, errors.New("empty Apertus audio")
+	}
+	x := mlx.Reshape(samples, 1, int32(samples.Size()), 1)
 	h := a.initial.forward(x)
 	mlx.Eval(h)
 	if h.Dim(1) == 0 {
-		return nil, fmt.Errorf("Apertus audio initial convolution produced an empty sequence from %d samples", len(samples))
+		return nil, fmt.Errorf("Apertus audio initial convolution produced an empty sequence from %d samples", samples.Size())
 	}
 	for i := range a.residuals {
 		if err := ctx.Err(); err != nil {

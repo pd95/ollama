@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/ollama/ollama/llm"
-	"github.com/ollama/ollama/x/mlxrunner/batch"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 )
 
@@ -80,7 +79,7 @@ func TestAssignTokenSpansMixedKinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []batch.TokenSpan{{Start: 1, End: 3}, {Start: 4, End: 7}, {Start: 8, End: 9}}
+	want := []Span{{Start: 1, End: 3}, {Start: 4, End: 7}, {Start: 8, End: 9}}
 	for i := range want {
 		if items[i].Span != want[i] || items[i].ID != bindings[i].Media.ID {
 			t.Fatalf("item %d = %#v, want span %#v", i, items[i], want[i])
@@ -110,8 +109,8 @@ func TestAssignTokenSpansMixedKinds(t *testing.T) {
 
 func TestValidateItems(t *testing.T) {
 	valid := []Item{
-		{ID: 1, Kind: llm.MediaKindImage, Span: batch.TokenSpan{Start: 1, End: 3}, ExpectedTokens: 2},
-		{ID: 0, Kind: llm.MediaKindAudio, Span: batch.TokenSpan{Start: 4, End: 5}, ExpectedTokens: 1},
+		{ID: 1, Kind: llm.MediaKindImage, Span: Span{Start: 1, End: 3}, ExpectedTokens: 2},
+		{ID: 0, Kind: llm.MediaKindAudio, Span: Span{Start: 4, End: 5}, ExpectedTokens: 1},
 	}
 	if err := ValidateItems(valid, 6); err != nil {
 		t.Fatal(err)
@@ -142,8 +141,8 @@ func TestMergeEmbeddingsOrdered(t *testing.T) {
 	}
 	embeddings := mlx.FromValues([]float32{0, 1, 2, 3, 4, 5, 6, 7}, 1, 4, 2)
 	replacements := []Replacement{
-		{Span: batch.TokenSpan{Start: 1, End: 2}, Features: mlx.FromValues([]float32{10, 11}, 1, 1, 2)},
-		{Span: batch.TokenSpan{Start: 3, End: 4}, Features: mlx.FromValues([]float32{20, 21}, 1, 1, 2)},
+		{Span: Span{Start: 1, End: 2}, Features: mlx.FromValues([]float32{10, 11}, 1, 1, 2)},
+		{Span: Span{Start: 3, End: 4}, Features: mlx.FromValues([]float32{20, 21}, 1, 1, 2)},
 	}
 	got, err := MergeEmbeddings(embeddings, 4, replacements)
 	if err != nil {
@@ -159,8 +158,8 @@ func TestMergeEmbeddingsOrdered(t *testing.T) {
 		want string
 	}{
 		{name: "empty", want: "no embedding"},
-		{name: "overlap", reps: []Replacement{replacements[0], {Span: batch.TokenSpan{Start: 1, End: 3}, Features: mlx.FromValues(make([]float32, 4), 1, 2, 2)}}, want: "overlapping"},
-		{name: "shape", reps: []Replacement{{Span: batch.TokenSpan{Start: 1, End: 2}, Features: mlx.FromValues(make([]float32, 3), 1, 1, 3)}}, want: "shape"},
+		{name: "overlap", reps: []Replacement{replacements[0], {Span: Span{Start: 1, End: 3}, Features: mlx.FromValues(make([]float32, 4), 1, 2, 2)}}, want: "overlapping"},
+		{name: "shape", reps: []Replacement{{Span: Span{Start: 1, End: 2}, Features: mlx.FromValues(make([]float32, 3), 1, 1, 3)}}, want: "shape"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := MergeEmbeddings(embeddings, 4, tc.reps)

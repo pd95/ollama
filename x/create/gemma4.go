@@ -64,7 +64,7 @@ func (t gemma4ImportTransform) quantizationType(name string, shape []int32, quan
 		if !strings.HasSuffix(name, ".weight") {
 			return ""
 		}
-		eligible := getEligibleTensorQuantization(name, shape, quantize)
+		eligible := gemma4MediaQuantization(name, shape, quantize)
 		if eligible == "" {
 			return ""
 		}
@@ -93,6 +93,24 @@ func (t gemma4ImportTransform) quantizationType(name string, shape []int32, quan
 		// policy; everything else quantizes at the requested type.
 		return GetTensorQuantization(name, shape, quantize)
 	}
+}
+
+func gemma4MediaQuantization(name string, shape []int32, quantize string) string {
+	if len(shape) != 2 || int64(shape[0])*int64(shape[1]) < 1024 {
+		return ""
+	}
+	base := normalizeQuantType(quantize)
+	if !isAligned(shape, base) {
+		return ""
+	}
+	if base == "int4" || base == "nvfp4" || base == "mxfp4" {
+		if strings.Contains(name, ".v_proj") || strings.Contains(name, ".k_proj") || strings.Contains(name, "down_proj") {
+			if promoted := eightBit(base); isAligned(shape, promoted) {
+				return promoted
+			}
+		}
+	}
+	return base
 }
 
 func (t gemma4ImportTransform) includeTensor(name string) bool {

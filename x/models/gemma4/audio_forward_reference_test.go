@@ -190,7 +190,8 @@ func TestAudioForwardReference(t *testing.T) {
 				Opaque: &gemma4PreparedMedia{Kind: llm.MediaKindAudio, SoftTokens: end - start},
 			}},
 		}
-		hidden, _ := fullModel.Forward(modelBatch, fullModel.NewCaches())
+		caches := fullModel.NewCaches()
+		hidden, _ := fullModel.Forward(modelBatch, caches)
 		logits := fullModel.Unembed(hidden)
 		last := mlx.SliceStartStop(logits, []int32{0, int32(len(pleIDs) - 1), 0}, []int32{1, int32(len(pleIDs)), textConfig.VocabSize})
 		wantLogits := reference.Get("prefill_logits")
@@ -268,17 +269,28 @@ func TestLanguageForwardReference(t *testing.T) {
 	}
 
 	pleIDs := intsToInt32(inputIDs.Ints())
-	for i, token := range pleIDs {
-		if token == model.AudioTokenIDValue || token == model.ImageTokenIDValue {
-			pleIDs[i] = 0
-		}
-	}
 	modelBatch := &batch.Batch{
-		InputIDs:        inputIDs,
-		InputEmbeddings: referenceEmbeddings,
-		PLEInputIDs:     mlx.FromValues(pleIDs, 1, len(pleIDs)),
-		SeqOffsets:      []int32{0},
-		SeqQueryLens:    []int32{int32(len(pleIDs))},
+		InputIDs:     inputIDs,
+		SeqOffsets:   []int32{0},
+		SeqQueryLens: []int32{int32(len(pleIDs))},
+	}
+	for _, spec := range []struct {
+		kind  llm.MediaKind
+		token int32
+	}{
+		{llm.MediaKindImage, model.ImageTokenIDValue},
+		{llm.MediaKindAudio, model.AudioTokenIDValue},
+	} {
+		for _, span := range mediaTokenSpans(pleIDs, spec.token) {
+			features := mlx.SliceStartStop(referenceEmbeddings,
+				[]int32{0, int32(span.Start), 0},
+				[]int32{1, int32(span.End), int32(referenceEmbeddings.Dim(2))},
+			)
+			modelBatch.Media = append(modelBatch.Media, batch.MediaItem{
+				Seq: 0, Pos: span.Start, Features: features,
+				Opaque: &gemma4PreparedMedia{Kind: spec.kind, SoftTokens: span.End - span.Start, Bidirectional: spec.kind == llm.MediaKindImage && model.VisionConfig.unified()},
+			})
+		}
 	}
 	for name, got := range gemma4FirstLayerReference(model, modelBatch) {
 		observeAudioReference(t, name, got, reference.Get(name), 0.5, 0.05)
@@ -433,7 +445,7 @@ func compareGreedyDecodeReference(t *testing.T, m *Model, promptLength int, cach
 		}
 
 		inputToken := mlx.FromValues([]int32{int32(gotToken)}, 1, 1)
-		hidden := m.Forward(&batch.Batch{
+		hidden, _ := m.Forward(&batch.Batch{
 			InputIDs:     inputToken,
 			SeqOffsets:   []int32{int32(promptLength + step)},
 			SeqQueryLens: []int32{1},
@@ -458,7 +470,11 @@ func gemma4FirstLayerReference(m *Model, b *batch.Batch) map[string]*mlx.Array {
 	B, L := int32(dims[0]), int32(dims[1])
 	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
 	layer := m.Layers[0]
-	inputNorm := mlx.RMSNormFn(b.InputEmbeddings, layer.InputNormScaled, m.RMSNormEps)
+	h := m.TokenEmbeddings(b.InputIDs)
+	if len(b.Media) > 0 {
+		h = m.scatterMedia(h, b)
+	}
+	inputNorm := mlx.RMSNormFn(h, layer.InputNormScaled, m.RMSNormEps)
 	attentionLayer := layer.Attention
 	headDim := m.HeadDim
 	qProjection := attentionLayer.QProj.Forward(inputNorm)
@@ -480,7 +496,7 @@ func gemma4FirstLayerReference(m *Model, b *batch.Batch) map[string]*mlx.Array {
 	attentionMerged := mlx.Reshape(mlx.Transpose(attentionHeads, 0, 2, 1, 3), B, L, m.NumAttentionHeads*headDim)
 	attention := attentionLayer.OProj.Forward(attentionMerged)
 	postAttention := mlx.RMSNormFn(attention, layer.PostAttnNormScaled, m.RMSNormEps)
-	attentionResidual := mlx.Add(b.InputEmbeddings, postAttention)
+	attentionResidual := mlx.Add(h, postAttention)
 	preFF := mlx.RMSNormFn(attentionResidual, layer.PreFFNormScaled, m.RMSNormEps)
 	mlp := layer.MLP.Forward(preFF)
 	postFF := mlx.RMSNormFn(mlp, layer.PostFFNormScaled, m.RMSNormEps)
@@ -514,17 +530,14 @@ func forwardGemma4ReferenceLayers(m *Model, b *batch.Batch, caches []cache.Cache
 	dims := b.InputIDs.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
 	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
-	h := b.InputEmbeddings
-	if h == nil {
-		h = m.TokenEmbeddings(b.InputIDs)
+	h := m.TokenEmbeddings(b.InputIDs)
+	if len(b.Media) > 0 {
+		h = m.scatterMedia(h, b)
 	}
 
 	var perLayerInputs *mlx.Array
 	if m.HiddenSizePerLayer > 0 && m.EmbedTokensPerLayer != nil {
-		pleTokens := b.InputIDs
-		if b.PLEInputIDs != nil {
-			pleTokens = b.PLEInputIDs
-		}
+		pleTokens := gemma4PLETokenIDs(b)
 		perLayerInputs = m.computePLEInputs(pleTokens, h)
 	}
 

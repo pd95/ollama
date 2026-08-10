@@ -46,6 +46,11 @@ type PreparedItem struct {
 	// may split it. Unset, the first evaluation covers the whole
 	// expansion in one forward, as bidirectional runs require.
 	Causal bool
+
+	// Serial prevents another serial media item from entering the same
+	// prefill forward. Models with bounded, eagerly evaluated tokenizers use
+	// this to keep peak encoder memory independent of attachment count.
+	Serial bool
 }
 
 // PreparedRequest is the expanded input stream, every media segment's
@@ -69,8 +74,9 @@ type MediaModel interface {
 	// recomputed state.
 	PrepareMedia(segments []Segment) (*PreparedRequest, error)
 
-	// EncodeMedia builds one item's lazy feature graph on the MLX thread;
-	// it must not evaluate — the consuming forward's evaluation pulls it.
+	// EncodeMedia builds one item's feature graph on the MLX thread. Most
+	// models leave it lazy so the consuming forward pulls evaluation; discrete
+	// tokenizers may evaluate bounded intermediates before returning.
 	// Read the pixels from data: the runner frees the item's MediaData
 	// once its expansion is evaluated.
 	EncodeMedia(item *PreparedItem, data *mlx.Array) *mlx.Array

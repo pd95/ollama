@@ -59,6 +59,22 @@ func TestExtendChunk(t *testing.T) {
 	}
 }
 
+func TestExtendChunkSeparatesSerialMedia(t *testing.T) {
+	m := &requestMedia{
+		items: []mediaItem{
+			{pos: 5, length: 4, serial: true, item: &base.PreparedItem{Causal: true}},
+			{pos: 12, length: 3, serial: true, item: &base.PreparedItem{Causal: true}},
+		},
+		inputLen: 20,
+	}
+	if got := m.extendChunk(0, 18); got != 12 {
+		t.Fatalf("first serial chunk = %d, want 12", got)
+	}
+	if got := m.extendChunk(12, 6); got != 6 {
+		t.Fatalf("second serial chunk = %d, want 6", got)
+	}
+}
+
 // encodeCountingModel counts EncodeMedia calls and returns a real array so
 // the pin/release lifecycle runs against live handles.
 type encodeCountingModel struct {

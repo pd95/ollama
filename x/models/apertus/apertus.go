@@ -633,11 +633,9 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (*mlx.Array, *mlx.
 	B, L := int32(dims[0]), int32(dims[1])
 	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
 
-	var h *mlx.Array
-	if b.InputEmbeddings != nil {
-		h = mlx.Reshape(b.InputEmbeddings, B, L, m.HiddenSize)
-	} else {
-		h = mlx.Reshape(m.EmbedTokens.Forward(b.InputIDs), B, L, m.HiddenSize)
+	h := mlx.Reshape(m.EmbedTokens.Forward(b.InputIDs), B, L, m.HiddenSize)
+	if len(b.Media) > 0 {
+		h = m.scatterMedia(h, b)
 	}
 	for i, layer := range m.Layers {
 		var c cache.Cache
@@ -649,6 +647,38 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (*mlx.Array, *mlx.
 
 	h = mlx.Reshape(m.Norm.Forward(h, m.RMSNormEps), B, L, m.HiddenSize)
 	return h, h
+}
+
+func (m *Model) scatterMedia(h *mlx.Array, b *batch.Batch) *mlx.Array {
+	for _, item := range b.Media {
+		state, ok := item.Opaque.(*apertusPreparedMedia)
+		if !ok || state == nil || item.Features == nil {
+			continue
+		}
+		sequenceOffset := int(b.SeqOffsets[item.Seq])
+		queryEnd := sequenceOffset + int(b.SeqQueryLens[item.Seq])
+		featureOffset := 0
+		for _, span := range state.spans {
+			count := span.End - span.Start
+			spanStart := item.Pos + span.Start
+			spanEnd := item.Pos + span.End
+			start := max(spanStart, sequenceOffset)
+			end := min(spanEnd, queryEnd)
+			if end > start {
+				features := mlx.SliceStartStop(item.Features,
+					[]int32{0, int32(featureOffset + start - spanStart), 0},
+					[]int32{1, int32(featureOffset + end - spanStart), int32(item.Features.Dim(2))},
+				).AsType(h.DType())
+				h = h.SliceUpdate(features,
+					mlx.Slice(item.Seq, item.Seq+1),
+					mlx.Slice(start-sequenceOffset, end-sequenceOffset),
+					mlx.Slice(),
+				)
+			}
+			featureOffset += count
+		}
+	}
+	return h
 }
 
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {

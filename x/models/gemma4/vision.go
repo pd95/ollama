@@ -15,7 +15,10 @@ import (
 	_ "image/png"
 	"io"
 	"math"
+	"regexp"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 
 	xdraw "golang.org/x/image/draw"
@@ -99,7 +102,8 @@ type gemma4ImageInput struct {
 }
 
 type gemma4MediaItem struct {
-	mlxmedia.Item
+	ID    int
+	Kind  llm.MediaKind
 	Image *gemma4ImageInput
 	Audio *gemma4AudioInput
 	Span  gemma4Span
@@ -734,14 +738,13 @@ func (m *Model) prepareLegacyMediaPrompt(ctx context.Context, prompt string, med
 		return nil, fmt.Errorf("Gemma4 media prompt: %w", err)
 	}
 
-	payloadItems := make([]gemma4MediaItem, len(bindings))
-	aggregateSoftTokens := 0
+	var aggregateSoftTokens int64
 	for i := range bindings {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
-		item := gemma4MediaItem{Item: mlxmedia.Item{ID: bindings[i].Media.ID, Kind: bindings[i].Media.Kind}}
+		item := gemma4MediaItem{ID: bindings[i].Media.ID, Kind: bindings[i].Media.Kind}
 		var softTokens int
 		switch bindings[i].Media.Kind {
 		case llm.MediaKindImage:
@@ -769,32 +772,21 @@ func (m *Model) prepareLegacyMediaPrompt(ctx context.Context, prompt string, med
 		default:
 			return nil, fmt.Errorf("Gemma4 MLX does not support %s inputs", bindings[i].Media.Kind)
 		}
-		aggregateSoftTokens, err = mlxmedia.AddTokenBudget(aggregateSoftTokens, softTokens)
-		if err != nil {
-			return nil, fmt.Errorf("Gemma4 media token budget: %w", err)
-		}
-		if maxContext := m.MaxContextLength(); maxContext > 0 && aggregateSoftTokens >= maxContext {
+		aggregateSoftTokens += int64(softTokens)
+		if maxContext := m.MaxContextLength(); maxContext > 0 && aggregateSoftTokens >= int64(maxContext) {
 			return nil, fmt.Errorf("Gemma4 media requires at least %d tokens, model context length is %d", aggregateSoftTokens, m.MaxContextLength())
 		}
-		bindings[i].ExpectedTokens = softTokens
-		item.ExpectedTokens = softTokens
-		payloadItems[i] = item
+		bindings[i].Item = item
 	}
 
-	expanded, err := mlxmedia.ExpandPrompt(prompt, bindings)
+	expanded, err := expandGemma4MediaPrompt(prompt, bindings)
 	if err != nil {
-		return nil, fmt.Errorf("Gemma4 media prompt: %w", err)
+		return nil, err
 	}
 	tokens := m.tok.Encode(expanded, m.tok.AddBOS())
-	sharedItems, err := mlxmedia.AssignTokenSpans(tokens, bindings, map[llm.MediaKind]int32{
-		llm.MediaKindImage: m.ImageTokenIDValue,
-		llm.MediaKindAudio: m.AudioTokenIDValue,
-	})
+	items, err := assignGemma4MediaSpans(tokens, bindings, m.ImageTokenIDValue, m.AudioTokenIDValue)
 	if err != nil {
-		return nil, fmt.Errorf("Gemma4 media prompt: %w", err)
-	}
-	for i := range payloadItems {
-		payloadItems[i].Item = sharedItems[i]
+		return nil, err
 	}
 
 	pleIDs := append([]int32(nil), tokens...)
@@ -810,7 +802,7 @@ func (m *Model) prepareLegacyMediaPrompt(ctx context.Context, prompt string, med
 	prepared := &legacyPreparedInput{
 		Tokens:             tokens,
 		PLEInputIDs:        pleIDs,
-		Payload:            &gemma4MediaPayload{Items: payloadItems},
+		Payload:            &gemma4MediaPayload{Items: items},
 		BidirectionalSpans: bidirectionalSpans,
 	}
 	return prepared, nil
@@ -912,7 +904,9 @@ func (m *Model) prepareLegacyMediaEmbeddings(ctx context.Context, prepared *lega
 		}
 		mlx.Pin(features)
 		pinnedOutputs = append(pinnedOutputs, features)
-		replacements = append(replacements, mlxmedia.Replacement{Span: item.Span, Features: features})
+		replacements = append(replacements, mlxmedia.Replacement{
+			Span: mlxmedia.Span{Start: item.Span.Start, End: item.Span.End}, Features: features,
+		})
 		mlx.Sweep()
 	}
 
@@ -945,14 +939,16 @@ func validateGemma4MediaPayload(prepared *legacyPreparedInput) (*gemma4MediaPayl
 		return nil, errors.New("invalid Gemma4 media payload")
 	}
 
-	items := make([]mlxmedia.Item, len(payload.Items))
-	for i := range payload.Items {
-		items[i] = payload.Items[i].Item
-	}
-	if err := mlxmedia.ValidateItems(items, len(prepared.Tokens)); err != nil {
-		return nil, fmt.Errorf("invalid Gemma4 media payload: %w", err)
-	}
+	previousEnd := 0
+	seenIDs := make(map[int]bool, len(payload.Items))
 	for _, item := range payload.Items {
+		if item.ID < 0 || seenIDs[item.ID] {
+			return nil, fmt.Errorf("invalid or duplicate Gemma4 media ID %d", item.ID)
+		}
+		seenIDs[item.ID] = true
+		if item.Span.Start < previousEnd || item.Span.Start < 0 || item.Span.End <= item.Span.Start || item.Span.End > len(prepared.Tokens) {
+			return nil, fmt.Errorf("invalid or overlapping Gemma4 media %d span [%d,%d) for %d tokens", item.ID, item.Span.Start, item.Span.End, len(prepared.Tokens))
+		}
 		spanLength := item.Span.End - item.Span.Start
 		switch item.Kind {
 		case llm.MediaKindImage:
@@ -971,6 +967,7 @@ func validateGemma4MediaPayload(prepared *legacyPreparedInput) (*gemma4MediaPayl
 		default:
 			return nil, fmt.Errorf("invalid Gemma4 media kind %q", item.Kind)
 		}
+		previousEnd = item.Span.End
 	}
 	return payload, nil
 }

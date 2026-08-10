@@ -12,11 +12,15 @@ import (
 	"strings"
 
 	"github.com/ollama/ollama/llm"
-	"github.com/ollama/ollama/x/mlxrunner/batch"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 )
 
 var markerPattern = regexp.MustCompile(`\[img-([^]]*)\]`)
+
+type Span struct {
+	Start int
+	End   int
+}
 
 // Binding associates an input with its stable prompt marker and replacement.
 type Binding struct {
@@ -31,13 +35,13 @@ type Binding struct {
 type Item struct {
 	ID             int
 	Kind           llm.MediaKind
-	Span           batch.TokenSpan
+	Span           Span
 	ExpectedTokens int
 }
 
 // Replacement associates a media span with its encoded MLX features.
 type Replacement struct {
-	Span     batch.TokenSpan
+	Span     Span
 	Features *mlx.Array
 }
 
@@ -177,7 +181,7 @@ func AssignTokenSpans(tokens []int32, bindings []Binding, tokenIDs map[llm.Media
 		usedKinds[binding.Media.Kind] = true
 	}
 
-	spans := make(map[llm.MediaKind][]batch.TokenSpan, len(usedKinds))
+	spans := make(map[llm.MediaKind][]Span, len(usedKinds))
 	for kind := range usedKinds {
 		spans[kind] = tokenSpans(tokens, tokenIDs[kind])
 	}
@@ -274,8 +278,8 @@ func MergeEmbeddings(embeddings *mlx.Array, tokenCount int, replacements []Repla
 	return mlx.Concatenate(parts, 1), nil
 }
 
-func tokenSpans(tokens []int32, tokenID int32) []batch.TokenSpan {
-	var spans []batch.TokenSpan
+func tokenSpans(tokens []int32, tokenID int32) []Span {
+	var spans []Span
 	for i := 0; i < len(tokens); {
 		if tokens[i] != tokenID {
 			i++
@@ -285,7 +289,7 @@ func tokenSpans(tokens []int32, tokenID int32) []batch.TokenSpan {
 		for i < len(tokens) && tokens[i] == tokenID {
 			i++
 		}
-		spans = append(spans, batch.TokenSpan{Start: start, End: i})
+		spans = append(spans, Span{Start: start, End: i})
 	}
 	return spans
 }

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/ollama/ollama/llm"
+	mlxmedia "github.com/ollama/ollama/x/mlxrunner/media"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/tokenizer"
 )
@@ -258,7 +259,7 @@ func TestAssignGemma4MixedMediaSpans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []gemma4Span{{Start: 1, End: 3}, {Start: 4, End: 7}, {Start: 8, End: 9}}
+	want := []mlxmedia.Span{{Start: 1, End: 3}, {Start: 4, End: 7}, {Start: 8, End: 9}}
 	for i := range want {
 		if items[i].Span != want[i] {
 			t.Fatalf("item %d span = %+v, want %+v", i, items[i].Span, want[i])
@@ -326,9 +327,9 @@ func TestMergeGemma4MediaEmbeddings(t *testing.T) {
 	embeddings := mlx.FromValues([]float32{
 		0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7,
 	}, 1, 8, 2)
-	replacements := []gemma4MediaReplacement{
-		{Span: gemma4Span{Start: 1, End: 3}, Features: mlx.FromValues([]float32{10, 11, 12, 13}, 1, 2, 2)},
-		{Span: gemma4Span{Start: 5, End: 6}, Features: mlx.FromValues([]float32{20, 21}, 1, 1, 2)},
+	replacements := []mlxmedia.Replacement{
+		{Span: mlxmedia.Span{Start: 1, End: 3}, Features: mlx.FromValues([]float32{10, 11, 12, 13}, 1, 2, 2)},
+		{Span: mlxmedia.Span{Start: 5, End: 6}, Features: mlx.FromValues([]float32{20, 21}, 1, 1, 2)},
 	}
 	got, err := mlxmedia.MergeEmbeddings(embeddings, 8, replacements)
 	if err != nil {
@@ -358,14 +359,14 @@ func TestPrepareMediaEmbeddingsHonorsCanceledContext(t *testing.T) {
 func TestPrepareMediaEmbeddingsRejectsMalformedPayloads(t *testing.T) {
 	validImage := func(id, start, end int) gemma4MediaItem {
 		return gemma4MediaItem{
-			Item:  mlxmedia.Item{ID: id, Kind: llm.MediaKindImage, Span: batch.TokenSpan{Start: start, End: end}, ExpectedTokens: end - start},
+			ID: id, Kind: llm.MediaKindImage,
 			Image: &gemma4ImageInput{SoftTokens: end - start},
 			Span:  gemma4Span{Start: start, End: end},
 		}
 	}
 	validAudio := func(id, start, end int) gemma4MediaItem {
 		return gemma4MediaItem{
-			Item: mlxmedia.Item{ID: id, Kind: llm.MediaKindAudio, Span: batch.TokenSpan{Start: start, End: end}, ExpectedTokens: end - start},
+			ID: id, Kind: llm.MediaKindAudio,
 			Audio: &gemma4AudioInput{
 				Features: make([]float32, end-start), FeatureMask: make([]bool, end-start),
 				FeatureSize: 1, Frames: end - start, SoftTokens: end - start,

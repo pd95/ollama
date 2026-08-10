@@ -24,6 +24,7 @@ type mediaItem struct {
 	pos    int
 	length int
 	fold   uint32
+	serial bool
 	item   *base.PreparedItem
 }
 
@@ -98,8 +99,15 @@ func (m *requestMedia) extendChunk(pos, n int) int {
 		return n
 	}
 	end := pos + n
+	serialSeen := false
 	for i := range m.items {
 		item := &m.items[i]
+		if item.serial && item.pos < end && item.pos+item.length > pos {
+			if serialSeen && item.pos > pos {
+				return item.pos - pos
+			}
+			serialSeen = true
+		}
 		if !item.atomic() {
 			continue
 		}
@@ -238,6 +246,7 @@ func bindItems(prepared *base.PreparedRequest, segments []base.Segment) ([]media
 			pos:    rg[0],
 			length: rg[1] - rg[0],
 			fold:   foldValue(segments[item.Source].Data, item.Dims),
+			serial: item.Serial,
 			item:   item,
 		})
 	}
