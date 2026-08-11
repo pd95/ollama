@@ -302,6 +302,10 @@ _sign_darwin() {
 _build_custom_app_icon() {
     if [ -n "${OLLAMA_APP_ICON_PNG:-}" ]; then
         APP_ICON_PNG=$OLLAMA_APP_ICON_PNG
+        if [ ! -f "$APP_ICON_PNG" ]; then
+            echo "custom app icon does not exist: $APP_ICON_PNG" >&2
+            exit 1
+        fi
     elif [ -f ../release-test-site/AppIcon-1024.png ]; then
         APP_ICON_PNG=../release-test-site/AppIcon-1024.png
     elif [ -f ../release-test-site/AppIcon.png ]; then
