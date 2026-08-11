@@ -578,6 +578,36 @@ func TestSupportsBrowserTools(t *testing.T) {
 	}
 }
 
+func TestBuildChatRequestTreatsAudioAttachmentAsMedia(t *testing.T) {
+	audio := []byte("ID3\x04\x00\x00test audio")
+	chat := &store.Chat{Messages: []store.Message{
+		{
+			Role:    "user",
+			Content: "Transcribe this audio.",
+			Attachments: []store.File{
+				{Filename: "speech.mp3", Data: audio},
+			},
+		},
+	}}
+
+	req, err := (&Server{}).buildChatRequest(chat, "audio-model", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(req.Messages), 1; got != want {
+		t.Fatalf("message count = %d, want %d", got, want)
+	}
+	if got, want := req.Messages[0].Content, "Transcribe this audio."; got != want {
+		t.Fatalf("message content = %q, want %q", got, want)
+	}
+	if got, want := len(req.Messages[0].Images), 1; got != want {
+		t.Fatalf("media count = %d, want %d", got, want)
+	}
+	if !bytes.Equal(req.Messages[0].Images[0], audio) {
+		t.Fatal("audio attachment bytes were not preserved")
+	}
+}
+
 func TestWebSearchToolRegistration(t *testing.T) {
 	// Validates that the capability-gating logic in chat() correctly
 	// decides which tools to register based on model capabilities and

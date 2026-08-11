@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { IMAGE_EXTENSIONS, validateFile } from "./fileValidation";
+import {
+  AUDIO_EXTENSIONS,
+  IMAGE_EXTENSIONS,
+  validateFile,
+} from "./fileValidation";
 
 describe("fileValidation", () => {
   describe("IMAGE_EXTENSIONS", () => {
@@ -8,6 +12,13 @@ describe("fileValidation", () => {
       expect(IMAGE_EXTENSIONS).toContain("jpg");
       expect(IMAGE_EXTENSIONS).toContain("jpeg");
       expect(IMAGE_EXTENSIONS).toContain("webp");
+    });
+  });
+
+  describe("AUDIO_EXTENSIONS", () => {
+    it("should include the audio formats supported by the runtime", () => {
+      expect(AUDIO_EXTENSIONS).toContain("wav");
+      expect(AUDIO_EXTENSIONS).toContain("mp3");
     });
   });
 
@@ -53,6 +64,12 @@ describe("fileValidation", () => {
       const result = validateFile(file, {
         hasVisionCapability: true,
       });
+      expect(result.valid).toBe(true);
+    });
+
+    it("should accept MP3 audio", () => {
+      const file = createMockFile("speech.mp3", 1024, "audio/mpeg");
+      const result = validateFile(file);
       expect(result.valid).toBe(true);
     });
 
