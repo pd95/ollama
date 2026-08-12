@@ -266,5 +266,7 @@ func (m *Model) scatterMedia(h *mlx.Array, b *batch.Batch) *mlx.Array {
 	return h
 }
 
-var _ base.MediaModel = (*Model)(nil)
-var _ base.StagedMediaModel = (*Model)(nil)
+var (
+	_ base.MediaModel       = (*Model)(nil)
+	_ base.StagedMediaModel = (*Model)(nil)
+)
