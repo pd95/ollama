@@ -143,6 +143,31 @@ func TestAdjustWhitespaceBoundary(t *testing.T) {
 	}
 }
 
+func TestLoadFromBytesSizesVocabularyForSparseAddedTokens(t *testing.T) {
+	data := []byte(`{
+		"model": {
+			"type": "BPE",
+			"vocab": {"a": 0, "b": 1},
+			"merges": []
+		},
+		"added_tokens": [
+			{"id": 1000, "content": "<sparse>", "special": true}
+		]
+	}`)
+
+	tok, err := LoadFromBytes(data)
+	if err != nil {
+		t.Fatalf("failed to load tokenizer: %v", err)
+	}
+
+	if got, want := tok.VocabSize(), 1001; got != want {
+		t.Fatalf("VocabSize() = %d, want %d", got, want)
+	}
+	if got, ok := tok.GetSpecialToken("<sparse>"); !ok || got != 1000 {
+		t.Fatalf("GetSpecialToken(<sparse>) = %d, %v; want 1000, true", got, ok)
+	}
+}
+
 func TestEncodeDeterministicAcrossGOMAXPROCS(t *testing.T) {
 	tok := benchmarkLoadMiniLlama(t)
 

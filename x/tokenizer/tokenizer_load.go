@@ -88,10 +88,22 @@ func loadFromTokenizerJSON(data []byte) (*Tokenizer, error) {
 		}
 	}
 
+	valuesLen := len(raw.Model.Vocab)
+	for _, id := range raw.Model.Vocab {
+		if int(id) >= valuesLen {
+			valuesLen = int(id) + 1
+		}
+	}
+	for _, tok := range raw.AddedTokens {
+		if int(tok.ID) >= valuesLen {
+			valuesLen = int(tok.ID) + 1
+		}
+	}
+
 	// Build tokenizer
 	t := &Tokenizer{
 		vocab: &Vocabulary{
-			Values:  make([]string, len(raw.Model.Vocab)),
+			Values:  make([]string, valuesLen),
 			Reverse: raw.Model.Vocab,
 			Merges:  make(map[string]int, len(mergesStrings)),
 			BOS:     -1,
@@ -102,11 +114,6 @@ func loadFromTokenizerJSON(data []byte) (*Tokenizer, error) {
 
 	// Build values array
 	for token, id := range raw.Model.Vocab {
-		if int(id) >= len(t.vocab.Values) {
-			newValues := make([]string, id+1)
-			copy(newValues, t.vocab.Values)
-			t.vocab.Values = newValues
-		}
 		t.vocab.Values[id] = token
 	}
 
@@ -121,11 +128,6 @@ func loadFromTokenizerJSON(data []byte) (*Tokenizer, error) {
 	// if it's a "truly special" token like BOS/EOS/PAD, but for tokenization we need
 	// to treat all added_tokens as special to match HuggingFace behavior.
 	for _, tok := range raw.AddedTokens {
-		if int(tok.ID) >= len(t.vocab.Values) {
-			newValues := make([]string, tok.ID+1)
-			copy(newValues, t.vocab.Values)
-			t.vocab.Values = newValues
-		}
 		t.vocab.Values[tok.ID] = tok.Content
 		t.specialTokens[tok.Content] = tok.ID // Add ALL added_tokens to special tokens
 	}
