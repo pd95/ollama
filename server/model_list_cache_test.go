@@ -188,6 +188,8 @@ func TestModelListSummaryGemma4AudioRequiresRuntimeMetadataAndTensors(t *testing
 	}{
 		{"complete", gemma4AudioManifestLayers(t, true), true},
 		{"partial", gemma4AudioManifestLayers(t, false), false},
+		{"unified-complete", gemma4UnifiedAudioManifestLayers(t, true), true},
+		{"unified-partial", gemma4UnifiedAudioManifestLayers(t, false), false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			modelName := "list-gemma4-audio-" + tt.name
