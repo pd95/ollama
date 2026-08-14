@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -563,7 +564,8 @@ func TestInferSafetensorsCapabilitiesGemma4AudioRequiresCompleteTensors(t *testi
 	cfg := gemma4metadata.ConfigFile{
 		Architectures: []string{"Gemma4ForConditionalGeneration"},
 		ModelType:     "gemma4",
-		TextConfig:    gemma4metadata.TextConfig{HiddenSize: 5},
+		TextConfig:    gemma4metadata.TextConfig{HiddenSize: 5, VocabSize: 32},
+		AudioTokenID:  7,
 		AudioConfig: &gemma4metadata.AudioConfig{
 			AttentionChunkSize: 2, AttentionContextLeft: 2,
 			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
@@ -585,6 +587,7 @@ func TestInferSafetensorsCapabilitiesGemma4AudioRequiresCompleteTensors(t *testi
 		if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
 			t.Fatal(err)
 		}
+		writeGemma4AudioRuntimeConfigs(t, dir)
 		writeClientSafetensorsWithShapes(t, dir, shapes)
 		if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion", "audio"}; !slices.Equal(got, want) {
 			t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
@@ -596,12 +599,39 @@ func TestInferSafetensorsCapabilitiesGemma4AudioRequiresCompleteTensors(t *testi
 		if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		delete(shapes, "model.audio_tower.layers.0.self_attn.q_proj.input_max")
+		writeGemma4AudioRuntimeConfigs(t, dir)
+		partialShapes := maps.Clone(shapes)
+		delete(partialShapes, "model.audio_tower.layers.0.self_attn.q_proj.input_max")
+		writeClientSafetensorsWithShapes(t, dir, partialShapes)
+		if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion"}; !slices.Equal(got, want) {
+			t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("missing processor", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "tokenizer_config.json"), []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		writeClientSafetensorsWithShapes(t, dir, shapes)
 		if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion"}; !slices.Equal(got, want) {
 			t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
 		}
 	})
+}
+
+func writeGemma4AudioRuntimeConfigs(t *testing.T, dir string) {
+	t.Helper()
+	processor := `{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`
+	tokens := `{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`
+	for name, data := range map[string]string{"processor_config.json": processor, "tokenizer_config.json": tokens} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func gemma4ClientVisionTensorNames(layers int) []string {
@@ -926,7 +956,6 @@ func TestInferSafetensorsCapabilitiesFromParser(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{}`), 0o644); err != nil {
 				t.Fatal(err)
 			}
-
 			if got := inferSafetensorsCapabilities(dir, tt.parserName); !slices.Equal(got, tt.want) {
 				t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, tt.want)
 			}

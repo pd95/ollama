@@ -157,7 +157,27 @@ func decodeGemma4WAV(ctx context.Context, data []byte, targetRate int) ([]float3
 				if len(chunk) < 40 {
 					return nil, errors.New("WAV extensible fmt chunk is too short")
 				}
-				format = binary.LittleEndian.Uint16(chunk[24:26])
+				cbSize := binary.LittleEndian.Uint16(chunk[16:18])
+				if cbSize < 22 || int(cbSize)+18 > len(chunk) {
+					return nil, errors.New("invalid WAV extensible fmt size")
+				}
+				validBits := binary.LittleEndian.Uint16(chunk[18:20])
+				if validBits != bits {
+					return nil, fmt.Errorf("unsupported WAV valid bits %d for %d-bit samples", validBits, bits)
+				}
+				pcmGUID := [16]byte{1, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71}
+				floatGUID := pcmGUID
+				floatGUID[0] = 3
+				var subformat [16]byte
+				copy(subformat[:], chunk[24:40])
+				switch subformat {
+				case pcmGUID:
+					format = 1
+				case floatGUID:
+					format = 3
+				default:
+					return nil, errors.New("unsupported WAV extensible subformat")
+				}
 			}
 		case "data":
 			if pcm == nil {
