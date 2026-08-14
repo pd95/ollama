@@ -583,6 +583,11 @@ func isQwen35Family(s string) bool {
 	return strings.Contains(s, "qwen3_5") || strings.Contains(s, "qwen3next")
 }
 
+func isGPTOSSFamily(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "gptoss") || strings.Contains(s, "gpt_oss") || strings.Contains(s, "gpt-oss")
+}
+
 func lagunaRendererParserName(modelDir string) string {
 	const poolsideV1Marker = "laguna_glm_thinking_v8"
 
@@ -659,6 +664,8 @@ func parserNameForIdentifier(modelDir, s string) string {
 		return lagunaRendererParserName(modelDir)
 	case strings.Contains(s, "cohere2moe") || strings.Contains(s, "cohere2_moe"):
 		return "cohere"
+	case isGPTOSSFamily(s):
+		return "harmony"
 	case strings.Contains(s, "glm4") || strings.Contains(s, "glm-4"):
 		return "glm-4.7"
 	case strings.Contains(s, "deepseek"):
