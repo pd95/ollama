@@ -394,9 +394,15 @@ func buildModelListSummary(name model.Name, mf *manifest.Manifest) (modelListSum
 
 	if isLocalGemma4SafetensorsConfig(cfg) {
 		var gemma4cfg gemma4metadata.ConfigFile
-		if err := mf.ReadConfigJSON("config.json", &gemma4cfg); err != nil || !hasGemma4VisionTensorLayers(gemma4cfg, mf.Layers) {
+		configErr := mf.ReadConfigJSON("config.json", &gemma4cfg)
+		if configErr != nil || !hasGemma4VisionTensorLayers(gemma4cfg, mf.Layers) {
 			summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
 				return c == model.CapabilityVision
+			})
+		}
+		if configErr != nil || !hasGemma4AudioTensorLayers(gemma4cfg, mf.Layers) {
+			summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
+				return c == model.CapabilityAudio
 			})
 		}
 	}
@@ -406,18 +412,11 @@ func buildModelListSummary(name model.Name, mf *manifest.Manifest) (modelListSum
 }
 
 func filterUnsupportedModelListCapabilities(capabilities []model.Capability, cfg model.ConfigV2) []model.Capability {
-	if cfg.ModelFormat == "safetensors" && isGemma4Renderer(cfg.Renderer) {
-		capabilities = slices.DeleteFunc(capabilities, func(c model.Capability) bool {
-			return c == model.CapabilityAudio
-		})
-	}
 	if isNemotron3NanoSafetensorsConfig(cfg) {
 		capabilities = slices.DeleteFunc(capabilities, func(c model.Capability) bool {
 			return c == model.CapabilityVision || c == model.CapabilityAudio
 		})
 	}
-	// Mirrors suppressAudioCapability in images.go so /api/tags and /api/show
-	// agree for safetensors models whose MLX runner serves vision but not audio.
 	if cfg.ModelFormat == "safetensors" && cfg.Renderer == "glimmer" {
 		capabilities = slices.DeleteFunc(capabilities, func(c model.Capability) bool {
 			return c == model.CapabilityAudio

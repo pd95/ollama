@@ -526,13 +526,14 @@ func detectCapabilities(modelDir string) modelCapabilities {
 	}
 
 	vision := cfg.VisionConfig != nil || cfg.HasVision
-	if vision && isGemma4ModelConfig(cfg.Architectures, cfg.ModelType) {
-		vision = gemma4ModelDirHasVisionTensors(modelDir)
+	audio := cfg.AudioConfig != nil || cfg.SoundConfig != nil
+	if isGemma4ModelConfig(cfg.Architectures, cfg.ModelType) {
+		vision, audio = gemma4ModelDirMediaCapabilities(modelDir)
 	}
 
 	return modelCapabilities{
 		vision: vision,
-		audio:  cfg.AudioConfig != nil || cfg.SoundConfig != nil,
+		audio:  audio,
 		thinking: chatTemplateHasThinkingSupport(readChatTemplate(modelDir)) ||
 			alwaysSupportsThinking(cfg.Architectures, cfg.ModelType),
 	}
@@ -547,20 +548,21 @@ func isGemma4ModelConfig(architectures []string, modelType string) bool {
 	return strings.Contains(strings.ToLower(modelType), "gemma4")
 }
 
-func gemma4ModelDirHasVisionTensors(modelDir string) bool {
+func gemma4ModelDirMediaCapabilities(modelDir string) (vision, audio bool) {
 	inv, err := create.ReadInventory(modelDir)
 	if err != nil {
-		return false
+		return false, false
 	}
 	var cfg gemma4metadata.ConfigFile
 	if err := json.Unmarshal(inv.RawConfig, &cfg); err != nil {
-		return false
+		return false, false
 	}
 	tensors := make(map[string]gemma4metadata.TensorDescriptor, len(inv.Tensors))
 	for name, tensor := range inv.Tensors {
 		tensors[name] = gemma4metadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: tensor.Shape}
 	}
-	return gemma4metadata.ValidateVisionSourceInventory(cfg, tensors) == nil
+	return gemma4metadata.ValidateVisionSourceInventory(cfg, tensors) == nil,
+		gemma4metadata.ValidateAudioSourceInventory(cfg, tensors) == nil
 }
 
 // readChatTemplate returns the model's chat template, preferring the
