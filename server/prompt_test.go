@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/llm"
 	"github.com/ollama/ollama/template"
 	"github.com/ollama/ollama/types/model"
 )
@@ -562,6 +563,53 @@ func TestChatPromptRendererPreservesExplicitImagePlaceholders(t *testing.T) {
 				t.Fatalf("prompt missing replaced placeholders, got: %q", prompt)
 			}
 		})
+	}
+}
+
+func TestChatPromptRendererPreservesMixedMediaOrderAcrossHistory(t *testing.T) {
+	png := api.ImageData("\x89PNG\r\n\x1a\n")
+	wav := api.ImageData("RIFF\x00\x00\x00\x00WAVE")
+	secondPNG := api.ImageData("\x89PNG\r\n\x1a\nsecond")
+	msgs := []api.Message{
+		{
+			Role:    "user",
+			Content: "compare [img] with [img]",
+			Images:  []api.ImageData{png, wav},
+		},
+		{Role: "assistant", Content: "I will remember both."},
+		{
+			Role:    "user",
+			Content: "and now [img]",
+			Images:  []api.ImageData{secondPNG},
+		},
+	}
+
+	m := Model{
+		Config:         model.ConfigV2{Renderer: "gemma4"},
+		ProjectorPaths: []string{"media"},
+	}
+	opts := api.Options{Runner: api.Runner{NumCtx: 8192}}
+	think := false
+	prompt, media, err := chatPrompt(t.Context(), &m, mockRunner{}.Tokenize, &opts, msgs, nil, &api.ThinkValue{Value: think}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(prompt, "compare [img-0] with [img-1]") || !strings.Contains(prompt, "and now [img-2]") {
+		t.Fatalf("prompt does not preserve media marker order: %q", prompt)
+	}
+	if got, want := len(media), 3; got != want {
+		t.Fatalf("len(media) = %d, want %d", got, want)
+	}
+	if diff := cmp.Diff([]llm.MediaKind{llm.MediaKindImage, llm.MediaKindAudio, llm.MediaKindImage}, []llm.MediaKind{
+		media[0].Kind, media[1].Kind, media[2].Kind,
+	}); diff != "" {
+		t.Fatalf("media kind order mismatch (-want +got):\n%s", diff)
+	}
+	for i, item := range media {
+		if item.ID != i {
+			t.Fatalf("media[%d].ID = %d, want %d", i, item.ID, i)
+		}
 	}
 }
 
