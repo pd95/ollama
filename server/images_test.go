@@ -951,6 +951,63 @@ func gemma4AudioManifestLayers(t *testing.T) []manifest.Layer {
 	return layers
 }
 
+func gemma4UnifiedAudioConfig() *gemma4metadata.ConfigFile {
+	return &gemma4metadata.ConfigFile{
+		TextConfig:   gemma4metadata.TextConfig{HiddenSize: 3840, VocabSize: 262144},
+		AudioTokenID: 258881,
+		AudioConfig: &gemma4metadata.AudioConfig{
+			ModelType: "gemma4_unified_audio", AudioEmbedDim: 640,
+			AudioSamplesPerToken: 640, HiddenSize: 640, OutputProjDims: 640, RMSNormEps: 1e-6,
+		},
+	}
+}
+
+func gemma4UnifiedAudioManifestLayers(t *testing.T, complete bool) []manifest.Layer {
+	t.Helper()
+	layers := make([]manifest.Layer, 0, 5)
+	if complete {
+		layers = append(layers, gemma4AudioFixtureLayer(t, "model.embed_audio.embedding_projection.weight",
+			"model.embed_audio.embedding_projection.weight", gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{3840, 640}}, nil))
+	}
+	config, err := json.Marshal(gemma4UnifiedAudioConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{
+		"config.json":           config,
+		"processor_config.json": []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_extractor_type":"Gemma4UnifiedAudioFeatureExtractor","audio_samples_per_token":640,"feature_size":640,"padding_side":"right","sampling_rate":16000}}`),
+		"tokenizer_config.json": []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`),
+		"tokenizer.json":        []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":258880,"content":"<|audio>","special":true},{"id":258881,"content":"<|audio|>","special":true},{"id":258883,"content":"<audio|>","special":true}]}`),
+	} {
+		digest := createTestBlob(t, data)
+		layers = append(layers, manifest.Layer{MediaType: "application/vnd.ollama.image.json", Digest: digest, Size: int64(len(data)), Name: name})
+	}
+	return layers
+}
+
+func TestGemma4UnifiedAudioManifestHydratesCapabilityState(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	name := "gemma4-unified-audio-hydration"
+	createSafetensorsTestModel(
+		t, name,
+		model.ConfigV2{
+			ModelFormat: "safetensors", Renderer: gemma4RendererLarge,
+			Capabilities: []string{"completion", "audio"},
+		},
+		gemma4UnifiedAudioManifestLayers(t, true),
+	)
+	m, err := GetModel(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Gemma4AudioConfig == nil || !m.Gemma4AudioReady || len(m.Gemma4AudioTensors) != 1 {
+		t.Fatalf("unified hydration state = config:%v ready:%v tensors:%v", m.Gemma4AudioConfig != nil, m.Gemma4AudioReady, m.Gemma4AudioTensors)
+	}
+	if !slices.Contains(m.Capabilities(), model.CapabilityAudio) {
+		t.Fatalf("hydrated unified capabilities = %v, want audio", m.Capabilities())
+	}
+}
+
 func replaceGemma4AudioConfigLayer(t *testing.T, layers []manifest.Layer, cfg *gemma4metadata.ConfigFile) []manifest.Layer {
 	t.Helper()
 	data, err := json.Marshal(cfg)
@@ -1097,6 +1154,38 @@ func TestGemma4InstalledVisionCapabilityRejectsMissingOrZeroTextWidth(t *testing
 				t.Fatal("non-executable text width exposed installed vision")
 			}
 		})
+	}
+}
+
+func TestGemma4UnifiedAudioCapabilityRequiresProjection(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	cfg := model.ConfigV2{
+		ModelFormat:  "safetensors",
+		Renderer:     gemma4RendererSmall,
+		Capabilities: []string{"completion", "audio"},
+	}
+
+	complete := gemma4UnifiedAudioManifestLayers(t, true)
+	createSafetensorsTestModel(t, "gemma4-unified-audio-complete", cfg, complete)
+	m, err := GetModel("gemma4-unified-audio-complete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(m.Capabilities(), model.CapabilityAudio) || !m.Gemma4AudioReady {
+		t.Fatalf("complete unified audio capabilities = %v ready=%v, want audio", m.Capabilities(), m.Gemma4AudioReady)
+	}
+
+	partial := gemma4UnifiedAudioManifestLayers(t, false)
+	createSafetensorsTestModel(t, "gemma4-unified-audio-partial", cfg, partial)
+	m, err = GetModel("gemma4-unified-audio-partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(m.Capabilities(), model.CapabilityAudio) {
+		t.Fatalf("partial unified audio capabilities = %v, did not expect audio", m.Capabilities())
+	}
+	if !m.Gemma4AudioReady {
+		t.Fatal("valid unified audio runtime metadata was not marked ready")
 	}
 }
 

@@ -23,6 +23,19 @@ func releasedAudioConfig(layers int) ConfigFile {
 	}
 }
 
+func releasedUnifiedAudioConfig() ConfigFile {
+	return ConfigFile{
+		Architectures: []string{"Gemma4UnifiedForConditionalGeneration"},
+		ModelType:     "gemma4_unified",
+		TextConfig:    TextConfig{HiddenSize: 3840, VocabSize: 262144},
+		AudioTokenID:  258881,
+		AudioConfig: &AudioConfig{
+			ModelType: "gemma4_unified_audio", AudioEmbedDim: 640,
+			AudioSamplesPerToken: 640, HiddenSize: 640, OutputProjDims: 640, RMSNormEps: 1e-6,
+		},
+	}
+}
+
 func TestParseAudioConfigEquivalence(t *testing.T) {
 	valid, err := json.Marshal(releasedAudioConfig(12))
 	if err != nil {
@@ -164,6 +177,38 @@ func TestValidateAudioTensorsExactNormalizedNames(t *testing.T) {
 	}
 }
 
+func TestValidateReleasedE2BAudioInventory(t *testing.T) {
+	cfg := releasedAudioConfig(12)
+	cfg.TextConfig.HiddenSize = 1536
+	tensors := completeAudioInventory(cfg)
+	if got := tensors["model.embed_audio.embedding_projection.weight"].Shape; len(got) != 2 || got[0] != 1536 || got[1] != 1536 {
+		t.Fatalf("E2B audio projection shape = %v, want [1536 1536]", got)
+	}
+	if err := ValidateAudioSourceInventory(cfg, tensors); err != nil {
+		t.Fatalf("ValidateAudioSourceInventory() error = %v", err)
+	}
+}
+
+func TestValidateReleasedUnifiedAudioInventory(t *testing.T) {
+	cfg := releasedUnifiedAudioConfig()
+	tensors := completeAudioInventory(cfg)
+	if got := len(tensors); got != 1 {
+		t.Fatalf("unified audio tensor count = %d, want 1", got)
+	}
+	if got := tensors["model.embed_audio.embedding_projection.weight"].Shape; len(got) != 2 || got[0] != 3840 || got[1] != 640 {
+		t.Fatalf("unified audio projection shape = %v, want [3840 640]", got)
+	}
+	if err := ValidateAudioSourceInventory(cfg, tensors); err != nil {
+		t.Fatalf("ValidateAudioSourceInventory() error = %v", err)
+	}
+
+	bad := maps.Clone(tensors)
+	bad["model.embed_audio.embedding_projection.weight"] = TensorDescriptor{Dtype: "BF16", Shape: []int32{3840, 639}}
+	if err := ValidateAudioSourceInventory(cfg, bad); err == nil {
+		t.Fatal("bad unified projection shape: error = nil")
+	}
+}
+
 func TestValidateAudioConfig(t *testing.T) {
 	tests := []struct {
 		name string
@@ -230,6 +275,29 @@ func TestAudioConfigSupportedBoundaries(t *testing.T) {
 	}
 	if got, want := shapes["model.audio_tower.layers.127.feed_forward1.ffw_layer_1.linear.weight"], []int32{4 * maxAudioHiddenSize, maxAudioHiddenSize}; !slices.Equal(got, want) {
 		t.Fatalf("boundary feed-forward shape = %v, want %v", got, want)
+	}
+}
+
+func TestValidateUnifiedAudioRuntimeMetadata(t *testing.T) {
+	processor := []byte(`{
+		"audio_seq_length":750,
+		"feature_extractor":{
+			"audio_samples_per_token":640,
+			"feature_extractor_type":"Gemma4UnifiedAudioFeatureExtractor",
+			"feature_size":640,"padding_side":"right","sampling_rate":16000
+		}
+	}`)
+	tokens := []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`)
+	tokenizerData := []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":258881,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`)
+	cfg := releasedUnifiedAudioConfig()
+	if err := ValidateAudioRuntimeMetadata(cfg, processor, tokens, tokenizerData); err != nil {
+		t.Fatalf("ValidateAudioRuntimeMetadata() error = %v", err)
+	}
+
+	badProcessor := []byte(string(processor))
+	badProcessor = []byte(strings.Replace(string(badProcessor), `"audio_samples_per_token":640`, `"audio_samples_per_token":320`, 1))
+	if err := ValidateAudioRuntimeMetadata(cfg, badProcessor, tokens, tokenizerData); err == nil {
+		t.Fatal("bad unified frame size: error = nil")
 	}
 }
 

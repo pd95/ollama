@@ -575,7 +575,7 @@ func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*bas
 			}
 			payload.Image = &geom
 		case "audio":
-			if m.AudioConfig == nil || m.AudioProcessorConfig == nil || m.Audio == nil || m.EmbedAudio == nil {
+			if m.AudioConfig == nil || m.AudioProcessorConfig == nil || m.EmbedAudio == nil || (!m.AudioConfig.unified() && m.Audio == nil) {
 				return nil, fmt.Errorf("this model does not support audio input")
 			}
 			audio, err := preprocessGemma4Audio(ctx, seg.Data, m.AudioProcessorConfig)
@@ -591,7 +591,7 @@ func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*bas
 			prepared.Tokens = append(prepared.Tokens, m.EOATokenIDValue)
 			geom := *audio
 			mediaData = geom.Features
-			dims = []int{1, geom.Frames, 128}
+			dims = []int{1, geom.Frames, geom.FeatureSize}
 			geom.Features = nil
 			payload.Audio = &geom
 		default:
@@ -623,7 +623,13 @@ func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*bas
 func (m *Model) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
 	payload := item.Opaque.(gemma4MediaPayload)
 	if payload.Audio != nil {
-		features := m.EmbedAudio.Forward(m.Audio.Forward(data, payload.Audio))
+		var features *mlx.Array
+		if m.AudioConfig.unified() {
+			raw := mlx.Reshape(data, 1, int32(payload.Audio.SoftTokens), int32(payload.Audio.FeatureSize))
+			features = m.EmbedAudio.Forward(raw)
+		} else {
+			features = m.EmbedAudio.Forward(m.Audio.Forward(data, payload.Audio))
+		}
 		return mlx.Squeeze(features, 0)
 	}
 	var encoded *mlx.Array
