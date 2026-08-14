@@ -1,5 +1,3 @@
-//go:build gptoss_forward_reference
-
 package gptoss
 
 import (
