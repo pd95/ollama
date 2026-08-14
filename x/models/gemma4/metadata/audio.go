@@ -22,6 +22,9 @@ const (
 )
 
 type AudioConfig struct {
+	ModelType               string  `json:"model_type"`
+	AudioEmbedDim           int     `json:"audio_embed_dim"`
+	AudioSamplesPerToken    int     `json:"audio_samples_per_token"`
 	AttentionChunkSize      int     `json:"attention_chunk_size"`
 	AttentionContextLeft    int     `json:"attention_context_left"`
 	AttentionContextRight   int     `json:"attention_context_right"`
@@ -50,7 +53,7 @@ func ParseAudioConfig(configData []byte) (*AudioConfig, error) {
 	if cfg.AudioConfig == nil {
 		return nil, nil
 	}
-	if err := validateAudioConfigFields(cfg.AudioConfig); err != nil {
+	if err := validateAudioConfig(cfg); err != nil {
 		return nil, err
 	}
 	return cfg.AudioConfig, nil
@@ -59,21 +62,23 @@ func ParseAudioConfig(configData []byte) (*AudioConfig, error) {
 type audioProcessorConfig struct {
 	AudioSequenceLength int `json:"audio_seq_length"`
 	FeatureExtractor    struct {
-		Dither           float64   `json:"dither"`
-		FeatureSize      int       `json:"feature_size"`
-		FFTLength        int       `json:"fft_length"`
-		FFTOverdrive     bool      `json:"fft_overdrive"`
-		FrameLength      int       `json:"frame_length"`
-		HopLength        int       `json:"hop_length"`
-		InputScaleFactor float64   `json:"input_scale_factor"`
-		MaxFrequency     float64   `json:"max_frequency"`
-		MelFloor         float64   `json:"mel_floor"`
-		MinFrequency     float64   `json:"min_frequency"`
-		PaddingSide      string    `json:"padding_side"`
-		PerBinMean       []float64 `json:"per_bin_mean"`
-		PerBinStddev     []float64 `json:"per_bin_stddev"`
-		Preemphasis      float64   `json:"preemphasis"`
-		SamplingRate     int       `json:"sampling_rate"`
+		Type                 string    `json:"feature_extractor_type"`
+		AudioSamplesPerToken int       `json:"audio_samples_per_token"`
+		Dither               float64   `json:"dither"`
+		FeatureSize          int       `json:"feature_size"`
+		FFTLength            int       `json:"fft_length"`
+		FFTOverdrive         bool      `json:"fft_overdrive"`
+		FrameLength          int       `json:"frame_length"`
+		HopLength            int       `json:"hop_length"`
+		InputScaleFactor     float64   `json:"input_scale_factor"`
+		MaxFrequency         float64   `json:"max_frequency"`
+		MelFloor             float64   `json:"mel_floor"`
+		MinFrequency         float64   `json:"min_frequency"`
+		PaddingSide          string    `json:"padding_side"`
+		PerBinMean           []float64 `json:"per_bin_mean"`
+		PerBinStddev         []float64 `json:"per_bin_stddev"`
+		Preemphasis          float64   `json:"preemphasis"`
+		SamplingRate         int       `json:"sampling_rate"`
 	} `json:"feature_extractor"`
 }
 
@@ -92,7 +97,13 @@ func ValidateAudioRuntimeMetadata(cfg ConfigFile, processorData, tokenizerConfig
 		return fmt.Errorf("parse processor_config.json: %w", err)
 	}
 	f := processor.FeatureExtractor
-	if processor.AudioSequenceLength != 750 || f.FeatureSize != 128 || f.SamplingRate != 16000 ||
+	if isUnifiedAudioConfig(cfg) {
+		if processor.AudioSequenceLength != 750 || f.Type != "Gemma4UnifiedAudioFeatureExtractor" ||
+			f.FeatureSize != 640 || f.SamplingRate != 16000 || f.AudioSamplesPerToken != 640 ||
+			f.PaddingSide != "right" {
+			return fmt.Errorf("unsupported Gemma 4 unified audio processor configuration")
+		}
+	} else if processor.AudioSequenceLength != 750 || f.FeatureSize != 128 || f.SamplingRate != 16000 ||
 		f.FrameLength != 320 || f.HopLength != 160 || f.FFTLength != 512 || f.FFTOverdrive ||
 		f.Dither != 0 || f.InputScaleFactor != 1 || f.MinFrequency != 0 || f.MaxFrequency != 8000 ||
 		f.MelFloor != 1e-3 || f.Preemphasis != 0 || f.PaddingSide != "right" ||
@@ -213,6 +224,14 @@ func validateAudioConfig(cfg ConfigFile) error {
 	if ac == nil {
 		return fmt.Errorf("missing audio_config")
 	}
+	if isUnifiedAudioConfig(cfg) {
+		if ac.AudioEmbedDim != 640 || ac.AudioSamplesPerToken != 640 || ac.HiddenSize != 640 ||
+			ac.OutputProjDims != 640 || ac.RMSNormEps <= 0 ||
+			cfg.TextConfig.HiddenSize <= 0 || cfg.TextConfig.HiddenSize > maxTextHiddenSize {
+			return fmt.Errorf("invalid Gemma 4 unified audio dimensions")
+		}
+		return nil
+	}
 	if err := validateAudioConfigFields(ac); err != nil {
 		return err
 	}
@@ -243,6 +262,19 @@ func validateAudioConfigFields(ac *AudioConfig) error {
 
 func requiredAudioShapes(cfg ConfigFile) (map[string][]int32, error) {
 	ac := cfg.AudioConfig
+	if isUnifiedAudioConfig(cfg) {
+		textHidden, err := checkedAudioShapeDim("text hidden_size", int64(cfg.TextConfig.HiddenSize))
+		if err != nil {
+			return nil, err
+		}
+		output, err := checkedAudioShapeDim("output_proj_dims", int64(ac.OutputProjDims))
+		if err != nil {
+			return nil, err
+		}
+		return map[string][]int32{
+			"model.embed_audio.embedding_projection.weight": {textHidden, output},
+		}, nil
+	}
 	hidden, err := checkedAudioShapeDim("hidden_size", int64(ac.HiddenSize))
 	if err != nil {
 		return nil, err
@@ -332,6 +364,10 @@ func requiredAudioShapes(cfg ConfigFile) (map[string][]int32, error) {
 	}
 
 	return required, nil
+}
+
+func isUnifiedAudioConfig(cfg ConfigFile) bool {
+	return cfg.AudioConfig != nil && cfg.AudioConfig.ModelType == "gemma4_unified_audio"
 }
 
 func checkedAudioShapeDim(name string, factors ...int64) (int32, error) {

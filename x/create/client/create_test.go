@@ -822,6 +822,44 @@ func TestInferSafetensorsCapabilitiesGemma4AudioRejectsUnboundedConfig(t *testin
 	})
 }
 
+func TestInferSafetensorsCapabilitiesGemma4UnifiedAudio(t *testing.T) {
+	cfg := gemma4metadata.ConfigFile{
+		Architectures: []string{"Gemma4UnifiedForConditionalGeneration"},
+		ModelType:     "gemma4_unified",
+		TextConfig:    gemma4metadata.TextConfig{HiddenSize: 3840, VocabSize: 262144},
+		AudioTokenID:  258881,
+		AudioConfig: &gemma4metadata.AudioConfig{
+			ModelType: "gemma4_unified_audio", AudioEmbedDim: 640,
+			AudioSamplesPerToken: 640, HiddenSize: 640, OutputProjDims: 640, RMSNormEps: 1e-6,
+		},
+	}
+	dir := t.TempDir()
+	configJSON, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{
+		"processor_config.json": `{"audio_seq_length":750,"feature_extractor":{"audio_samples_per_token":640,"feature_extractor_type":"Gemma4UnifiedAudioFeatureExtractor","feature_size":640,"padding_side":"right","sampling_rate":16000}}`,
+		"tokenizer_config.json": `{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`,
+		"tokenizer.json":        `{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":258881,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shapes, err := gemma4metadata.RequiredAudioTensorShapes(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientSafetensorsWithShapes(t, dir, shapes)
+	if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion", "audio"}; !slices.Equal(got, want) {
+		t.Fatalf("unified capabilities = %#v, want %#v", got, want)
+	}
+}
+
 func writeGemma4AudioRuntimeConfigs(t *testing.T, dir string) {
 	t.Helper()
 	files := map[string][]byte{
@@ -1028,6 +1066,15 @@ func writeClientSafetensors(t *testing.T, dir string, names ...string) {
 	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeClientSafetensorsWithShapes(t *testing.T, dir string, shapes map[string][]int32) {
+	t.Helper()
+	descriptors := make(map[string]gemma4metadata.TensorDescriptor, len(shapes))
+	for name, shape := range shapes {
+		descriptors[name] = gemma4metadata.TensorDescriptor{Dtype: "BF16", Shape: shape}
+	}
+	writeClientSafetensorDescriptors(t, dir, descriptors)
 }
 
 func writeClientSafetensorDescriptors(t *testing.T, dir string, descriptors map[string]gemma4metadata.TensorDescriptor) {

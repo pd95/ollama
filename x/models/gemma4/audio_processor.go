@@ -25,27 +25,30 @@ const (
 type AudioProcessorConfig struct {
 	AudioSequenceLength int `json:"audio_seq_length"`
 	FeatureExtractor    struct {
-		Dither           float64   `json:"dither"`
-		FeatureSize      int       `json:"feature_size"`
-		FFTLength        int       `json:"fft_length"`
-		FFTOverdrive     bool      `json:"fft_overdrive"`
-		FrameLength      int       `json:"frame_length"`
-		HopLength        int       `json:"hop_length"`
-		InputScaleFactor float64   `json:"input_scale_factor"`
-		MaxFrequency     float64   `json:"max_frequency"`
-		MelFloor         float64   `json:"mel_floor"`
-		MinFrequency     float64   `json:"min_frequency"`
-		PaddingSide      string    `json:"padding_side"`
-		PerBinMean       []float64 `json:"per_bin_mean"`
-		PerBinStddev     []float64 `json:"per_bin_stddev"`
-		Preemphasis      float64   `json:"preemphasis"`
-		SamplingRate     int       `json:"sampling_rate"`
+		Type                 string    `json:"feature_extractor_type"`
+		AudioSamplesPerToken int       `json:"audio_samples_per_token"`
+		Dither               float64   `json:"dither"`
+		FeatureSize          int       `json:"feature_size"`
+		FFTLength            int       `json:"fft_length"`
+		FFTOverdrive         bool      `json:"fft_overdrive"`
+		FrameLength          int       `json:"frame_length"`
+		HopLength            int       `json:"hop_length"`
+		InputScaleFactor     float64   `json:"input_scale_factor"`
+		MaxFrequency         float64   `json:"max_frequency"`
+		MelFloor             float64   `json:"mel_floor"`
+		MinFrequency         float64   `json:"min_frequency"`
+		PaddingSide          string    `json:"padding_side"`
+		PerBinMean           []float64 `json:"per_bin_mean"`
+		PerBinStddev         []float64 `json:"per_bin_stddev"`
+		Preemphasis          float64   `json:"preemphasis"`
+		SamplingRate         int       `json:"sampling_rate"`
 	} `json:"feature_extractor"`
 }
 
 type gemma4AudioInput struct {
 	Features    []float32
 	FeatureMask []bool
+	FeatureSize int
 	Frames      int
 	SoftTokens  int
 }
@@ -83,6 +86,13 @@ func validateReleasedAudioProcessorConfig(cfg *AudioProcessorConfig) error {
 		return errors.New("Gemma4 MLX model has no supported audio processor configuration")
 	}
 	f := cfg.FeatureExtractor
+	if f.Type == "Gemma4UnifiedAudioFeatureExtractor" {
+		if cfg.AudioSequenceLength != 750 || f.FeatureSize != 640 || f.SamplingRate != 16000 ||
+			f.AudioSamplesPerToken != 640 || f.PaddingSide != "right" {
+			return errors.New("unsupported Gemma4 unified audio processor configuration")
+		}
+		return nil
+	}
 	if cfg.AudioSequenceLength != 750 || f.FeatureSize != 128 || f.SamplingRate != 16000 ||
 		f.FrameLength != 320 || f.HopLength != 160 || f.FFTLength != 512 || f.FFTOverdrive ||
 		f.Dither != 0 || f.InputScaleFactor != 1 || f.MinFrequency != 0 || f.MaxFrequency != 8000 ||
@@ -100,6 +110,9 @@ func preprocessGemma4Audio(ctx context.Context, data []byte, cfg *AudioProcessor
 	samples, err := decodeGemma4WAV(ctx, data, cfg.FeatureExtractor.SamplingRate)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.FeatureExtractor.Type == "Gemma4UnifiedAudioFeatureExtractor" {
+		return preprocessGemma4UnifiedAudio(samples, cfg)
 	}
 	features, featureMask, err := computeGemma4LogMel(ctx, samples, cfg)
 	if err != nil {
@@ -125,7 +138,32 @@ func preprocessGemma4Audio(ctx context.Context, data []byte, cfg *AudioProcessor
 		return nil, fmt.Errorf("Gemma4 audio token count %d exceeds limit %d", softTokens, cfg.AudioSequenceLength)
 	}
 	return &gemma4AudioInput{
-		Features: features, FeatureMask: featureMask, Frames: len(featureMask), SoftTokens: softTokens,
+		Features: features, FeatureMask: featureMask, FeatureSize: cfg.FeatureExtractor.FeatureSize,
+		Frames: len(featureMask), SoftTokens: softTokens,
+	}, nil
+}
+
+func preprocessGemma4UnifiedAudio(samples []float32, cfg *AudioProcessorConfig) (*gemma4AudioInput, error) {
+	frameSize := cfg.FeatureExtractor.AudioSamplesPerToken
+	if frameSize <= 0 {
+		return nil, errors.New("invalid Gemma4 unified audio frame size")
+	}
+	softTokens := (len(samples) + frameSize - 1) / frameSize
+	if softTokens == 0 {
+		return nil, errors.New("Gemma4 audio is too short to encode")
+	}
+	if softTokens > cfg.AudioSequenceLength {
+		return nil, fmt.Errorf("Gemma4 audio token count %d exceeds limit %d", softTokens, cfg.AudioSequenceLength)
+	}
+	features := make([]float32, softTokens*frameSize)
+	copy(features, samples)
+	mask := make([]bool, softTokens)
+	for i := range mask {
+		mask[i] = true
+	}
+	return &gemma4AudioInput{
+		Features: features, FeatureMask: mask, FeatureSize: frameSize,
+		Frames: softTokens, SoftTokens: softTokens,
 	}, nil
 }
 

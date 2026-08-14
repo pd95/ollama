@@ -190,6 +190,8 @@ func TestModelListSummaryGemma4AudioRequiresRuntimeMetadataAndTensors(t *testing
 		{"partial", slices.DeleteFunc(gemma4AudioManifestLayers(t), func(layer manifest.Layer) bool {
 			return layer.Name == "model.audio_tower.layers.0.self_attn.q_proj.input_max"
 		}), false},
+		{"unified-complete", gemma4UnifiedAudioManifestLayers(t, true), true},
+		{"unified-partial", gemma4UnifiedAudioManifestLayers(t, false), false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			modelName := "list-gemma4-audio-" + tt.name
