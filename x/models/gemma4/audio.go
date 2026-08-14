@@ -1,9 +1,8 @@
 package gemma4
 
-// The Gemma 4 audio encoder follows the Universal Speech Model Conformer used
-// by the released checkpoint. The MLX layout and execution structure are
-// adapted from MLX-VLM's MIT-licensed implementation pinned in
-// docs/third-party/mlx-vlm.md and cross-checked against Transformers.
+// Gemma 4 E2B/E4B use a Universal Speech Model Conformer. The unified 12B
+// architecture projects raw 640-sample waveform blocks directly into the
+// language model. Both paths use the canonical metadata readiness contract.
 
 import (
 	"errors"
@@ -17,6 +16,9 @@ import (
 )
 
 type AudioConfig struct {
+	ModelType               string  `json:"model_type"`
+	AudioEmbedDim           int32   `json:"audio_embed_dim"`
+	AudioSamplesPerToken    int32   `json:"audio_samples_per_token"`
 	AttentionChunkSize      int32   `json:"attention_chunk_size"`
 	AttentionContextLeft    int32   `json:"attention_context_left"`
 	AttentionContextRight   int32   `json:"attention_context_right"`
@@ -47,6 +49,7 @@ func parseAudioConfig(configData []byte) (*AudioConfig, error) {
 		channels[i] = int32(channel)
 	}
 	return &AudioConfig{
+		ModelType: cfg.ModelType, AudioEmbedDim: int32(cfg.AudioEmbedDim), AudioSamplesPerToken: int32(cfg.AudioSamplesPerToken),
 		AttentionChunkSize: int32(cfg.AttentionChunkSize), AttentionContextLeft: int32(cfg.AttentionContextLeft),
 		AttentionContextRight: int32(cfg.AttentionContextRight), AttentionInvalidLogit: cfg.AttentionInvalidLogit,
 		AttentionLogitCap: cfg.AttentionLogitCap, ConvKernelSize: int32(cfg.ConvKernelSize),
@@ -56,6 +59,10 @@ func parseAudioConfig(configData []byte) (*AudioConfig, error) {
 		RMSNormEps: cfg.RMSNormEps, SubsamplingConvChannels: channels,
 		UseClippedLinears: cfg.UseClippedLinears,
 	}, nil
+}
+
+func (c *AudioConfig) unified() bool {
+	return c != nil && c.ModelType == "gemma4_unified_audio"
 }
 
 type audioConvBlock struct {
@@ -123,7 +130,9 @@ func audioMetadataConfig(cfg *AudioConfig, textHidden int32) gemma4metadata.Conf
 	return gemma4metadata.ConfigFile{
 		TextConfig: gemma4metadata.TextConfig{HiddenSize: int(textHidden)},
 		AudioConfig: &gemma4metadata.AudioConfig{
-			AttentionChunkSize: int(cfg.AttentionChunkSize), AttentionContextLeft: int(cfg.AttentionContextLeft),
+			ModelType: cfg.ModelType, AudioEmbedDim: int(cfg.AudioEmbedDim),
+			AudioSamplesPerToken: int(cfg.AudioSamplesPerToken),
+			AttentionChunkSize:   int(cfg.AttentionChunkSize), AttentionContextLeft: int(cfg.AttentionContextLeft),
 			AttentionContextRight: int(cfg.AttentionContextRight), AttentionInvalidLogit: cfg.AttentionInvalidLogit,
 			AttentionLogitCap: cfg.AttentionLogitCap, ConvKernelSize: int(cfg.ConvKernelSize),
 			GradientClipping: cfg.GradientClipping,

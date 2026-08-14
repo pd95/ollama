@@ -70,7 +70,7 @@ func TestAudioForwardReference(t *testing.T) {
 	defer reference.Free()
 	if wantFrames := reference.Get("input_features").Dim(1); wantFrames > input.Frames {
 		padding := wantFrames - input.Frames
-		input.Features = append(input.Features, make([]float32, padding*128)...)
+		input.Features = append(input.Features, make([]float32, padding*input.FeatureSize)...)
 		input.FeatureMask = append(input.FeatureMask, make([]bool, padding)...)
 		input.Frames = wantFrames
 	}
@@ -86,54 +86,59 @@ func TestAudioForwardReference(t *testing.T) {
 			t.Fatalf("source is missing %s", name)
 		}
 	}
-	audioModel, err := loadAudioModel(tensors, audioConfig, textConfig.HiddenSize, 0, 0, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	embedAudio, err := loadMultimodalEmbedder(tensors, "embed_audio", audioConfig.RMSNormEps, 0, 0, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	features := mlx.FromValues(input.Features, 1, input.Frames, 128)
+	features := mlx.FromValues(input.Features, 1, input.Frames, input.FeatureSize)
 	compareAudioReference(t, "input_features", features, reference.Get("input_features"), 2e-5, 1e-5)
 	compareAudioMaskReference(t, "input_features_mask", input.FeatureMask, reference.Get("input_features_mask"), false)
-	valid := append([]bool(nil), input.FeatureMask...)
-	x := mlx.ExpandDims(features, -1)
-	x, valid = audioModel.Conv0.Forward(x, valid)
-	x, valid = audioModel.Conv1.Forward(x, valid)
-	compareAudioMaskReference(t, "audio_forward_mask", valid, reference.Get("audio_forward_mask"), true)
-	validOutputs := 0
-	for _, value := range valid {
-		if value {
-			validOutputs++
+	var projectedForward *mlx.Array
+	if audioConfig.unified() {
+		projectedForward = embedAudio.Forward(features)
+		compareAudioReference(t, "multimodal_projection", projectedForward, reference.Get("multimodal_projection"), 0.5, 0.05)
+	} else {
+		audioModel, err := loadAudioModel(tensors, audioConfig, textConfig.HiddenSize, 0, 0, "", nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if validOutputs != input.SoftTokens {
-		t.Fatalf("valid audio outputs = %d, want %d", validOutputs, input.SoftTokens)
-	}
-	x = mlx.Reshape(x, 1, int32(x.Dim(1)), int32(x.Dim(2)*x.Dim(3)))
-	x = audioModel.InputProj.Forward(x)
-	compareAudioReference(t, "subsample", x, reference.Get("subsample"), 0.5, 0.05)
-	for index, layer := range audioModel.Layers {
-		x = layer.Forward(x, valid)
-		if index == 0 || index == len(audioModel.Layers)-1 {
-			name := "layer_0"
-			if index != 0 {
-				name = "layer_11"
+		valid := append([]bool(nil), input.FeatureMask...)
+		x := mlx.ExpandDims(features, -1)
+		x, valid = audioModel.Conv0.Forward(x, valid)
+		x, valid = audioModel.Conv1.Forward(x, valid)
+		compareAudioMaskReference(t, "audio_forward_mask", valid, reference.Get("audio_forward_mask"), true)
+		validOutputs := 0
+		for _, value := range valid {
+			if value {
+				validOutputs++
 			}
-			compareAudioReference(t, name, x, reference.Get(name), 0.5, 0.05)
 		}
-	}
-	x = audioModel.OutputProj.Forward(x)
-	compareAudioReference(t, "output_projection", x, reference.Get("output_projection"), 0.5, 0.05)
-	x = embedAudio.Forward(x)
-	compareAudioReference(t, "multimodal_projection", x, reference.Get("multimodal_projection"), 0.5, 0.05)
+		if validOutputs != input.SoftTokens {
+			t.Fatalf("valid audio outputs = %d, want %d", validOutputs, input.SoftTokens)
+		}
+		x = mlx.Reshape(x, 1, int32(x.Dim(1)), int32(x.Dim(2)*x.Dim(3)))
+		x = audioModel.InputProj.Forward(x)
+		compareAudioReference(t, "subsample", x, reference.Get("subsample"), 0.5, 0.05)
+		for index, layer := range audioModel.Layers {
+			x = layer.Forward(x, valid)
+			if index == 0 || index == len(audioModel.Layers)-1 {
+				name := "layer_0"
+				if index != 0 {
+					name = "layer_11"
+				}
+				compareAudioReference(t, name, x, reference.Get(name), 0.5, 0.05)
+			}
+		}
+		x = audioModel.OutputProj.Forward(x)
+		compareAudioReference(t, "output_projection", x, reference.Get("output_projection"), 0.5, 0.05)
+		x = embedAudio.Forward(x)
+		compareAudioReference(t, "multimodal_projection", x, reference.Get("multimodal_projection"), 0.5, 0.05)
 
-	featureInput := mlx.FromValues(input.Features, 1, input.Frames, 128)
-	forward := audioModel.Forward(featureInput, input)
-	compareAudioReference(t, "audio_physical_output", forward, reference.Get("audio_physical_output"), 0.5, 0.05)
-	projectedForward := embedAudio.Forward(forward)
+		forward := audioModel.Forward(features, input)
+		compareAudioReference(t, "audio_physical_output", forward, reference.Get("audio_physical_output"), 0.5, 0.05)
+		projectedForward = embedAudio.Forward(forward)
+	}
 	inputIDs := reference.Get("input_ids")
 	embedWeight := source.Get("model.language_model.embed_tokens.weight")
 	if inputIDs == nil || embedWeight == nil {
@@ -171,7 +176,7 @@ func TestAudioForwardReference(t *testing.T) {
 				Seq: 0, Pos: start - 1, Features: mlx.Squeeze(projectedForward, 0), Opaque: payload,
 			}},
 		}
-		hidden, _ := fullModel.Forward(modelBatch, nil)
+		hidden, _ := fullModel.Forward(modelBatch, fullModel.NewCaches())
 		logits := fullModel.Unembed(hidden)
 		last := mlx.SliceStartStop(logits, []int32{0, int32(inputIDs.Dim(1) - 1), 0}, []int32{1, int32(inputIDs.Dim(1)), textConfig.VocabSize})
 		wantLogits := reference.Get("prefill_logits")
