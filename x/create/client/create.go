@@ -658,6 +658,8 @@ func getParserName(modelDir string) string {
 func parserNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
+	case strings.Contains(s, "apertus"):
+		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer"
 	case strings.Contains(s, "laguna"):
@@ -723,6 +725,8 @@ func getRendererName(modelDir string) string {
 func rendererNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
+	case strings.Contains(s, "apertus"):
+		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer"
 	case strings.Contains(s, "laguna"):
