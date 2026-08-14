@@ -68,6 +68,12 @@ func TestAudioForwardReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reference.Free()
+	if wantFrames := reference.Get("input_features").Dim(1); wantFrames > input.Frames {
+		padding := wantFrames - input.Frames
+		input.Features = append(input.Features, make([]float32, padding*128)...)
+		input.FeatureMask = append(input.FeatureMask, make([]bool, padding)...)
+		input.Frames = wantFrames
+	}
 
 	required, err := gemma4metadata.RequiredAudioTensorShapes(audioMetadataConfig(audioConfig, textConfig.HiddenSize))
 	if err != nil {
@@ -126,7 +132,7 @@ func TestAudioForwardReference(t *testing.T) {
 
 	featureInput := mlx.FromValues(input.Features, 1, input.Frames, 128)
 	forward := audioModel.Forward(featureInput, input)
-	compareAudioReference(t, "audio_forward_output", forward, reference.Get("audio_forward_output"), 0.5, 0.05)
+	compareAudioReference(t, "audio_physical_output", forward, reference.Get("audio_physical_output"), 0.5, 0.05)
 	projectedForward := embedAudio.Forward(forward)
 	inputIDs := reference.Get("input_ids")
 	embedWeight := source.Get("model.language_model.embed_tokens.weight")
