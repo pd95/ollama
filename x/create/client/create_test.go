@@ -567,6 +567,7 @@ func TestInferSafetensorsCapabilitiesGemma4AudioRequiresCompleteTensors(t *testi
 		TextConfig:    gemma4metadata.TextConfig{HiddenSize: 5, VocabSize: 32},
 		AudioTokenID:  7,
 		AudioConfig: &gemma4metadata.AudioConfig{
+			ModelType:          "gemma4_audio",
 			AttentionChunkSize: 2, AttentionContextLeft: 2,
 			AttentionInvalidLogit: -1e9, AttentionLogitCap: 50,
 			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
@@ -688,7 +689,7 @@ func TestInferSafetensorsCapabilitiesGemma4UnifiedAudio(t *testing.T) {
 
 func writeGemma4AudioRuntimeConfigs(t *testing.T, dir string) {
 	t.Helper()
-	processor := `{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`
+	processor := `{"audio_seq_length":750,"feature_extractor":{"feature_extractor_type":"Gemma4AudioFeatureExtractor","feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`
 	tokens := `{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`
 	tokenizerData := `{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`
 	for name, data := range map[string]string{"processor_config.json": processor, "tokenizer_config.json": tokens, "tokenizer.json": tokenizerData} {
