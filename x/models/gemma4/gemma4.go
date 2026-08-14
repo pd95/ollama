@@ -789,7 +789,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		m.LMHead = m.EmbedTokens.AsLinear()
 	}
 
-	if m.VisionConfig != nil && hasCompleteGemma4VisionWeights(tensors, m.VisionConfig) {
+	if m.VisionConfig != nil && hasCompleteGemma4VisionWeights(tensors, m.VisionConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant) {
 		if m.VisionConfig.unified() {
 			vision, err := loadUnifiedVisionEmbedder(tensors, m.VisionConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 			if err != nil {
@@ -809,7 +809,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		}
 		m.EmbedVision = embedVision
 	}
-	if m.AudioConfig != nil && m.AudioProcessorConfig != nil && hasCompleteGemma4AudioWeights(tensors, m.AudioConfig, m.HiddenSize) {
+	if m.AudioConfig != nil && m.AudioProcessorConfig != nil && hasCompleteGemma4AudioWeights(tensors, m.AudioConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant) {
 		if !m.AudioConfig.unified() {
 			audio, err := loadAudioModel(tensors, m.AudioConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 			if err != nil {
