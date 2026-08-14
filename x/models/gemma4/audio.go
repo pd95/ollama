@@ -124,12 +124,12 @@ func audioMetadataConfig(cfg *AudioConfig, textHidden int32) gemma4metadata.Conf
 		TextConfig: gemma4metadata.TextConfig{HiddenSize: int(textHidden)},
 		AudioConfig: &gemma4metadata.AudioConfig{
 			AttentionChunkSize: int(cfg.AttentionChunkSize), AttentionContextLeft: int(cfg.AttentionContextLeft),
-			AttentionContextRight: int(cfg.AttentionContextRight), AttentionInvalidLogit: float64(cfg.AttentionInvalidLogit),
-			AttentionLogitCap: float64(cfg.AttentionLogitCap), ConvKernelSize: int(cfg.ConvKernelSize),
-			GradientClipping: float64(cfg.GradientClipping),
+			AttentionContextRight: int(cfg.AttentionContextRight), AttentionInvalidLogit: cfg.AttentionInvalidLogit,
+			AttentionLogitCap: cfg.AttentionLogitCap, ConvKernelSize: int(cfg.ConvKernelSize),
+			GradientClipping: cfg.GradientClipping,
 			HiddenSize:       int(cfg.HiddenSize), NumAttentionHeads: int(cfg.NumAttentionHeads),
 			NumHiddenLayers: int(cfg.NumHiddenLayers), OutputProjDims: int(cfg.OutputProjDims),
-			ResidualWeight: float64(cfg.ResidualWeight), RMSNormEps: float64(cfg.RMSNormEps),
+			ResidualWeight: cfg.ResidualWeight, RMSNormEps: cfg.RMSNormEps,
 			SubsamplingConvChannels: channels, UseClippedLinears: cfg.UseClippedLinears,
 		},
 	}

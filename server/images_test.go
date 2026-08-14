@@ -746,7 +746,25 @@ func TestGemma4SafetensorsAudioCapabilityRequiresRuntimeMetadataAndTensors(t *te
 		t.Fatalf("invalid-scalar capabilities = %v ready=%v, did not expect audio", m.Capabilities(), m.Gemma4AudioReady)
 	}
 
-	badTokenizer := replaceGemma4ManifestJSON(t, slices.Clone(complete), "tokenizer.json", []byte(`{"model":{"vocab":{"<|audio>":5,"<|audio|>":8,"<audio|>":6}}}`))
+	validConfigData, err := json.Marshal(gemma4AudioConfig(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overflowConfigData := []byte(strings.Replace(string(validConfigData), `"gradient_clipping":10000000000`, `"gradient_clipping":1e39`, 1))
+	if string(overflowConfigData) == string(validConfigData) {
+		t.Fatal("failed to construct float32-overflow audio config")
+	}
+	overflowScalar := replaceGemma4ManifestJSON(t, slices.Clone(complete), "config.json", overflowConfigData)
+	createSafetensorsTestModel(t, "gemma4-audio-overflow-scalar", cfg, overflowScalar)
+	m, err = GetModel("gemma4-audio-overflow-scalar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(m.Capabilities(), model.CapabilityAudio) || m.Gemma4AudioReady {
+		t.Fatalf("overflow-scalar capabilities = %v ready=%v, did not expect audio", m.Capabilities(), m.Gemma4AudioReady)
+	}
+
+	badTokenizer := replaceGemma4ManifestJSON(t, slices.Clone(complete), "tokenizer.json", []byte(`{"model":{"type":"BPE","vocab":{"<|audio>":5,"<|audio|>":7,"<audio|>":6},"merges":[]},"added_tokens":[]}`))
 	createSafetensorsTestModel(t, "gemma4-audio-invalid-tokenizer", cfg, badTokenizer)
 	m, err = GetModel("gemma4-audio-invalid-tokenizer")
 	if err != nil {
@@ -849,7 +867,7 @@ func gemma4AudioManifestLayers(t *testing.T, complete bool) []manifest.Layer {
 		"config.json":           config,
 		"processor_config.json": []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`),
 		"tokenizer_config.json": []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`),
-		"tokenizer.json":        []byte(`{"model":{"vocab":{}},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`),
+		"tokenizer.json":        []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`),
 	}
 	for name, contents := range configs {
 		configDigest := createTestBlob(t, contents)
