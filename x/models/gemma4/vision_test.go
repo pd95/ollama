@@ -35,6 +35,26 @@ func TestParseVisionConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestParseUnifiedVisionConfig(t *testing.T) {
+	cfg, err := parseVisionConfig([]byte(`{"vision_config":{"model_type":"gemma4_unified_vision","mm_embed_dim":3840,"mm_posemb_size":1120,"model_patch_size":48,"num_soft_tokens":280,"output_proj_dims":3840,"patch_size":16,"pooling_kernel_size":3}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.unified() || cfg.ModelPatchSize != 48 || cfg.MMEmbedDim != 3840 || cfg.MMPosembSize != 1120 {
+		t.Fatalf("unexpected unified config: %+v", cfg)
+	}
+	if cfg.DefaultOutputLength != 280 {
+		t.Fatalf("DefaultOutputLength = %d, want 280", cfg.DefaultOutputLength)
+	}
+}
+
+func TestParseUnifiedVisionConfigRejectsInvalidPatchSize(t *testing.T) {
+	_, err := parseVisionConfig([]byte(`{"vision_config":{"model_type":"gemma4_unified_vision","patch_size":16,"pooling_kernel_size":3,"model_patch_size":32}}`))
+	if err == nil || !strings.Contains(err.Error(), "model_patch_size") {
+		t.Fatalf("parseVisionConfig() error = %v, want model patch mismatch", err)
+	}
+}
+
 func TestPreprocessGemma4ImageRejectsLimitsAndCancellation(t *testing.T) {
 	cfg := &VisionConfig{PatchSize: 16, PoolingKernelSize: 3, DefaultOutputLength: 1}
 	if _, err := preprocessGemma4Image(context.Background(), make([]byte, maxGemma4ImageBytes+1), cfg, 1); err == nil || !strings.Contains(err.Error(), "bytes") {
@@ -88,6 +108,13 @@ func TestGemma4ResizeDimensions(t *testing.T) {
 	}
 }
 
+func TestGemma4ResizeDimensionsRejectsUnboundedWork(t *testing.T) {
+	_, _, err := gemma4ResizeDimensions(1, 1, 16, maxGemma4ResizePixels, 3)
+	if err == nil || !strings.Contains(err.Error(), "resize target") {
+		t.Fatalf("gemma4ResizeDimensions() error = %v, want resize work limit", err)
+	}
+}
+
 func TestImageToCHWFloat32UsesBoundsAndChannelOrder(t *testing.T) {
 	img := image.NewRGBA(image.Rect(10, 20, 12, 22))
 	img.SetRGBA(10, 20, color.RGBA{R: 255, A: 255})
@@ -107,6 +134,31 @@ func TestImageToCHWFloat32UsesBoundsAndChannelOrder(t *testing.T) {
 	for i := range want {
 		if math.Abs(float64(got[i]-want[i])) > 1e-6 {
 			t.Fatalf("pixel[%d] = %f, want %f", i, got[i], want[i])
+		}
+	}
+}
+
+func TestImageToUnifiedPatchesUsesHWCModelPatchOrder(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 2))
+	for y := range 2 {
+		for x := range 4 {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(1 + x + 4*y), G: uint8(11 + x + 4*y), B: uint8(21 + x + 4*y), A: 255})
+		}
+	}
+	patches, positions, err := imageToUnifiedPatchesContext(context.Background(), img, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := positions, []int32{0, 0, 1, 0}; !slices.Equal(got, want) {
+		t.Fatalf("positions = %v, want %v", got, want)
+	}
+	wantBytes := []uint8{1, 11, 21, 2, 12, 22, 5, 15, 25, 6, 16, 26, 3, 13, 23, 4, 14, 24, 7, 17, 27, 8, 18, 28}
+	if len(patches) != len(wantBytes) {
+		t.Fatalf("patch length = %d, want %d", len(patches), len(wantBytes))
+	}
+	for i, want := range wantBytes {
+		if math.Abs(float64(patches[i]-float32(want)/255)) > 1e-6 {
+			t.Fatalf("patch[%d] = %f, want %f", i, patches[i], float32(want)/255)
 		}
 	}
 }
@@ -210,5 +262,40 @@ func TestPrepareMediaPreservesOrderedImageItems(t *testing.T) {
 		if payload.ImageStart != 1 || payload.ImageEnd != 2 || payload.Image.Pixels != nil {
 			t.Fatalf("item %d payload = start %d end %d pixels %d", i, payload.ImageStart, payload.ImageEnd, len(payload.Image.Pixels))
 		}
+	}
+}
+
+func TestPrepareMediaUnifiedUsesPatchDataAndLayout(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 8, 4))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	m := &Model{
+		TextConfig: &TextConfig{ImageTokenIDValue: 10, BOITokenIDValue: 11, EOITokenIDValue: 12, VisionSoftTokens: 1},
+		VisionConfig: &VisionConfig{
+			ModelType: "gemma4_unified", PatchSize: 16, PoolingKernelSize: 3,
+			ModelPatchSize: 48, DefaultOutputLength: 1,
+		},
+		UnifiedVision: &UnifiedVisionEmbedder{PatchDim: 48 * 48 * 3},
+		EmbedVision:   &MultimodalEmbedder{},
+	}
+	got, err := m.PrepareMedia([]base.Segment{{Tokens: []int32{1}}, {Kind: "image", Data: buf.Bytes()}})
+	if err != nil {
+		t.Fatalf("PrepareMedia() error = %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("unified item count = %d, want 1", len(got.Items))
+	}
+	if !slices.Equal(got.Items[0].Dims, []int{1, 1, 48 * 48 * 3}) {
+		t.Fatalf("unified item dims = %v", got.Items[0].Dims)
+	}
+	payload := got.Items[0].Opaque.(gemma4MediaPayload)
+	if payload.Image.Patches != nil || len(payload.Image.Positions) != 2 {
+		t.Fatalf("unified opaque patches/positions = %d/%v", len(payload.Image.Patches), payload.Image.Positions)
+	}
+	layout, ok := got.Layout.(*gemma4MediaLayout)
+	if !ok || !slices.Equal(layout.ImageSpans, [][2]int{{2, 3}}) {
+		t.Fatalf("unified layout = %#v", got.Layout)
 	}
 }

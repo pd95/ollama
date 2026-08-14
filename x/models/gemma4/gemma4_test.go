@@ -5,8 +5,19 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/ollama/ollama/x/mlxrunner/batch"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 )
+
+func TestGemma4UnifiedVisionMaskOnlyRelaxesSlidingAttention(t *testing.T) {
+	b := &batch.Batch{Layout: []any{&gemma4MediaLayout{ImageSpans: [][2]int{{4, 12}}}}}
+	if gemma4AttentionMask(b, true).IsCausal() {
+		t.Fatal("sliding vision mask remained pure causal")
+	}
+	if !gemma4AttentionMask(b, false).IsCausal() {
+		t.Fatal("full-attention vision mask must remain causal")
+	}
+}
 
 func TestParseSuppressTokens(t *testing.T) {
 	got := parseSuppressTokens([]byte(`{"suppress_tokens":[258883,258882]}`))

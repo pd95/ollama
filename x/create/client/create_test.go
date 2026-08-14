@@ -530,6 +530,34 @@ func TestInferSafetensorsCapabilitiesGemma4VisionRequiresTensors(t *testing.T) {
 	}
 }
 
+func TestInferSafetensorsCapabilitiesGemma4UnifiedVision(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+		"architectures": ["Gemma4UnifiedForConditionalGeneration"],
+		"model_type": "gemma4_unified",
+		"text_config": {"hidden_size": 2},
+		"vision_config": {"model_type": "gemma4_unified_vision", "mm_embed_dim": 2, "mm_posemb_size": 4, "model_patch_size": 1}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeClientSafetensorsWithShapes(t, dir, map[string][]int32{
+		"model.vision_embedder.patch_ln1.weight":         {3},
+		"model.vision_embedder.patch_ln1.bias":           {3},
+		"model.vision_embedder.patch_dense.weight":       {2, 3},
+		"model.vision_embedder.patch_dense.bias":         {2},
+		"model.vision_embedder.patch_ln2.weight":         {2},
+		"model.vision_embedder.patch_ln2.bias":           {2},
+		"model.vision_embedder.pos_embedding":            {4, 2, 2},
+		"model.vision_embedder.pos_norm.weight":          {2},
+		"model.vision_embedder.pos_norm.bias":            {2},
+		"model.embed_vision.embedding_projection.weight": {2, 2},
+	})
+	if got, want := inferSafetensorsCapabilities(dir, ""), []string{"completion", "vision"}; !slices.Equal(got, want) {
+		t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, want)
+	}
+}
+
 func gemma4ClientVisionTensorNames(layers int) []string {
 	names := []string{
 		"model.vision_tower.patch_embedder.input_proj.weight",
@@ -564,6 +592,25 @@ func writeClientSafetensors(t *testing.T, dir string, names ...string) {
 		tensors = append(tensors, safetensors.NewTensorDataFromBytes(name, "U8", []int32{1}, []byte{0}))
 	}
 
+	data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader(tensors))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeClientSafetensorsWithShapes(t *testing.T, dir string, shapes map[string][]int32) {
+	t.Helper()
+	tensors := make([]*safetensors.TensorData, 0, len(shapes))
+	for name, shape := range shapes {
+		elements := 1
+		for _, dim := range shape {
+			elements *= int(dim)
+		}
+		tensors = append(tensors, safetensors.NewTensorDataFromBytes(name, "F32", shape, make([]byte, elements*4)))
+	}
 	data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader(tensors))
 	if err != nil {
 		t.Fatal(err)
