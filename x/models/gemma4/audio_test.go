@@ -2,6 +2,7 @@ package gemma4
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
@@ -14,9 +15,14 @@ import (
 	mlxmodel "github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
 	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
+	"github.com/ollama/ollama/x/models/nn"
 )
 
 const releasedGemma4AudioConfig = `{
+  "text_config": {
+    "hidden_size": 2560,
+    "vocab_size": 262144
+  },
   "audio_config": {
     "attention_chunk_size": 12,
     "attention_context_left": 13,
@@ -136,6 +142,54 @@ func TestParseTextConfigRejectsInvalidAudioMarkers(t *testing.T) {
 				t.Fatal("marker validator error = nil")
 			}
 		})
+	}
+}
+
+func TestParseReleasedUnifiedAudioConfig(t *testing.T) {
+	cfg, err := parseAudioConfig([]byte(`{
+		"text_config":{"hidden_size":3840,"vocab_size":262144},
+		"audio_config":{
+			"model_type":"gemma4_unified_audio",
+			"audio_embed_dim":640,"audio_samples_per_token":640,
+			"hidden_size":640,"output_proj_dims":640,"rms_norm_eps":0.000001
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.unified() || cfg.AudioSamplesPerToken != 640 || cfg.OutputProjDims != 640 {
+		t.Fatalf("unified audio config = %+v", cfg)
+	}
+
+	bad := *cfg
+	bad.AudioSamplesPerToken = 320
+	data, err := json.Marshal(map[string]any{
+		"text_config":  map[string]any{"hidden_size": 3840, "vocab_size": 262144},
+		"audio_config": bad,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseAudioConfig(data); err == nil {
+		t.Fatal("invalid unified audio config: error = nil")
+	}
+}
+
+func TestEncodeUnifiedAudioMedia(t *testing.T) {
+	skipIfNoMLX(t)
+	m := &Model{
+		AudioConfig: &AudioConfig{ModelType: "gemma4_unified_audio"},
+		EmbedAudio: &MultimodalEmbedder{
+			Projection: nn.NewLinear(mlx.FromValues([]float32{1, 0, 0, 1}, 2, 2), nil),
+			Eps:        1e-6,
+		},
+	}
+	item := &base.PreparedItem{
+		Opaque: gemma4MediaPayload{Audio: &gemma4AudioInput{FeatureSize: 2, Frames: 1, SoftTokens: 1}},
+	}
+	features := m.EncodeMedia(item, mlx.FromValues([]float32{3, 4}, 1, 1, 2))
+	if features.NumDims() != 2 || features.Dim(0) != 1 || features.Dim(1) != 2 {
+		t.Fatalf("unified audio features = %v", features.Dims())
 	}
 }
 
