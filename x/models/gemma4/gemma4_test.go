@@ -24,6 +24,67 @@ func TestParseSuppressTokens(t *testing.T) {
 	}
 }
 
+func TestParseTextConfigTopLevelMediaFields(t *testing.T) {
+	data := []byte(`{
+		"image_token_id": 258880,
+		"audio_token_id": 258881,
+		"boi_token_id": 255999,
+		"eoi_token_id": 258882,
+		"vision_soft_tokens_per_image": 280,
+		"text_config": {
+			"hidden_size": 2560,
+			"num_hidden_layers": 42,
+			"intermediate_size": 10240,
+			"num_attention_heads": 8,
+			"num_key_value_heads": 2,
+			"head_dim": 256,
+			"global_head_dim": 512,
+			"vocab_size": 262144,
+			"rms_norm_eps": 1e-6
+		}
+	}`)
+
+	cfg, err := parseTextConfig(data)
+	if err != nil {
+		t.Fatalf("parseTextConfig() error = %v", err)
+	}
+	if cfg.ImageTokenIDValue != 258880 {
+		t.Fatalf("ImageTokenIDValue = %d, want 258880", cfg.ImageTokenIDValue)
+	}
+	if cfg.AudioTokenIDValue != 258881 {
+		t.Fatalf("AudioTokenIDValue = %d, want 258881", cfg.AudioTokenIDValue)
+	}
+	if cfg.BOITokenIDValue != 255999 {
+		t.Fatalf("BOITokenIDValue = %d, want 255999", cfg.BOITokenIDValue)
+	}
+	if cfg.EOITokenIDValue != 258882 {
+		t.Fatalf("EOITokenIDValue = %d, want 258882", cfg.EOITokenIDValue)
+	}
+	if cfg.VisionSoftTokens != 280 {
+		t.Fatalf("VisionSoftTokens = %d, want 280", cfg.VisionSoftTokens)
+	}
+}
+
+func TestParseTextConfigRejectsInvalidImageMarkers(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"duplicate begin and image", `{"boi_token_id":258880,"image_token_id":258880}`},
+		{"duplicate image and end", `{"image_token_id":258880,"eoi_token_id":258880}`},
+		{"negative image", `{"image_token_id":-1}`},
+		{"image outside vocab", `{"image_token_id":262144}`},
+		{"unbounded soft tokens", `{"vision_soft_tokens_per_image":16385}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseTextConfig([]byte(tt.json)); err == nil {
+				t.Fatal("parseTextConfig() error = nil")
+			}
+		})
+	}
+}
+
 func TestParseTextConfigE2B(t *testing.T) {
 	skipIfNoMLX(t)
 	data := []byte(`{
