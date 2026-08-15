@@ -585,6 +585,21 @@ func TestModelCapabilities(t *testing.T) {
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
+		{
+			name: "gemma4 safetensors exposes complete audio",
+			model: Model{
+				Config: model.ConfigV2{
+					ModelFormat:  "safetensors",
+					Renderer:     gemma4RendererSmall,
+					Capabilities: []string{"audio"},
+				},
+				TensorLayerNames:   gemma4AudioTensorNames(1),
+				Gemma4AudioConfig:  gemma4AudioConfig(1),
+				Gemma4AudioTensors: testGemma4AudioTensorDescriptors(1),
+				Template:           chatTemplate,
+			},
+			expectedCaps: []model.Capability{model.CapabilityAudio},
+		},
 	}
 
 	// compare two slices of model.Capability regardless of order
@@ -679,6 +694,247 @@ func TestGemma4SafetensorsVisionCapabilityRequiresTensorLayers(t *testing.T) {
 	if slices.Contains(m.Capabilities(), model.CapabilityVision) {
 		t.Fatalf("partial vision capabilities = %v, did not expect vision", m.Capabilities())
 	}
+}
+
+func TestGemma4SafetensorsAudioCapabilityRequiresCompleteInventory(t *testing.T) {
+	complete := Model{
+		Config: model.ConfigV2{
+			ModelFormat: "safetensors", Renderer: gemma4RendererLarge,
+			Capabilities: []string{"completion", "audio"},
+		},
+		TensorLayerNames:   gemma4AudioTensorNames(1),
+		Gemma4AudioConfig:  gemma4AudioConfig(1),
+		Gemma4AudioTensors: testGemma4AudioTensorDescriptors(1),
+	}
+	if !slices.Contains(complete.Capabilities(), model.CapabilityAudio) {
+		t.Fatal("complete audio inventory did not expose audio")
+	}
+
+	partial := complete
+	partial.TensorLayerNames = slices.Clone(complete.TensorLayerNames)
+	partial.Gemma4AudioTensors = maps.Clone(complete.Gemma4AudioTensors)
+	missing := "model.audio_tower.layers.0.self_attn.q_proj.input_max"
+	partial.TensorLayerNames = slices.DeleteFunc(partial.TensorLayerNames, func(name string) bool { return name == missing })
+	delete(partial.Gemma4AudioTensors, missing)
+	if slices.Contains(partial.Capabilities(), model.CapabilityAudio) {
+		t.Fatal("partial audio inventory exposed audio")
+	}
+	if err := partial.CheckCapabilities(model.CapabilityAudio); err == nil || !strings.Contains(err.Error(), "includes Gemma 4 audio tensor layers") {
+		t.Fatalf("CheckCapabilities(audio) error = %v, want Gemma 4 audio hint", err)
+	}
+
+	nearMatch := partial
+	nearMatch.TensorLayerNames = append(slices.Clone(partial.TensorLayerNames), missing+".extra")
+	nearMatch.Gemma4AudioTensors = maps.Clone(partial.Gemma4AudioTensors)
+	nearMatch.Gemma4AudioTensors[missing+".extra"] = gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{}}
+	if slices.Contains(nearMatch.Capabilities(), model.CapabilityAudio) {
+		t.Fatal("near-match audio tensor exposed audio")
+	}
+
+	malformed := complete
+	malformed.Gemma4AudioConfig = gemma4AudioConfig(1)
+	malformed.Gemma4AudioConfig.AudioConfig.NumAttentionHeads = 3
+	if slices.Contains(malformed.Capabilities(), model.CapabilityAudio) {
+		t.Fatal("malformed audio config exposed audio")
+	}
+
+	remoteCfg := complete.Config
+	remoteCfg.RemoteHost = "https://example.invalid"
+	remoteCaps := filterUnsupportedModelListCapabilities([]model.Capability{model.CapabilityCompletion, model.CapabilityAudio}, remoteCfg)
+	if slices.Contains(remoteCaps, model.CapabilityAudio) {
+		t.Fatal("remote Gemma 4 list capability exposed unsupported local audio")
+	}
+	otherCfg := remoteCfg
+	otherCfg.Renderer = "other"
+	otherCaps := filterUnsupportedModelListCapabilities([]model.Capability{model.CapabilityCompletion, model.CapabilityAudio}, otherCfg)
+	if !slices.Contains(otherCaps, model.CapabilityAudio) {
+		t.Fatal("remote non-Gemma audio capability was suppressed")
+	}
+}
+
+func TestGemma4InstalledAudioCapabilityDescriptorAndPayloadMatrix(t *testing.T) {
+	const target = "model.audio_tower.output_proj.weight"
+	tests := []struct {
+		name string
+		edit func(*testing.T, []manifest.Layer) []manifest.Layer
+		want bool
+	}{
+		{name: "complete", want: true},
+		{name: "partial", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return slices.DeleteFunc(layers, func(layer manifest.Layer) bool { return layer.Name == target })
+		}},
+		{name: "near-match internal name", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return replaceGemma4AudioFixtureLayer(t, layers, target, target+".extra", gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{3, 4}}, nil)
+		}},
+		{name: "wrong shape", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return replaceGemma4AudioFixtureLayer(t, layers, target, target, gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{4, 3}}, nil)
+		}},
+		{name: "wrong dtype", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return replaceGemma4AudioFixtureLayer(t, layers, target, target, gemma4metadata.TensorDescriptor{Dtype: "U8", Shape: []int32{3, 4}}, nil)
+		}},
+		{name: "duplicate descriptor", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return append(layers, gemma4AudioFixtureLayer(t, "model.audio_tower.duplicate.weight", target, gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{3, 4}}, nil))
+		}},
+		{name: "truncated payload", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return replaceGemma4AudioFixtureLayer(t, layers, target, target, gemma4metadata.TensorDescriptor{}, []byte{1, 2, 3, 4})
+		}},
+		{name: "invalid payload range", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			header, err := json.Marshal(map[string]any{target: map[string]any{"dtype": "F32", "shape": []int{3, 4}, "data_offsets": []int{0, 4}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			data := binary.LittleEndian.AppendUint64(nil, uint64(len(header)))
+			data = append(data, header...)
+			data = append(data, make([]byte, 4)...)
+			return replaceGemma4AudioFixtureLayer(t, layers, target, target, gemma4metadata.TensorDescriptor{}, data)
+		}},
+		{name: "malformed header", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			data := binary.LittleEndian.AppendUint64(nil, 5)
+			data = append(data, []byte("nope!")...)
+			return replaceGemma4AudioFixtureLayer(t, layers, target, target, gemma4metadata.TensorDescriptor{}, data)
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setTestHome(t, t.TempDir())
+			layers := gemma4AudioManifestLayers(t)
+			if tt.edit != nil {
+				layers = tt.edit(t, layers)
+			}
+			cfg := model.ConfigV2{ModelFormat: "safetensors", Renderer: gemma4RendererLarge, Capabilities: []string{"completion", "audio"}}
+			name := "gemma4-audio-" + strings.ReplaceAll(tt.name, " ", "-")
+			createSafetensorsTestModel(t, name, cfg, layers)
+
+			m, err := GetModel(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			showAudio := slices.Contains(m.Capabilities(), model.CapabilityAudio)
+			mf, err := manifest.ParseNamedManifest(model.ParseName(name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			summary, err := buildModelListSummary(model.ParseName(name), mf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			listAudio := slices.Contains(summary.Capabilities, model.CapabilityAudio)
+			if showAudio != tt.want || listAudio != tt.want {
+				t.Fatalf("show/list audio = %t/%t, want %t", showAudio, listAudio, tt.want)
+			}
+		})
+	}
+}
+
+func TestGemma4InstalledAudioCapabilityRejectsUnboundedConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*gemma4metadata.ConfigFile)
+	}{
+		{name: "shape product overflow", edit: func(cfg *gemma4metadata.ConfigFile) {
+			cfg.AudioConfig.HiddenSize = 1 << 30
+			cfg.AudioConfig.NumAttentionHeads = 1
+		}},
+		{name: "impractical layer count", edit: func(cfg *gemma4metadata.ConfigFile) { cfg.AudioConfig.NumHiddenLayers = 1 << 30 }},
+		{name: "impractical convolution channels", edit: func(cfg *gemma4metadata.ConfigFile) { cfg.AudioConfig.SubsamplingConvChannels = []int{2, 1 << 30} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setTestHome(t, t.TempDir())
+			cfg := gemma4AudioConfig(1)
+			tt.edit(cfg)
+			layers := replaceGemma4AudioConfigLayer(t, gemma4AudioManifestLayers(t), cfg)
+			modelCfg := model.ConfigV2{ModelFormat: "safetensors", Renderer: gemma4RendererLarge, Capabilities: []string{"completion", "audio"}}
+			name := "gemma4-audio-config-" + strings.ReplaceAll(tt.name, " ", "-")
+			createSafetensorsTestModel(t, name, modelCfg, layers)
+
+			m, err := GetModel(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mf, err := manifest.ParseNamedManifest(model.ParseName(name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			summary, err := buildModelListSummary(model.ParseName(name), mf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if slices.Contains(m.Capabilities(), model.CapabilityAudio) || slices.Contains(summary.Capabilities, model.CapabilityAudio) {
+				t.Fatalf("unbounded config exposed show/list audio")
+			}
+		})
+	}
+}
+
+func gemma4AudioManifestLayers(t *testing.T) []manifest.Layer {
+	t.Helper()
+	descriptors := testGemma4AudioTensorDescriptors(1)
+	layers := make([]manifest.Layer, 0, len(descriptors)+1)
+	for name, descriptor := range descriptors {
+		layers = append(layers, gemma4AudioFixtureLayer(t, name, name, descriptor, nil))
+	}
+	config, err := json.Marshal(gemma4AudioConfig(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := createTestBlob(t, config)
+	layers = append(layers, manifest.Layer{MediaType: "application/vnd.ollama.image.json", Digest: digest, Size: int64(len(config)), Name: "config.json"})
+	return layers
+}
+
+func replaceGemma4AudioConfigLayer(t *testing.T, layers []manifest.Layer, cfg *gemma4metadata.ConfigFile) []manifest.Layer {
+	t.Helper()
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range layers {
+		if layers[i].Name == "config.json" {
+			digest := createTestBlob(t, data)
+			layers[i] = manifest.Layer{MediaType: "application/vnd.ollama.image.json", Digest: digest, Size: int64(len(data)), Name: "config.json"}
+			return layers
+		}
+	}
+	t.Fatal("missing audio config fixture layer")
+	return nil
+}
+
+func gemma4AudioFixtureLayer(t *testing.T, manifestName, internalName string, descriptor gemma4metadata.TensorDescriptor, raw []byte) manifest.Layer {
+	t.Helper()
+	data := raw
+	if data == nil {
+		shape := make([]int64, len(descriptor.Shape))
+		for i, dim := range descriptor.Shape {
+			shape[i] = int64(dim)
+		}
+		size, err := gemma4SafetensorByteSize(descriptor.Dtype, shape)
+		if err != nil {
+			t.Fatal(err)
+		}
+		built, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader([]*safetensors.TensorData{
+			safetensors.NewTensorDataFromBytes(internalName, descriptor.Dtype, descriptor.Shape, make([]byte, int(size))),
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = built
+	}
+	digest := createTestBlob(t, data)
+	return manifest.Layer{MediaType: manifest.MediaTypeImageTensor, Digest: digest, Size: int64(len(data)), Name: manifestName}
+}
+
+func replaceGemma4AudioFixtureLayer(t *testing.T, layers []manifest.Layer, manifestName, internalName string, descriptor gemma4metadata.TensorDescriptor, raw []byte) []manifest.Layer {
+	t.Helper()
+	for i := range layers {
+		if layers[i].Name == manifestName {
+			layers[i] = gemma4AudioFixtureLayer(t, manifestName, internalName, descriptor, raw)
+			return layers
+		}
+	}
+	t.Fatalf("missing audio fixture layer %s", manifestName)
+	return nil
 }
 
 func TestGemma4VisionTensorValidationRejectsIncompleteAndNearMatches(t *testing.T) {
@@ -893,6 +1149,10 @@ func TestGemma4VisionTensorDescriptorsRejectsExcessiveInventory(t *testing.T) {
 	if _, err := gemma4VisionTensorDescriptors(layers); err == nil || !strings.Contains(err.Error(), "descriptors") {
 		t.Fatalf("excessive inventory error = %v", err)
 	}
+	layers[0].Name = "model.audio_tower.synthetic.weight"
+	if _, err := gemma4AudioTensorDescriptors(layers); err == nil || !strings.Contains(err.Error(), "descriptors") {
+		t.Fatalf("excessive audio inventory error = %v", err)
+	}
 }
 
 func gemma4VisionConfig(layers int) *gemma4metadata.ConfigFile {
@@ -900,6 +1160,42 @@ func gemma4VisionConfig(layers int) *gemma4metadata.ConfigFile {
 		TextConfig:   gemma4metadata.TextConfig{HiddenSize: 6},
 		VisionConfig: &gemma4metadata.VisionConfig{HiddenSize: 4, IntermediateSize: 8, NumHiddenLayers: layers, NumAttentionHeads: 1, NumKeyValueHeads: 1, HeadDim: 4, DefaultOutputLength: 1, PatchSize: 2, PositionEmbeddingSize: 16, PoolingKernelSize: 1},
 	}
+}
+
+func gemma4AudioConfig(layers int) *gemma4metadata.ConfigFile {
+	return &gemma4metadata.ConfigFile{
+		TextConfig: gemma4metadata.TextConfig{HiddenSize: 5},
+		AudioConfig: &gemma4metadata.AudioConfig{
+			AttentionChunkSize: 2, AttentionContextLeft: 2,
+			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
+			NumHiddenLayers: layers, OutputProjDims: 3,
+			SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
+		},
+	}
+}
+
+func gemma4AudioTensorNames(layers int) []string {
+	shapes, err := gemma4metadata.RequiredAudioTensorShapes(*gemma4AudioConfig(layers))
+	if err != nil {
+		panic(err)
+	}
+	names := make([]string, 0, len(shapes))
+	for name := range shapes {
+		names = append(names, name)
+	}
+	return names
+}
+
+func testGemma4AudioTensorDescriptors(layers int) map[string]gemma4metadata.TensorDescriptor {
+	shapes, err := gemma4metadata.RequiredAudioTensorShapes(*gemma4AudioConfig(layers))
+	if err != nil {
+		panic(err)
+	}
+	tensors := make(map[string]gemma4metadata.TensorDescriptor, len(shapes))
+	for name, shape := range shapes {
+		tensors[name] = gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: shape}
+	}
+	return tensors
 }
 
 func testGemma4VisionTensorDescriptors(layers int) map[string]gemma4metadata.TensorDescriptor {
