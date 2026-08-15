@@ -55,12 +55,19 @@ func Classify(inv Inventory, requested string) (Classification, error) {
 		return Classification{Kind: SourceFloat, Quantize: requested}, nil
 
 	case SourcePrequantized:
+		effective := detectPrequantizedQuantization(inv)
+		if gptossNativeMXFP4Evidence(inv) {
+			effective = "mxfp4"
+		}
 		if requested != "" {
+			if effective == requested && gptossNativeMXFP4Evidence(inv) {
+				return Classification{Kind: SourcePrequantized, Quantize: effective}, nil
+			}
 			return Classification{}, fmt.Errorf("cannot requantize an already-quantized source model (requested %q): only bf16/fp16/fp32 sources can be quantized", requested)
 		}
 		return Classification{
 			Kind:     SourcePrequantized,
-			Quantize: detectPrequantizedQuantization(inv),
+			Quantize: effective,
 		}, nil
 
 	case SourceBlockFP8:
@@ -126,6 +133,10 @@ func detectKind(inv Inventory) SourceKind {
 		switch {
 		case strings.HasSuffix(name, ".scales"):
 			hasMLXScales = true
+		case strings.HasSuffix(name, "_scales"):
+			hasMLXScales = true
+		case strings.HasSuffix(name, "_blocks"):
+			hasPacked = true
 		case strings.HasSuffix(name, ".weight_packed"):
 			hasPacked = true
 		case strings.HasSuffix(name, ".weight_scale"):
@@ -149,6 +160,55 @@ func detectKind(inv Inventory) SourceKind {
 	default:
 		return SourceFloat
 	}
+}
+
+func gptossNativeMXFP4Evidence(inv Inventory) bool {
+	if inv.Config.Architecture() != "GptOssForCausalLM" {
+		return false
+	}
+	var selected sourceQuantization
+	for _, candidate := range inv.Config.quantizationConfigs() {
+		if candidate.Bits != 0 {
+			selected = candidate
+			break
+		}
+	}
+	mode := selected.Mode
+	if mode == "" {
+		mode = selected.QuantMethod
+	}
+	if selected.Bits != 4 || selected.GroupSize != 32 || !strings.EqualFold(mode, "mxfp4") {
+		return false
+	}
+
+	found := false
+	for _, name := range sortedTensorNames(inv) {
+		tensor := inv.Tensors[name]
+		switch {
+		case strings.HasSuffix(name, "_blocks"):
+			found = true
+			scales, ok := inv.Tensors[strings.TrimSuffix(name, "_blocks")+"_scales"]
+			bias, hasBias := inv.Tensors[strings.TrimSuffix(name, "_blocks")+"_bias"]
+			if !ok || tensor.Dtype != "U8" || scales.Dtype != "U8" || len(tensor.Shape) != 4 || len(scales.Shape) != 3 ||
+				tensor.Shape[3] != 16 || tensor.Shape[0] <= 0 || tensor.Shape[1] <= 0 || tensor.Shape[2] <= 0 ||
+				tensor.Shape[0] != scales.Shape[0] || tensor.Shape[1] != scales.Shape[1] || tensor.Shape[2] != scales.Shape[2] ||
+				!hasBias || bias.Dtype != "BF16" || len(bias.Shape) != 2 || bias.Shape[0] != tensor.Shape[0] || bias.Shape[1] != tensor.Shape[1] {
+				return false
+			}
+			if strings.HasSuffix(name, "gate_up_proj_blocks") && tensor.Shape[1]%2 != 0 {
+				return false
+			}
+		case strings.HasSuffix(name, "_scales"):
+			if _, ok := inv.Tensors[strings.TrimSuffix(name, "_scales")+"_blocks"]; !ok {
+				return false
+			}
+		case strings.HasSuffix(name, "_bias") && strings.Contains(name, ".experts."):
+			if _, ok := inv.Tensors[strings.TrimSuffix(name, "_bias")+"_blocks"]; !ok {
+				return false
+			}
+		}
+	}
+	return found
 }
 
 // firstUnsupportedFP8 returns the name of the first F8_E5M2 weight in the
