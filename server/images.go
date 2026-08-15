@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,12 +35,20 @@ import (
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/version"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
+	"github.com/ollama/ollama/x/safetensors"
 	"github.com/ollama/ollama/x/transfer"
 )
 
 // Blobs newer than this may belong to another process that has not written its
 // manifest yet. They become eligible for the normal mark-and-sweep pass later.
 const layerPruneGracePeriod = time.Hour
+
+const (
+	maxGemma4SafetensorsHeaderSize = 16 << 20
+	maxGemma4VisionDescriptors     = 8 << 10
+	maxGemma4VisionDescriptorWork  = 4 << 20
+)
 
 var (
 	errCapabilities         = errors.New("does not support")
@@ -62,23 +73,25 @@ type registryOptions struct {
 }
 
 type Model struct {
-	Name               string `json:"name"`
-	Config             model.ConfigV2
-	ShortName          string
-	ModelPath          string
-	DraftPath          string
-	ParentModel        string
-	HasChatTemplate    bool
-	HasGoTemplate      bool
-	PreferChatTemplate bool // set when GGUF chat_template should take precedence over Go TEMPLATE
-	AdapterPaths       []string
-	ProjectorPaths     []string
-	TensorLayerNames   []string
-	System             string
-	License            []string
-	Digest             string
-	Options            map[string]any
-	Messages           []api.Message
+	Name                string `json:"name"`
+	Config              model.ConfigV2
+	ShortName           string
+	ModelPath           string
+	DraftPath           string
+	ParentModel         string
+	HasChatTemplate     bool
+	HasGoTemplate       bool
+	PreferChatTemplate  bool // set when GGUF chat_template should take precedence over Go TEMPLATE
+	AdapterPaths        []string
+	ProjectorPaths      []string
+	TensorLayerNames    []string
+	Gemma4VisionConfig  *gemma4metadata.ConfigFile                 `json:"-"`
+	Gemma4VisionTensors map[string]gemma4metadata.TensorDescriptor `json:"-"`
+	System              string
+	License             []string
+	Digest              string
+	Options             map[string]any
+	Messages            []api.Message
 
 	Template *template.Template
 }
@@ -483,7 +496,7 @@ func suppressGemma4SafetensorsVisionCapability(m *Model) bool {
 		return false
 	}
 
-	return !hasGemma4VisionTensorLayerNames(m.TensorLayerNames)
+	return m.Gemma4VisionConfig == nil || gemma4metadata.ValidateVisionInstalledInventory(*m.Gemma4VisionConfig, m.Gemma4VisionTensors) != nil
 }
 
 func suppressAudioCapability(m *Model, arch string) bool {
@@ -526,41 +539,197 @@ func isLocalGemma4SafetensorsConfig(cfg model.ConfigV2) bool {
 		cfg.RemoteModel == ""
 }
 
-var (
-	gemma4VisionPatchTensorLayerNames = []string{
-		"vision_tower.patch_embedder.input_proj.weight",
-		"model.vision_tower.patch_embedder.input_proj.weight",
-	}
-	gemma4VisionProjectorTensorLayerNames = []string{
-		"embed_vision.embedding_projection.weight",
-		"model.embed_vision.embedding_projection.weight",
-	}
-)
+func hasGemma4VisionTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifest.Layer) bool {
+	tensors, err := gemma4VisionTensorDescriptors(layers)
+	return err == nil && gemma4metadata.ValidateVisionInstalledInventory(cfg, tensors) == nil
+}
 
-func hasGemma4VisionTensorLayers(layers []manifest.Layer) bool {
-	names := make([]string, 0, len(layers))
+func gemma4VisionTensorDescriptors(layers []manifest.Layer) (map[string]gemma4metadata.TensorDescriptor, error) {
+	tensors := make(map[string]gemma4metadata.TensorDescriptor)
+	descriptorWork := 0
 	for _, layer := range layers {
-		if layer.MediaType == manifest.MediaTypeImageTensor {
-			names = append(names, layer.Name)
+		if layer.MediaType != manifest.MediaTypeImageTensor {
+			continue
+		}
+		if !strings.Contains(layer.Name, "vision_tower.") && !strings.Contains(layer.Name, "embed_vision.") {
+			continue
+		}
+		filename, err := manifest.BlobsPath(layer.Digest)
+		if err != nil {
+			return nil, err
+		}
+		ext, err := openGemma4TensorLayer(filename)
+		if err != nil {
+			return nil, fmt.Errorf("open tensor layer %s: %w", layer.Name, err)
+		}
+		names := ext.ListTensors()
+		if len(names) > maxGemma4VisionDescriptors-len(tensors) {
+			ext.Close()
+			return nil, fmt.Errorf("Gemma4 vision tensor inventory exceeds %d descriptors", maxGemma4VisionDescriptors)
+		}
+		for _, name := range names {
+			tensor, err := ext.GetTensor(name)
+			if err != nil {
+				ext.Close()
+				return nil, err
+			}
+			if _, exists := tensors[name]; exists {
+				ext.Close()
+				return nil, fmt.Errorf("duplicate tensor %s", name)
+			}
+			work := len(name) + len(tensor.Dtype) + len(tensor.Shape)*4
+			if work > maxGemma4VisionDescriptorWork-descriptorWork {
+				ext.Close()
+				return nil, fmt.Errorf("Gemma4 vision tensor inventory exceeds descriptor work limit %d", maxGemma4VisionDescriptorWork)
+			}
+			descriptorWork += work
+			tensors[name] = gemma4metadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
+		}
+		if err := ext.Close(); err != nil {
+			return nil, err
 		}
 	}
-
-	return hasGemma4VisionTensorLayerNames(names)
+	return tensors, nil
 }
 
-func hasGemma4VisionTensorLayerNames(names []string) bool {
-	hasVisionTower := hasAnyTensorLayerName(names, gemma4VisionPatchTensorLayerNames...)
-	hasProjector := hasAnyTensorLayerName(names, gemma4VisionProjectorTensorLayerNames...)
-	return hasVisionTower && hasProjector
+func openGemma4TensorLayer(filename string) (extractor *safetensors.TensorExtractor, err error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	var sizeBytes [8]byte
+	if _, err := io.ReadFull(f, sizeBytes[:]); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("read safetensors header length: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	headerSize := binary.LittleEndian.Uint64(sizeBytes[:])
+	if headerSize > maxGemma4SafetensorsHeaderSize {
+		f.Close()
+		return nil, fmt.Errorf("safetensors header too large: %d (limit %d)", headerSize, maxGemma4SafetensorsHeaderSize)
+	}
+	if info.Size() < 8 || headerSize > uint64(info.Size()-8) {
+		f.Close()
+		return nil, fmt.Errorf("truncated safetensors header: declared %d bytes in %d-byte file", headerSize, info.Size())
+	}
+	header := make([]byte, int(headerSize))
+	if _, err := io.ReadFull(f, header); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("read safetensors header: %w", err)
+	}
+	if err := validateGemma4SafetensorsPayload(header, info.Size()-8-int64(headerSize)); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			extractor = nil
+			err = fmt.Errorf("invalid safetensors header: %v", recovered)
+		}
+	}()
+	return safetensors.OpenForExtraction(filename)
 }
 
-func hasAnyTensorLayerName(names []string, candidates ...string) bool {
-	for _, candidate := range candidates {
-		if slices.Contains(names, candidate) {
-			return true
+type gemma4SafetensorInfo struct {
+	Dtype       string   `json:"dtype"`
+	Shape       []int64  `json:"shape"`
+	DataOffsets [2]int64 `json:"data_offsets"`
+}
+
+func validateGemma4SafetensorsPayload(header []byte, dataSize int64) error {
+	var entries map[string]gemma4SafetensorInfo
+	if err := json.Unmarshal(header, &entries); err != nil {
+		return fmt.Errorf("parse safetensors header: %w", err)
+	}
+	if len(entries) > maxGemma4VisionDescriptors+1 {
+		return fmt.Errorf("Gemma4 vision tensor inventory exceeds %d descriptors", maxGemma4VisionDescriptors)
+	}
+	type dataRange struct {
+		name       string
+		start, end int64
+	}
+	ranges := make([]dataRange, 0, len(entries))
+	for name, entry := range entries {
+		if name == "__metadata__" {
+			continue
+		}
+		start, end := entry.DataOffsets[0], entry.DataOffsets[1]
+		if start < 0 || end < start {
+			return fmt.Errorf("invalid safetensors data range for %s: [%d,%d]", name, start, end)
+		}
+		if end > dataSize {
+			return fmt.Errorf("safetensors data range for %s ends at %d beyond data size %d", name, end, dataSize)
+		}
+		expected, err := gemma4SafetensorByteSize(entry.Dtype, entry.Shape)
+		if err != nil {
+			return fmt.Errorf("invalid safetensors tensor %s: %w", name, err)
+		}
+		if end-start != expected {
+			return fmt.Errorf("safetensors tensor %s range length %d, want %d", name, end-start, expected)
+		}
+		ranges = append(ranges, dataRange{name: name, start: start, end: end})
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].start == ranges[j].start {
+			return ranges[i].end < ranges[j].end
+		}
+		return ranges[i].start < ranges[j].start
+	})
+	if len(ranges) == 0 {
+		if dataSize != 0 {
+			return fmt.Errorf("safetensors data region has %d unclaimed bytes", dataSize)
+		}
+		return nil
+	}
+	if ranges[0].start != 0 {
+		return fmt.Errorf("safetensors data ranges start at %d, want 0", ranges[0].start)
+	}
+	for i := 1; i < len(ranges); i++ {
+		if ranges[i].start != ranges[i-1].end {
+			return fmt.Errorf("non-contiguous safetensors data ranges for %s and %s", ranges[i-1].name, ranges[i].name)
 		}
 	}
-	return false
+	if ranges[len(ranges)-1].end != dataSize {
+		return fmt.Errorf("safetensors data ranges end at %d, want data size %d", ranges[len(ranges)-1].end, dataSize)
+	}
+	return nil
+}
+
+func gemma4SafetensorByteSize(dtype string, shape []int64) (int64, error) {
+	var width int64
+	switch strings.ToUpper(dtype) {
+	case "BOOL", "U8", "I8", "F8_E4M3", "F8_E4M3FN", "F8_E5M2", "F8_E5M2FNUZ":
+		width = 1
+	case "U16", "I16", "F16", "BF16":
+		width = 2
+	case "U32", "I32", "F32":
+		width = 4
+	case "U64", "I64", "F64":
+		width = 8
+	default:
+		return 0, fmt.Errorf("unsupported dtype %q", dtype)
+	}
+	elements := int64(1)
+	for _, dim := range shape {
+		if dim < 0 {
+			return 0, fmt.Errorf("negative shape dimension %d", dim)
+		}
+		if dim != 0 && elements > math.MaxInt64/dim {
+			return 0, fmt.Errorf("shape byte count overflows int64")
+		}
+		elements *= dim
+	}
+	if elements > math.MaxInt64/width {
+		return 0, fmt.Errorf("shape byte count overflows int64")
+	}
+	return elements * width, nil
 }
 
 func projectorHasAudio(f *gguf.File) bool {
@@ -754,6 +923,15 @@ func GetModel(name string) (*Model, error) {
 
 		if err := json.NewDecoder(configFile).Decode(&m.Config); err != nil {
 			return nil, err
+		}
+	}
+	if isLocalGemma4SafetensorsConfig(m.Config) {
+		var cfg gemma4metadata.ConfigFile
+		if err := mf.ReadConfigJSON("config.json", &cfg); err == nil {
+			m.Gemma4VisionConfig = &cfg
+			if tensors, err := gemma4VisionTensorDescriptors(mf.Layers); err == nil {
+				m.Gemma4VisionTensors = tensors
+			}
 		}
 	}
 

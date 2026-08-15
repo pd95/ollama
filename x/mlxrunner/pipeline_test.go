@@ -1,6 +1,8 @@
 package mlxrunner
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -35,7 +37,7 @@ func TestPrepareRejectsMediaWithoutSupport(t *testing.T) {
 		},
 	}
 
-	err := r.Prepare(req)
+	err := r.Prepare(context.Background(), req)
 	if err == nil {
 		t.Fatal("expected error for media on a text-only model")
 	}
@@ -51,9 +53,16 @@ type stubMediaModel struct {
 	textOnlyModel
 	expansion []int32
 	layout    any
+	observe   func(context.Context)
 }
 
-func (m stubMediaModel) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
+func (m stubMediaModel) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
+	if m.observe != nil {
+		m.observe(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	prepared := &base.PreparedRequest{Layout: m.layout}
 	for s, seg := range segments {
 		if seg.Data == nil {
@@ -79,6 +88,37 @@ func (m stubMediaModel) PrepareMedia(segments []base.Segment) (*base.PreparedReq
 	return prepared, nil
 }
 
+func TestPreparePassesLiveContextAndPublishesNothingWhenCanceled(t *testing.T) {
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "live")
+	var observed context.Context
+	r := mediaTestRunner(t)
+	r.Model = stubMediaModel{
+		expansion: []int32{70, 71},
+		observe:   func(ctx context.Context) { observed = ctx },
+	}
+	req := &Request{CompletionRequest: CompletionRequest{
+		Prompt: "[img-0]",
+		Media:  []llm.MediaData{{ID: 0, Kind: llm.MediaKindImage, Data: []byte("img")}},
+	}}
+	if err := r.Prepare(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if observed != ctx || observed.Value(contextKey{}) != "live" {
+		t.Fatal("PrepareMedia did not receive the exact live request context")
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	failed := &Request{CompletionRequest: req.CompletionRequest}
+	if err := r.Prepare(canceled, failed); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Prepare() error = %v, want context.Canceled", err)
+	}
+	if failed.Tokens != nil || failed.MediaItems != nil || failed.Layout != nil {
+		t.Fatalf("canceled Prepare published partial request: %+v", failed)
+	}
+}
+
 func (stubMediaModel) EncodeMedia(*base.PreparedItem, *mlx.Array) *mlx.Array { return nil }
 
 func mediaTestRunner(t *testing.T) *Runner {
@@ -98,7 +138,7 @@ func TestPrepareExpandsMediaTags(t *testing.T) {
 			Media:  []llm.MediaData{{ID: 0, Kind: llm.MediaKindImage, Data: []byte("img")}},
 		},
 	}
-	if err := r.Prepare(req); err != nil {
+	if err := r.Prepare(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
 
@@ -131,7 +171,7 @@ type rawMediaModel struct {
 	prepared base.PreparedRequest
 }
 
-func (m rawMediaModel) PrepareMedia([]base.Segment) (*base.PreparedRequest, error) {
+func (m rawMediaModel) PrepareMedia(context.Context, []base.Segment) (*base.PreparedRequest, error) {
 	p := m.prepared
 	return &p, nil
 }
@@ -157,7 +197,7 @@ func TestPrepareValidatesAuthoredItems(t *testing.T) {
 	for _, c := range cases {
 		r := mediaTestRunner(t)
 		r.Model = rawMediaModel{prepared: base.PreparedRequest{Tokens: []int32{0, 5, 5, 5, 1}, Items: c.items}}
-		err := r.Prepare(&Request{CompletionRequest: CompletionRequest{Prompt: "0[img-0]1", Media: media}})
+		err := r.Prepare(context.Background(), &Request{CompletionRequest: CompletionRequest{Prompt: "0[img-0]1", Media: media}})
 		if c.want == "" {
 			if err != nil {
 				t.Fatalf("%s: unexpected error %v", c.name, err)
@@ -174,14 +214,14 @@ func TestPrepareMediaErrors(t *testing.T) {
 	media := []llm.MediaData{{ID: 0, Kind: llm.MediaKindImage, Data: []byte("img")}}
 
 	r := mediaTestRunner(t)
-	err := r.Prepare(&Request{CompletionRequest: CompletionRequest{Prompt: "0[img-3]1", Media: media}})
+	err := r.Prepare(context.Background(), &Request{CompletionRequest: CompletionRequest{Prompt: "0[img-3]1", Media: media}})
 	if err == nil || !strings.Contains(err.Error(), "invalid image index: 3") {
 		t.Fatalf("missing-ID error = %v", err)
 	}
 
 	// Unreferenced media is ignored with a warning; the prompt still works.
 	req := &Request{CompletionRequest: CompletionRequest{Prompt: "01", Media: media}}
-	if err := r.Prepare(req); err != nil {
+	if err := r.Prepare(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
 	if len(req.MediaItems) != 0 {
@@ -191,7 +231,7 @@ func TestPrepareMediaErrors(t *testing.T) {
 	// Duplicate references are allowed; each occurrence is its own item with
 	// the same fold.
 	req = &Request{CompletionRequest: CompletionRequest{Prompt: "[img-0]0[img-0]", Media: media}}
-	if err := r.Prepare(req); err != nil {
+	if err := r.Prepare(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
 	if len(req.MediaItems) != 2 || req.MediaItems[0].fold != req.MediaItems[1].fold {
@@ -200,7 +240,7 @@ func TestPrepareMediaErrors(t *testing.T) {
 
 	// A zero-length expansion cannot carry identity into the trie keys.
 	r.Model = stubMediaModel{}
-	err = r.Prepare(&Request{CompletionRequest: CompletionRequest{Prompt: "[img-0]", Media: media}})
+	err = r.Prepare(context.Background(), &Request{CompletionRequest: CompletionRequest{Prompt: "[img-0]", Media: media}})
 	if err == nil || !strings.Contains(err.Error(), "no tokens") {
 		t.Fatalf("zero-expansion error = %v", err)
 	}

@@ -26,7 +26,7 @@ func prefillChunkSize() int {
 // Prepare tokenizes the prompt and validates it against the model's
 // context length. It is safe to call from any goroutine. On success it
 // populates request.Tokens and adjusts request.Options.NumPredict.
-func (r *Runner) Prepare(request *Request) error {
+func (r *Runner) Prepare(ctx context.Context, request *Request) error {
 	if r.Model == nil {
 		return errors.New("model not loaded")
 	}
@@ -44,7 +44,7 @@ func (r *Runner) Prepare(request *Request) error {
 			}
 			return fmt.Errorf("this model does not support %s input", kind)
 		}
-		prepared, bound, err := r.expandMedia(mm, request.Prompt, request.Media)
+		prepared, bound, err := r.expandMedia(ctx, mm.PrepareMedia, request.Prompt, request.Media)
 		if err != nil {
 			return err
 		}

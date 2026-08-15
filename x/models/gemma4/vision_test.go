@@ -2,6 +2,9 @@ package gemma4
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -9,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ollama/ollama/x/mlxrunner/batch"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
@@ -16,7 +20,7 @@ import (
 
 func testVisionConfig(t *testing.T, outputLength int32) *VisionConfig {
 	t.Helper()
-	cfg, err := parseVisionConfig([]byte(`{"vision_config":{"default_output_length":1}}`))
+	cfg, err := parseVisionConfig([]byte(`{"text_config":{"hidden_size":1},"vision_config":{"default_output_length":1}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +32,7 @@ func testVisionConfig(t *testing.T, outputLength int32) *VisionConfig {
 }
 
 func TestParseVisionConfigDefaults(t *testing.T) {
-	cfg, err := parseVisionConfig([]byte(`{"vision_config":{}}`))
+	cfg, err := parseVisionConfig([]byte(`{"text_config":{"hidden_size":1},"vision_config":{}}`))
 	if err != nil {
 		t.Fatalf("parseVisionConfig() error = %v", err)
 	}
@@ -62,11 +66,23 @@ func TestParseVisionConfigRejectsUnsafeDimensions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseVisionConfig([]byte(tt.json))
+			input := strings.Replace(tt.json, `{"vision_config"`, `{"text_config":{"hidden_size":1},"vision_config"`, 1)
+			_, err := parseVisionConfig([]byte(input))
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("parseVisionConfig() error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseVisionConfigRejectsMissingOrZeroTextWidth(t *testing.T) {
+	for _, input := range []string{
+		`{"vision_config":{}}`,
+		`{"text_config":{"hidden_size":0},"vision_config":{}}`,
+	} {
+		if _, err := parseVisionConfig([]byte(input)); err == nil || !strings.Contains(err.Error(), "text hidden_size") {
+			t.Fatalf("parseVisionConfig(%s) error = %v, want text hidden_size", input, err)
+		}
 	}
 }
 
@@ -113,6 +129,46 @@ func TestGemma4ImageBounds(t *testing.T) {
 	}
 	if err := validateGemma4ImageDimensions(8192, 8193); err == nil {
 		t.Fatal("over pixel limit error = nil")
+	}
+}
+
+func TestPreprocessGemma4ImageRejectsLimitsAndCancellation(t *testing.T) {
+	cfg := testVisionConfig(t, 1)
+	if _, err := preprocessGemma4Image(context.Background(), make([]byte, maxGemma4ImageBytes+1), cfg, 1); err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("oversized image error = %v", err)
+	}
+	if err := validateGemma4ImageDimensions(maxGemma4ImageDimension+1, 1); err == nil {
+		t.Fatal("oversized dimension error = nil")
+	}
+	if err := validateGemma4ImageDimensions(8192, 8193); err == nil {
+		t.Fatal("oversized pixel count error = nil")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := preprocessGemma4Image(ctx, []byte("image"), cfg, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled preprocessing error = %v", err)
+	}
+}
+
+func TestDecodeGemma4WebP(t *testing.T) {
+	data, err := base64.StdEncoding.DecodeString("UklGRrIBAABXRUJQVlA4TKUBAAAvSsAYAA8w//M///MfeJAkbXvaSG7m8Q3GfYSBJekwQztm/IcZlgwnmWImn2BK7aFmBtnVir6q//8VOkFE/xm4baTIu8c48ArEo6+B3zFKYln3pqClSCKX0begFTAXFOLXHSyF8cCNcZEG4OywuA4KVVfJCiArU7GAgJI8+lJP/OKMT/fBAjevg1cYB7YVkFuWga2lyPi5I0HFy5YTpWIHg0RZpkniRVW9odHAKOwosWuOGdxIyn2OvaCDvhg/we6TwadPBPbqBV58MsLmMJ8yZnOWk8SRz4N+QoyPL+MnamzMvcE1rHNEr91F9GKZPVUcS9w7PhhH36suB9qPeYb/oLk6cuTiJ0wOK3m5h1cKjW6EVZCYMK7dxcKCBdgP9HkKr9gkAO2P8GKZGWVdIAatQa+1IDpt6qyorVwdy01xdW8Jkfk6xjEXmVQQ+HQdFr6OKhIN34dXWq0+0qr6EJSCeeVLH9+gvGTLyqM65PQ44ihzlTXxQKjKbAvshXgir7Lil9w4L2bvMycmjQcqXaMCO6BlY28i+FOLzbfI1vEqxAhotocAAA==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, format, err := decodeGemma4ImageConfig(context.Background(), data)
+	if err != nil {
+		t.Fatalf("decodeGemma4ImageConfig() error = %v", err)
+	}
+	if format != "webp" || cfg.Width <= 0 || cfg.Height <= 0 {
+		t.Fatalf("WebP config = %dx%d %q", cfg.Width, cfg.Height, format)
+	}
+	img, format, err := decodeGemma4Image(context.Background(), data)
+	if err != nil {
+		t.Fatalf("decodeGemma4Image() error = %v", err)
+	}
+	if format != "webp" || img.Bounds().Dx() != cfg.Width || img.Bounds().Dy() != cfg.Height {
+		t.Fatalf("WebP image = %v %q", img.Bounds(), format)
 	}
 }
 
@@ -176,7 +232,7 @@ func TestPreprocessGemma4ImageSoftTokenBudget(t *testing.T) {
 		t.Fatalf("png.Encode() error = %v", err)
 	}
 
-	img, err := preprocessGemma4Image(buf.Bytes(), testVisionConfig(t, 1), 1)
+	img, err := preprocessGemma4Image(context.Background(), buf.Bytes(), testVisionConfig(t, 1), 1)
 	if err != nil {
 		t.Fatalf("preprocessGemma4Image() error = %v", err)
 	}
@@ -220,7 +276,7 @@ func TestPrepareMediaPreservesOrderedImageItems(t *testing.T) {
 		{Tokens: []int32{3}},
 		{Kind: "image", Data: pngData(color.RGBA{B: 255, A: 255})},
 	}
-	got, err := m.PrepareMedia(segments)
+	got, err := m.PrepareMedia(context.Background(), segments)
 	if err != nil {
 		t.Fatalf("PrepareMedia() error = %v", err)
 	}
@@ -274,11 +330,11 @@ func TestPrepareMediaSequentialRequestsAreIsolated(t *testing.T) {
 		Vision:       &VisionModel{},
 		EmbedVision:  &MultimodalEmbedder{},
 	}
-	first, err := m.PrepareMedia([]base.Segment{{Tokens: []int32{1}}, {Kind: "image", Data: pngData(color.RGBA{R: 255, A: 255})}})
+	first, err := m.PrepareMedia(context.Background(), []base.Segment{{Tokens: []int32{1}}, {Kind: "image", Data: pngData(color.RGBA{R: 255, A: 255})}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := m.PrepareMedia([]base.Segment{{Tokens: []int32{2, 3}}, {Kind: "image", Data: pngData(color.RGBA{B: 255, A: 255})}})
+	second, err := m.PrepareMedia(context.Background(), []base.Segment{{Tokens: []int32{2, 3}}, {Kind: "image", Data: pngData(color.RGBA{B: 255, A: 255})}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,5 +350,151 @@ func TestPrepareMediaSequentialRequestsAreIsolated(t *testing.T) {
 	second.Items[0].MediaData[0] = 0.5
 	if !slices.Equal(first.Tokens, firstTokens) || !slices.Equal(first.Items[0].MediaData, firstPixels) {
 		t.Fatal("mutating the later prepared request changed the earlier request")
+	}
+}
+
+type countingContext struct{ calls int }
+
+func (c *countingContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *countingContext) Done() <-chan struct{}       { return nil }
+func (c *countingContext) Err() error {
+	c.calls++
+	return nil
+}
+func (c *countingContext) Value(any) any { return nil }
+
+type nthCancelContext struct {
+	target int
+	calls  int
+}
+
+func (c *nthCancelContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *nthCancelContext) Done() <-chan struct{}       { return nil }
+func (c *nthCancelContext) Value(any) any               { return nil }
+func (c *nthCancelContext) Err() error {
+	c.calls++
+	if c.calls >= c.target {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestImageToCHWFloat32CancellationAllocationBoundary(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	measure := func(target int) float64 {
+		ctx := &nthCancelContext{target: target}
+		return testing.AllocsPerRun(100, func() {
+			ctx.calls = 0
+			pixels, err := imageToCHWFloat32Context(ctx, img)
+			if !errors.Is(err, context.Canceled) || pixels != nil {
+				t.Fatalf("imageToCHWFloat32Context() = (%v, %v), want (nil, context.Canceled)", pixels, err)
+			}
+		})
+	}
+	preAllocation := measure(1)
+	firstRow := measure(2)
+	if preAllocation != 0 {
+		t.Fatalf("pre-allocation cancellation allocated %.1f objects", preAllocation)
+	}
+	if firstRow <= preAllocation {
+		t.Fatalf("first-row cancellation allocations = %.1f, want more than pre-allocation %.1f", firstRow, preAllocation)
+	}
+}
+
+type blockingCancelContext struct {
+	target  int
+	calls   int
+	reached chan struct{}
+	release chan struct{}
+	done    chan struct{}
+}
+
+func newBlockingCancelContext(target int) *blockingCancelContext {
+	return &blockingCancelContext{target: target, reached: make(chan struct{}), release: make(chan struct{}), done: make(chan struct{})}
+}
+func (c *blockingCancelContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *blockingCancelContext) Done() <-chan struct{}       { return c.done }
+func (c *blockingCancelContext) Value(any) any               { return nil }
+func (c *blockingCancelContext) Err() error {
+	c.calls++
+	if c.calls < c.target {
+		return nil
+	}
+	if c.calls == c.target {
+		close(c.done)
+		close(c.reached)
+		<-c.release
+	}
+	return context.Canceled
+}
+
+func TestPrepareMediaCancellationDuringProductionStages(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 8, 4))
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	data := encoded.Bytes()
+	cfg := testVisionConfig(t, 1)
+
+	configChecks := &countingContext{}
+	if _, _, err := decodeGemma4ImageConfig(configChecks, data); err != nil {
+		t.Fatal(err)
+	}
+	decodeChecks := &countingContext{}
+	decoded, _, err := decodeGemma4Image(decodeChecks, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetW, targetH, err := gemma4ResizeDimensions(8, 4, int(cfg.PatchSize), int(cfg.DefaultOutputLength)*int(cfg.PoolingKernelSize)*int(cfg.PoolingKernelSize), int(cfg.PoolingKernelSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resizeChecks := &countingContext{}
+	resized, err := resizeGemma4Image(resizeChecks, decoded, decoded.Bounds(), targetW, targetH)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// PrepareMedia checks once per segment and preprocessing checks once before
+	// entering the three measured production stages.
+	prefixChecks := 2
+	tests := []struct {
+		name   string
+		target int
+	}{
+		{"decode", prefixChecks + 1},
+		{"resize", prefixChecks + configChecks.calls + decodeChecks.calls + 2},
+		{"chw", prefixChecks + configChecks.calls + decodeChecks.calls + resizeChecks.calls + 2},
+	}
+	_ = resized // its successful construction proves the calibration follows the live resize path.
+
+	m := &Model{
+		TextConfig:   &TextConfig{ImageTokenIDValue: 10, BOITokenIDValue: 11, EOITokenIDValue: 12, VisionSoftTokens: 1},
+		VisionConfig: cfg,
+		Vision:       &VisionModel{},
+		EmbedVision:  &MultimodalEmbedder{},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := newBlockingCancelContext(tt.target)
+			result := make(chan struct {
+				prepared *base.PreparedRequest
+				err      error
+			}, 1)
+			go func() {
+				prepared, err := m.PrepareMedia(ctx, []base.Segment{{Kind: "image", Data: data}})
+				result <- struct {
+					prepared *base.PreparedRequest
+					err      error
+				}{prepared, err}
+			}()
+			<-ctx.reached
+			close(ctx.release)
+			got := <-result
+			if !errors.Is(got.err, context.Canceled) || got.prepared != nil {
+				t.Fatalf("PrepareMedia() = (%v, %v), want (nil, context.Canceled)", got.prepared, got.err)
+			}
+		})
 	}
 }
