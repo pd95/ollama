@@ -181,6 +181,46 @@ func TestGemma4QuantizationType(t *testing.T) {
 	}
 }
 
+func TestGemma4ImportPlanKeepsMediaAtSourcePrecision(t *testing.T) {
+	policy := gemma4ImportTransform{numLayers: 2}
+	inv := newInventory(sourceModelConfig{}, map[string]string{
+		"model.embed_tokens.weight":                                            "BF16",
+		"model.layers.0.self_attn.q_proj.weight":                               "BF16",
+		"model.vision_tower.patch_embedder.input_proj.weight":                  "BF16",
+		"model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight":   "BF16",
+		"model.embed_vision.embedding_projection.weight":                       "BF16",
+		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight": "BF16",
+		"model.embed_audio.embedding_projection.weight":                        "BF16",
+	})
+
+	specs, err := Plan(inv, Classification{Kind: SourceFloat, Quantize: "nvfp4"}, policy)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	got := make(map[string]TensorSpec)
+	for _, spec := range specs {
+		for _, tensor := range spec.Tensors {
+			got[tensor.Name] = tensor
+		}
+	}
+	for _, name := range []string{
+		"model.vision_tower.patch_embedder.input_proj.weight",
+		"model.vision_tower.encoder.layers.0.self_attn.v_proj.linear.weight",
+		"model.embed_vision.embedding_projection.weight",
+		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight",
+		"model.embed_audio.embedding_projection.weight",
+	} {
+		tensor, ok := got[name]
+		if !ok {
+			t.Fatalf("%s missing from plan; got %v", name, specNames(specs))
+		}
+		if tensor.Quantize != "" {
+			t.Fatalf("%s Quantize = %q, want source precision", name, tensor.Quantize)
+		}
+	}
+}
+
 func TestUseMoreBits(t *testing.T) {
 	// 30 layers: first 1/8 = layers 0-2, last 1/8 = layers 27-29
 	// In between: every 3rd from offset (i - n/8) % 3 == 2
