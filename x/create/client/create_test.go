@@ -878,6 +878,21 @@ func TestGetParserName(t *testing.T) {
 			want:       "qwen3",
 		},
 		{
+			name:       "gpt-oss architecture",
+			configJSON: `{"architectures":["GptOssForCausalLM"],"model_type":"gpt_oss"}`,
+			want:       "harmony",
+		},
+		{
+			name:       "gpt-oss model type",
+			configJSON: `{"model_type":"gpt-oss"}`,
+			want:       "harmony",
+		},
+		{
+			name:       "gpt-oss nested llm model type",
+			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"gpt_oss"}}`,
+			want:       "harmony",
+		},
+		{
 			name:       "laguna model",
 			configJSON: `{"architectures": ["LagunaForCausalLM"], "model_type": "laguna"}`,
 			want:       "laguna",
