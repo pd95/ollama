@@ -19,6 +19,10 @@ type sdpaConfig struct {
 
 	// Optional model-supplied logical mask.
 	mask AttentionMask
+
+	// Optional per-head attention sinks. This is deliberately call-scoped and
+	// excluded from dispatchInputs because mask resolution does not depend on it.
+	sinks *mlx.Array
 }
 
 // WithKVHistory supplies a cache's per-layer view of K and V. The
@@ -45,6 +49,11 @@ func WithKV(k, v *mlx.Array, kLens []int32) SDPAOption {
 // WithMask supplies the model's logical-coordinate mask.
 func WithMask(m AttentionMask) SDPAOption {
 	return func(c *sdpaConfig) { c.mask = m }
+}
+
+// WithSinks supplies per-head attention sinks for the current SDPA call.
+func WithSinks(sinks *mlx.Array) SDPAOption {
+	return func(c *sdpaConfig) { c.sinks = sinks }
 }
 
 // ScaledDotProductAttention runs the fast SDPA kernel against q and
@@ -85,12 +94,12 @@ func ScaledDotProductAttention(b *batch.Batch, q *mlx.Array, scale float32, opts
 
 	if cached, ok := b.Memo.Get(inputs); ok {
 		d := cached.(sdpaDispatch)
-		return mlx.FastScaledDotProductAttention(q, k, v, scale, d.mode, d.arr)
+		return mlx.FastScaledDotProductAttention(q, k, v, scale, d.mode, d.arr, cfg.sinks)
 	}
 
 	d := inputs.resolve()
 	b.Memo.Put(inputs, d)
-	return mlx.FastScaledDotProductAttention(q, k, v, scale, d.mode, d.arr)
+	return mlx.FastScaledDotProductAttention(q, k, v, scale, d.mode, d.arr, cfg.sinks)
 }
 
 // sdpaDispatch is the resolved kernel call for a given SDPA key —
