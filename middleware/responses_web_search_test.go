@@ -939,6 +939,187 @@ func TestWebSearchResponsesWriterStreamingSurfacesMixedToolCalls(t *testing.T) {
 	}
 }
 
+func TestWebSearchResponsesWriterNonStreamingSurfacesCustomApplyPatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	format := json.RawMessage(`{"type":"grammar","syntax":"lark","definition":"start: /.+/"}`)
+	request := openai.ResponsesRequest{Model: "test-model", Tools: []openai.ResponsesTool{
+		{Type: "web_search"},
+		{Type: "custom", Name: "apply_patch", Format: format},
+	}}
+	chat, err := openai.FromResponsesRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := &ResponsesWriter{BaseWriter: BaseWriter{ResponseWriter: ctx.Writer}, model: request.Model, responseID: "resp_test", itemID: "msg_test", request: request}
+	writer := &WebSearchResponsesWriter{
+		BaseWriter: BaseWriter{ResponseWriter: ctx.Writer}, inner: inner, req: request, chat: chat,
+		search: func(context.Context, string) (*api.WebSearchResponse, error) { return &api.WebSearchResponse{}, nil },
+		followUpChat: func(_ context.Context, messages []api.Message, _ api.Tools) (api.ChatResponse, error) {
+			assistant := messages[len(messages)-2]
+			if len(assistant.ToolCalls) != 1 || assistant.ToolCalls[0].Function.Name != "web_search" {
+				t.Fatalf("assistant search call = %#v", assistant.ToolCalls)
+			}
+			return api.ChatResponse{Done: true, Message: api.Message{Role: "assistant", Content: "done"}}, nil
+		},
+	}
+	patch := "*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"
+	initial := api.ChatResponse{Done: true, Message: api.Message{
+		Thinking: "I should search.", Content: "Searching first.",
+		ToolCalls: []api.ToolCall{
+			{ID: "call_search", Function: api.ToolCallFunction{Name: "web_search", Arguments: testArgs(map[string]any{"query": "weather"})}},
+			{ID: "call_patch", Function: api.ToolCallFunction{Name: "apply_patch", Arguments: testArgs(map[string]any{"input": patch})}},
+		},
+	}}
+	data, _ := json.Marshal(initial)
+	if _, err := writer.Write(data); err != nil {
+		t.Fatal(err)
+	}
+
+	var response openai.ResponsesResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v: %s", err, recorder.Body.String())
+	}
+	wantTypes := []string{"reasoning", "message", "web_search_call", "custom_tool_call", "message"}
+	if len(response.Output) != len(wantTypes) {
+		t.Fatalf("output = %#v", response.Output)
+	}
+	for i, want := range wantTypes {
+		if response.Output[i].Type != want {
+			t.Fatalf("output[%d].type = %q, want %q: %#v", i, response.Output[i].Type, want, response.Output)
+		}
+	}
+	custom := response.Output[3]
+	if custom.ID != "ctc_mixed_0" || custom.CallID != "call_patch" || custom.Name != "apply_patch" || custom.Input != patch || custom.Arguments != "" {
+		t.Fatalf("custom item = %#v", custom)
+	}
+	var raw struct {
+		Output []map[string]json.RawMessage `json:"output"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw.Output[3]["arguments"]; ok {
+		t.Fatalf("custom item leaked function arguments: %s", recorder.Body.String())
+	}
+	for _, item := range response.Output {
+		if item.Type == "function_call" && item.Name == "web_search" {
+			t.Fatalf("private web_search function leaked: %#v", response.Output)
+		}
+	}
+}
+
+func TestWebSearchResponsesWriterStreamingSurfacesCustomApplyPatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	stream := true
+	request := openai.ResponsesRequest{Model: "test-model", Stream: &stream, Tools: []openai.ResponsesTool{
+		{Type: "web_search"}, {Type: "custom", Name: "apply_patch"},
+	}}
+	inner := &ResponsesWriter{BaseWriter: BaseWriter{ResponseWriter: ctx.Writer}, converter: openai.NewResponsesStreamConverter("resp_test", "msg_test", request.Model, request), model: request.Model, stream: true, responseID: "resp_test", itemID: "msg_test", request: request}
+	writer := &WebSearchResponsesWriter{
+		BaseWriter: BaseWriter{ResponseWriter: ctx.Writer}, inner: inner, req: request,
+		chat:   &api.ChatRequest{Model: request.Model, Tools: api.Tools{openai.WebSearchFunctionTool()}},
+		search: func(context.Context, string) (*api.WebSearchResponse, error) { return &api.WebSearchResponse{}, nil },
+		followUpChat: func(_ context.Context, messages []api.Message, _ api.Tools) (api.ChatResponse, error) {
+			return api.ChatResponse{Done: true, Message: api.Message{Role: "assistant", Content: "done"}}, nil
+		},
+	}
+	patch := "*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"
+	initial := api.ChatResponse{Done: true, Message: api.Message{
+		Thinking: "think", Content: "searching",
+		ToolCalls: []api.ToolCall{
+			{ID: "call_search", Function: api.ToolCallFunction{Name: "web_search", Arguments: testArgs(map[string]any{"query": "weather"})}},
+			{ID: "call_patch", Function: api.ToolCallFunction{Name: "apply_patch", Arguments: testArgs(map[string]any{"input": patch})}},
+		},
+	}}
+	data, _ := json.Marshal(initial)
+	if _, err := writer.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{"response.web_search_call.completed", "response.custom_tool_call_input.delta", "response.custom_tool_call_input.done"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s: %s", want, body)
+		}
+	}
+	output := completedResponseOutput(t, body)
+	wantTypes := []string{"reasoning", "message", "custom_tool_call", "web_search_call", "message"}
+	if len(output) != len(wantTypes) {
+		t.Fatalf("terminal output = %#v", output)
+	}
+	for i, want := range wantTypes {
+		if output[i]["type"] != want {
+			t.Fatalf("terminal[%d] = %#v, want %q", i, output[i], want)
+		}
+	}
+	custom := output[2]
+	if custom["call_id"] != "call_patch" || custom["name"] != "apply_patch" || custom["input"] != patch {
+		t.Fatalf("terminal custom item = %#v", custom)
+	}
+	if _, ok := custom["arguments"]; ok {
+		t.Fatalf("terminal custom item leaked arguments: %#v", custom)
+	}
+
+	doneItems := map[int]map[string]any{}
+	lastDoneIndex := -1
+	var customDeltaID, customDoneID string
+	var customDeltaIndex, customDoneIndex int
+	for _, block := range strings.Split(body, "\n\n") {
+		if !strings.HasPrefix(block, "event: ") {
+			continue
+		}
+		lineEnd := strings.IndexByte(block, '\n')
+		dataAt := strings.Index(block, "\ndata: ")
+		if lineEnd < 0 || dataAt < 0 {
+			continue
+		}
+		eventType := strings.TrimPrefix(block[:lineEnd], "event: ")
+		var event map[string]any
+		if err := json.Unmarshal([]byte(block[dataAt+7:]), &event); err != nil {
+			t.Fatalf("decode %s event: %v: %s", eventType, err, block)
+		}
+		switch eventType {
+		case "response.output_item.done":
+			index := int(event["output_index"].(float64))
+			if index <= lastDoneIndex {
+				t.Fatalf("non-monotonic done index %d after %d", index, lastDoneIndex)
+			}
+			lastDoneIndex = index
+			doneItems[index] = event["item"].(map[string]any)
+		case "response.custom_tool_call_input.delta":
+			customDeltaID = event["item_id"].(string)
+			customDeltaIndex = int(event["output_index"].(float64))
+		case "response.custom_tool_call_input.done":
+			customDoneID = event["item_id"].(string)
+			customDoneIndex = int(event["output_index"].(float64))
+		}
+	}
+	if len(doneItems) != len(output) {
+		t.Fatalf("done items = %#v, terminal = %#v", doneItems, output)
+	}
+	for index, terminal := range output {
+		done := doneItems[index]
+		if done == nil || done["id"] != terminal["id"] || done["type"] != terminal["type"] {
+			t.Fatalf("done/terminal mismatch at %d: done=%#v terminal=%#v", index, done, terminal)
+		}
+	}
+	if customDeltaID != custom["id"] || customDoneID != custom["id"] || customDeltaIndex != 2 || customDoneIndex != 2 {
+		t.Fatalf("custom event identity/index mismatch: delta=(%q,%d) done=(%q,%d) terminal=%#v", customDeltaID, customDeltaIndex, customDoneID, customDoneIndex, custom)
+	}
+	search := output[3]
+	if search["type"] != "web_search_call" || doneItems[3]["id"] != search["id"] {
+		t.Fatalf("search done/terminal identity mismatch: done=%#v terminal=%#v", doneItems[3], search)
+	}
+	for _, item := range output {
+		if item["type"] == "function_call" && item["name"] == "web_search" {
+			t.Fatalf("private web_search function leaked: %#v", output)
+		}
+	}
+}
+
 func completedResponseOutput(t *testing.T, body string) []map[string]any {
 	t.Helper()
 	for _, block := range strings.Split(body, "\n\n") {
