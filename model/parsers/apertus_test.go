@@ -200,6 +200,49 @@ func TestApertusParserBareAndTaggedHardErrorsMatch(t *testing.T) {
 	}
 }
 
+func TestApertusParserThinkingAndTools(t *testing.T) {
+	for _, think := range []*api.ThinkValue{nil, {Value: false}, {Value: "low"}, {Value: true}} {
+		p := &ApertusParser{}
+		p.Init([]api.Tool{apertusParserTool("one")}, nil, think)
+		content, thinking, calls, err := p.Add(`<|inner_prefix|>reason<|inner_suffix|><|tools_prefix|>[{"one":{}}]<|tools_suffix|>`, true)
+		if err != nil || len(calls) != 1 {
+			t.Fatalf("think=%v calls=%d err=%v", think, len(calls), err)
+		}
+		if think != nil && think.Bool() {
+			if thinking != "reason" || content != "" {
+				t.Fatalf("thinking=%q content=%q", thinking, content)
+			}
+		} else if content != "reason" || thinking != "" {
+			t.Fatalf("content=%q thinking=%q", content, thinking)
+		}
+	}
+}
+
+func TestApertusParserSplitThinkingTags(t *testing.T) {
+	p := &ApertusParser{}
+	p.Init(nil, nil, &api.ThinkValue{Value: true})
+
+	var content, thinking string
+	for _, chunk := range []struct {
+		text string
+		done bool
+	}{
+		{"<|inner_pre", false},
+		{"fix|>reason<|inner_suf", false},
+		{"fix|>answer", true},
+	} {
+		gotContent, gotThinking, _, err := p.Add(chunk.text, chunk.done)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content += gotContent
+		thinking += gotThinking
+	}
+	if thinking != "reason" || content != "answer" {
+		t.Fatalf("thinking=%q content=%q", thinking, content)
+	}
+}
+
 func apertusParserTool(name string) api.Tool {
 	return api.Tool{Type: "function", Function: api.ToolFunction{Name: name}}
 }
