@@ -119,3 +119,59 @@ func TestInferenceModelCacheConcurrentMiss(t *testing.T) {
 		t.Fatalf("load count = %d, want 1", got)
 	}
 }
+
+func TestInferenceModelCacheGemma4VisionTensorCapabilities(t *testing.T) {
+	setTestHome(t, t.TempDir())
+
+	cfg := model.ConfigV2{
+		ModelFormat:  "safetensors",
+		Renderer:     gemma4RendererLarge,
+		Capabilities: []string{"completion", "vision"},
+	}
+	createSafetensorsTestModel(t, "gemma4-cache", cfg, gemma4VisionManifestLayers(t))
+
+	cache := newInferenceModelCache()
+	loadCount := 0
+	cache.loadModel = func(name string) (*Model, error) {
+		loadCount++
+		return GetModel(name)
+	}
+
+	first, err := cache.Get("gemma4-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.capabilitiesCached || !slices.Contains(first.Capabilities(), model.CapabilityVision) {
+		t.Fatalf("cold capabilities = %v, want cached vision", first.Capabilities())
+	}
+	if len(first.TensorLayerNames) == 0 {
+		t.Fatal("cold model did not retain Gemma 4 tensor layer names")
+	}
+	first.TensorLayerNames[0] = "mutated"
+
+	second, err := cache.Get("gemma4-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadCount != 1 {
+		t.Fatalf("cache hit load count = %d, want 1", loadCount)
+	}
+	if !slices.Contains(second.Capabilities(), model.CapabilityVision) {
+		t.Fatalf("cached capabilities = %v, want vision", second.Capabilities())
+	}
+	if slices.Contains(second.TensorLayerNames, "mutated") {
+		t.Fatalf("cached tensor layer names were mutated: %v", second.TensorLayerNames)
+	}
+
+	createSafetensorsTestModel(t, "gemma4-cache", cfg, nil)
+	third, err := cache.Get("gemma4-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadCount != 2 {
+		t.Fatalf("invalidated load count = %d, want 2", loadCount)
+	}
+	if slices.Contains(third.Capabilities(), model.CapabilityVision) {
+		t.Fatalf("refreshed capabilities = %v, did not expect vision", third.Capabilities())
+	}
+}

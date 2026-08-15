@@ -105,6 +105,7 @@ func cloneInferenceModel(src *Model) *Model {
 	}
 	dst.AdapterPaths = slices.Clone(src.AdapterPaths)
 	dst.ProjectorPaths = slices.Clone(src.ProjectorPaths)
+	dst.TensorLayerNames = slices.Clone(src.TensorLayerNames)
 	dst.License = slices.Clone(src.License)
 	dst.Options = maps.Clone(src.Options)
 	dst.Messages = slices.Clone(src.Messages)
