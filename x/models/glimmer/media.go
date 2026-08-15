@@ -2,6 +2,7 @@ package glimmer
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -33,9 +34,15 @@ type preparedImage struct {
 // PrepareMedia implements base.MediaModel: splice each image segment's
 // placeholder expansion — image_start, the patch-token run, image_end — into
 // the stream, decoding, resizing, and patchifying the image on the CPU.
-func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
+func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	prepared := &base.PreparedRequest{}
 	for s, seg := range segments {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if seg.Data == nil {
 			prepared.Tokens = append(prepared.Tokens, seg.Tokens...)
 			continue

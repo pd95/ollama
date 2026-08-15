@@ -1,6 +1,7 @@
 package qwen3_5
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -204,7 +205,10 @@ func (m *Model) visionLoaded() bool { return m.VisionTower != nil }
 // PrepareMedia implements base.MediaModel: preprocess each image segment,
 // splice its vision_start + pads + vision_end expansion, and precompute the
 // request's 3-channel rope positions.
-func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
+func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	prepared := &base.PreparedRequest{}
 
 	// pos walks the reference's multimodal position rule: text advances one
@@ -222,6 +226,9 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 	}
 
 	for s, seg := range segments {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if seg.Data == nil {
 			prepared.Tokens = append(prepared.Tokens, seg.Tokens...)
 			text(len(seg.Tokens))

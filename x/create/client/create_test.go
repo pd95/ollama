@@ -2,7 +2,9 @@ package client
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,8 +13,10 @@ import (
 
 	"github.com/ollama/ollama/manifest"
 	"github.com/ollama/ollama/parser"
+	"github.com/ollama/ollama/progress"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/safetensors"
 )
 
@@ -558,7 +562,8 @@ func TestInferSafetensorsCapabilitiesGemma4VisionRequiresTensors(t *testing.T) {
 	configJSON := `{
 		"architectures": ["Gemma4ForConditionalGeneration"],
 		"model_type": "gemma4",
-		"vision_config": {"hidden_size": 1024}
+		"text_config": {"hidden_size": 6},
+		"vision_config": {"hidden_size": 4, "intermediate_size": 8, "num_hidden_layers": 2, "num_attention_heads": 1, "num_key_value_heads": 1, "head_dim": 4, "default_output_length": 1, "patch_size": 2, "position_embedding_size": 16, "pooling_kernel_size": 1}
 	}`
 
 	tests := []struct {
@@ -586,12 +591,17 @@ func TestInferSafetensorsCapabilitiesGemma4VisionRequiresTensors(t *testing.T) {
 			want: []string{"completion"},
 		},
 		{
-			name: "vision tower and projector",
+			name: "partial vision tower and projector",
 			tensors: []string{
 				"model.vision_tower.patch_embedder.input_proj.weight",
 				"model.embed_vision.embedding_projection.weight",
 			},
-			want: []string{"completion", "vision"},
+			want: []string{"completion"},
+		},
+		{
+			name:    "complete vision tower and projector",
+			tensors: gemma4ClientVisionTensorNames(2),
+			want:    []string{"completion", "vision"},
 		},
 	}
 
@@ -612,6 +622,144 @@ func TestInferSafetensorsCapabilitiesGemma4VisionRequiresTensors(t *testing.T) {
 	}
 }
 
+func TestInferSafetensorsCapabilitiesGemma4PackedSourceRequiresProducerContract(t *testing.T) {
+	const configJSON = `{
+		"architectures":["Gemma4ForConditionalGeneration"],"model_type":"gemma4",
+		"text_config":{"hidden_size":24},
+		"vision_config":{"hidden_size":16,"intermediate_size":32,"num_hidden_layers":1,"num_attention_heads":1,"num_key_value_heads":1,"head_dim":16,"default_output_length":1,"patch_size":4,"position_embedding_size":16,"pooling_kernel_size":1}
+	}`
+	tensors := make(map[string]gemma4metadata.TensorDescriptor)
+	for _, name := range gemma4ClientVisionTensorNames(1) {
+		dtype, shape := gemma4ClientVisionDescriptorForDimensions(name, 16, 32, 24, 4, 16, 16)
+		tensors[name] = gemma4metadata.TensorDescriptor{Dtype: dtype, Shape: shape}
+	}
+	base := "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear"
+	delete(tensors, base+".weight")
+	tensors[base+".weight_packed"] = gemma4metadata.TensorDescriptor{Dtype: "U8", Shape: []int32{16, 8}}
+	tensors[base+".weight_scale"] = gemma4metadata.TensorDescriptor{Dtype: "F8_E4M3", Shape: []int32{16, 1}}
+	tensors[base+".weight_global_scale"] = gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: nil}
+
+	check := func(t *testing.T, inventory map[string]gemma4metadata.TensorDescriptor, wantVision bool) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeClientSafetensorDescriptors(t, dir, inventory)
+		got := inferSafetensorsCapabilities(dir, "")
+		if slices.Contains(got, "vision") != wantVision {
+			t.Fatalf("capabilities = %v, wantVision %t", got, wantVision)
+		}
+	}
+	t.Run("complete compressed tensors contract", func(t *testing.T) { check(t, tensors, true) })
+	t.Run("missing required global scale", func(t *testing.T) {
+		partial := maps.Clone(tensors)
+		delete(partial, base+".weight_global_scale")
+		check(t, partial, false)
+	})
+	t.Run("wrong producer dtypes reject capability and import", func(t *testing.T) {
+		checkImport := func(t *testing.T, inventory map[string]gemma4metadata.TensorDescriptor, wantErr string) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeClientSafetensorDescriptors(t, dir, inventory)
+			t.Setenv("OLLAMA_MODELS", t.TempDir())
+			p := progress.NewProgress(io.Discard)
+			defer p.Stop()
+			err := CreateModel(CreateOptions{ModelName: "wrong-producer-dtype", ModelDir: dir}, p)
+			if wantErr == "" && err != nil {
+				t.Fatalf("CreateModel() error = %v, want import with vision capability suppressed", err)
+			}
+			if wantErr != "" && (err == nil || !strings.Contains(err.Error(), wantErr)) {
+				t.Fatalf("CreateModel() error = %v, want %q", err, wantErr)
+			}
+		}
+		for _, tc := range []struct {
+			name, tensor, importErr string
+		}{
+			{name: "compressed scale", tensor: base + ".weight_scale"},
+			{name: "compressed global", tensor: base + ".weight_global_scale", importErr: "expected F32 tensor"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				wrong := maps.Clone(tensors)
+				d := wrong[tc.tensor]
+				d.Dtype = "F16"
+				wrong[tc.tensor] = d
+				check(t, wrong, false)
+				checkImport(t, wrong, tc.importErr)
+			})
+		}
+
+		modelOpt := maps.Clone(tensors)
+		delete(modelOpt, base+".weight_packed")
+		delete(modelOpt, base+".weight_global_scale")
+		modelOpt[base+".weight"] = gemma4metadata.TensorDescriptor{Dtype: "U8", Shape: []int32{16, 8}}
+		modelOpt[base+".weight_scale_2"] = gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: nil}
+		for _, tc := range []struct {
+			name, tensor, importErr string
+		}{
+			{name: "ModelOpt scale", tensor: base + ".weight_scale"},
+			{name: "ModelOpt global", tensor: base + ".weight_scale_2", importErr: "expected F32 tensor"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				wrong := maps.Clone(modelOpt)
+				d := wrong[tc.tensor]
+				d.Dtype = "F16"
+				wrong[tc.tensor] = d
+				check(t, wrong, false)
+				checkImport(t, wrong, tc.importErr)
+			})
+		}
+	})
+}
+
+func TestInferSafetensorsCapabilitiesGemma4ReleasedUnequalHeadGeometry(t *testing.T) {
+	const configJSON = `{
+		"architectures":["Gemma4ForConditionalGeneration"],"model_type":"gemma4",
+		"text_config":{"hidden_size":2560},
+		"vision_config":{"hidden_size":768,"intermediate_size":3072,"num_hidden_layers":1,"num_attention_heads":12,"num_key_value_heads":12,"head_dim":64,"rms_norm_eps":1e-6,"default_output_length":280,"patch_size":16,"position_embedding_size":10240,"pooling_kernel_size":3}
+	}`
+	descriptors := make(map[string]gemma4metadata.TensorDescriptor)
+	for _, name := range gemma4ClientVisionTensorNames(1) {
+		dtype, shape := gemma4ClientVisionDescriptorForDimensions(name, 768, 3072, 2560, 16, 10240, 64)
+		descriptors[name] = gemma4metadata.TensorDescriptor{Dtype: dtype, Shape: shape}
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeClientSafetensorDescriptors(t, dir, descriptors)
+	if got := inferSafetensorsCapabilities(dir, ""); !slices.Contains(got, "vision") {
+		t.Fatalf("released-compatible unequal hidden/head geometry capabilities = %v", got)
+	}
+}
+
+func TestInferSafetensorsCapabilitiesGemma4RejectsMissingOrZeroTextWidth(t *testing.T) {
+	descriptors := make(map[string]gemma4metadata.TensorDescriptor)
+	for _, name := range gemma4ClientVisionTensorNames(1) {
+		dtype, shape := gemma4ClientVisionDescriptorForDimensions(name, 16, 32, 24, 4, 16, 16)
+		descriptors[name] = gemma4metadata.TensorDescriptor{Dtype: dtype, Shape: shape}
+	}
+	for _, tt := range []struct {
+		name, textConfig string
+	}{
+		{name: "missing"},
+		{name: "zero", textConfig: `"text_config":{"hidden_size":0},`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			config := `{"architectures":["Gemma4ForConditionalGeneration"],"model_type":"gemma4",` + tt.textConfig + `"vision_config":{"hidden_size":16,"intermediate_size":32,"num_hidden_layers":1,"num_attention_heads":1,"num_key_value_heads":1,"head_dim":16,"default_output_length":1,"patch_size":4,"position_embedding_size":16,"pooling_kernel_size":1}}`
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeClientSafetensorDescriptors(t, dir, descriptors)
+			if got := inferSafetensorsCapabilities(dir, ""); slices.Contains(got, "vision") {
+				t.Fatalf("capabilities = %v, missing/zero text width exposed vision", got)
+			}
+		})
+	}
+}
+
 func TestGemma4ModelConfigRejectsNearMatches(t *testing.T) {
 	if isGemma4ModelConfig([]string{"NotGemma4ForConditionalGeneration"}, "gemma4-next") {
 		t.Fatal("near-match Gemma 4 identifiers classified as Gemma 4")
@@ -621,12 +769,39 @@ func TestGemma4ModelConfigRejectsNearMatches(t *testing.T) {
 	}
 }
 
+func gemma4ClientVisionTensorNames(layers int) []string {
+	names := []string{
+		"model.vision_tower.patch_embedder.input_proj.weight",
+		"model.vision_tower.patch_embedder.position_embedding_table",
+		"model.embed_vision.embedding_projection.weight",
+	}
+	for i := range layers {
+		layer := fmt.Sprintf("model.vision_tower.encoder.layers.%d", i)
+		for _, projection := range []string{
+			".self_attn.q_proj.linear.weight", ".self_attn.k_proj.linear.weight",
+			".self_attn.v_proj.linear.weight", ".self_attn.o_proj.linear.weight",
+			".mlp.gate_proj.linear.weight", ".mlp.up_proj.linear.weight", ".mlp.down_proj.linear.weight",
+		} {
+			names = append(names, layer+projection)
+		}
+		for _, norm := range []string{
+			".self_attn.q_norm.weight", ".self_attn.k_norm.weight",
+			".input_layernorm.weight", ".post_attention_layernorm.weight",
+			".pre_feedforward_layernorm.weight", ".post_feedforward_layernorm.weight",
+		} {
+			names = append(names, layer+norm)
+		}
+	}
+	return names
+}
+
 func writeClientSafetensors(t *testing.T, dir string, names ...string) {
 	t.Helper()
 
 	tensors := make([]*safetensors.TensorData, 0, len(names))
 	for _, name := range names {
-		tensors = append(tensors, safetensors.NewTensorDataFromBytes(name, "U8", []int32{1}, []byte{0}))
+		dtype, shape := gemma4ClientVisionDescriptor(name)
+		tensors = append(tensors, safetensors.NewTensorDataFromBytes(name, dtype, shape, []byte{0}))
 	}
 
 	data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader(tensors))
@@ -635,6 +810,50 @@ func writeClientSafetensors(t *testing.T, dir string, names ...string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), data, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeClientSafetensorDescriptors(t *testing.T, dir string, descriptors map[string]gemma4metadata.TensorDescriptor) {
+	t.Helper()
+	tensors := make([]*safetensors.TensorData, 0, len(descriptors))
+	for name, descriptor := range descriptors {
+		raw := []byte{0}
+		if strings.EqualFold(descriptor.Dtype, "F32") && (len(descriptor.Shape) == 0 || slices.Equal(descriptor.Shape, []int32{1})) {
+			raw = []byte{0, 0, 128, 63}
+		}
+		tensors = append(tensors, safetensors.NewTensorDataFromBytes(name, descriptor.Dtype, descriptor.Shape, raw))
+	}
+	data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader(tensors))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func gemma4ClientVisionDescriptor(name string) (string, []int32) {
+	return gemma4ClientVisionDescriptorForDimensions(name, 4, 8, 6, 2, 16, 4)
+}
+
+func gemma4ClientVisionDescriptorForDimensions(name string, hidden, intermediate, textHidden, patch, positions, headDim int32) (string, []int32) {
+	switch {
+	case strings.HasSuffix(name, "patch_embedder.input_proj.weight"):
+		return "F32", []int32{hidden, 3 * patch * patch}
+	case strings.HasSuffix(name, "position_embedding_table"):
+		return "F32", []int32{2, positions, hidden}
+	case strings.HasSuffix(name, "embed_vision.embedding_projection.weight"):
+		return "F32", []int32{textHidden, hidden}
+	case strings.Contains(name, ".mlp.gate_proj."), strings.Contains(name, ".mlp.up_proj."):
+		return "F32", []int32{intermediate, hidden}
+	case strings.Contains(name, ".mlp.down_proj."):
+		return "F32", []int32{hidden, intermediate}
+	case strings.Contains(name, ".self_attn.q_norm.weight"), strings.Contains(name, ".self_attn.k_norm.weight"):
+		return "F32", []int32{headDim}
+	case strings.Contains(name, "layernorm.weight"):
+		return "F32", []int32{hidden}
+	default:
+		return "F32", []int32{hidden, hidden}
 	}
 }
 

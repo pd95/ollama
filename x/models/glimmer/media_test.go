@@ -2,6 +2,8 @@ package glimmer
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"image"
 	"image/png"
 	"testing"
@@ -35,7 +37,7 @@ func testPNG(t *testing.T, w, h int) []byte {
 
 func TestPrepareMediaSplicesExpansion(t *testing.T) {
 	m := testVisionModel()
-	prepared, err := m.PrepareMedia([]base.Segment{
+	prepared, err := m.PrepareMedia(context.Background(), []base.Segment{
 		{Tokens: []int32{1, 2}},
 		{Kind: "image", Data: testPNG(t, 56, 56)},
 		{Tokens: []int32{3}},
@@ -85,14 +87,23 @@ func TestPrepareMediaSplicesExpansion(t *testing.T) {
 
 func TestPrepareMediaRejectsUnsupportedKind(t *testing.T) {
 	m := testVisionModel()
-	_, err := m.PrepareMedia([]base.Segment{{Kind: "audio", Data: []byte{1}}})
+	_, err := m.PrepareMedia(context.Background(), []base.Segment{{Kind: "audio", Data: []byte{1}}})
 	if err == nil {
 		t.Fatal("expected error for audio input")
 	}
 
 	text := &Model{Config: &Config{}}
-	_, err = text.PrepareMedia([]base.Segment{{Kind: "image", Data: []byte{1}}})
+	_, err = text.PrepareMedia(context.Background(), []base.Segment{{Kind: "image", Data: []byte{1}}})
 	if err == nil {
 		t.Fatal("expected error for text-only model")
+	}
+}
+
+func TestPrepareMediaPreCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	prepared, err := testVisionModel().PrepareMedia(ctx, []base.Segment{{Tokens: []int32{1}}})
+	if !errors.Is(err, context.Canceled) || prepared != nil {
+		t.Fatalf("PrepareMedia() = (%v, %v), want (nil, context.Canceled)", prepared, err)
 	}
 }

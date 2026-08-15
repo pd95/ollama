@@ -142,19 +142,13 @@ func Execute(args []string) error {
 			TopLogprobs:      request.TopLogprobs,
 		}
 
-		if err := runner.Prepare(&request); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
 		var cancel context.CancelFunc
 		request.Ctx, cancel = context.WithCancel(r.Context())
 		defer cancel()
 
-		select {
-		case <-r.Context().Done():
+		if err := runner.prepareAndQueue(request.Ctx, &request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
-		case runner.Requests <- request:
 		}
 
 		w.Header().Set("Content-Type", "application/jsonl")
@@ -224,6 +218,22 @@ func Execute(args []string) error {
 
 		slog.Log(r.Context(), level, "ServeHTTP", "method", r.Method, "path", r.URL.Path, "took", time.Since(t), "status", recorder.Status())
 	}))
+}
+
+func (runner *Runner) prepareAndQueue(ctx context.Context, request *Request) error {
+	request.Ctx = ctx
+	if err := runner.Prepare(ctx, request); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case runner.Requests <- *request:
+		return nil
+	}
 }
 
 type statusRecorder struct {

@@ -2,6 +2,8 @@ package qwen3_5
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"image"
 	"image/png"
 	"strings"
@@ -73,7 +75,7 @@ func TestMRopePositionRule(t *testing.T) {
 		},
 	}
 
-	prepared, err := m.PrepareMedia([]base.Segment{{Tokens: []int32{1, 2, 3}}})
+	prepared, err := m.PrepareMedia(context.Background(), []base.Segment{{Tokens: []int32{1, 2, 3}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +89,7 @@ func TestMRopePositionRule(t *testing.T) {
 	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 64, 64))); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err = m.PrepareMedia([]base.Segment{
+	prepared, err = m.PrepareMedia(context.Background(), []base.Segment{
 		{Tokens: []int32{1, 2, 3}},
 		{Kind: "image", Data: buf.Bytes()},
 	})
@@ -133,6 +135,15 @@ func TestMRopePositionRule(t *testing.T) {
 		if got := pos(c.i); got != c.want {
 			t.Errorf("positions[%d] = %v, want %v", c.i, got, c.want)
 		}
+	}
+}
+
+func TestPrepareMediaPreCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	prepared, err := (&Model{}).PrepareMedia(ctx, []base.Segment{{Tokens: []int32{1}}})
+	if !errors.Is(err, context.Canceled) || prepared != nil {
+		t.Fatalf("PrepareMedia() = (%v, %v), want (nil, context.Canceled)", prepared, err)
 	}
 }
 
