@@ -16,6 +16,8 @@ const (
 	apertusToolCloseTag      = "<|tools_suffix|>"
 	apertusAssistantOpenTag  = "<|assistant_start|>"
 	apertusAssistantCloseTag = "<|assistant_end|>"
+	apertusInnerOpenTag      = "<|inner_prefix|>"
+	apertusInnerCloseTag     = "<|inner_suffix|>"
 	// A tool call is one model response fragment. Keep malformed streams from
 	// retaining unbounded output while allowing substantially larger calls than
 	// the model's normal tool grammar produces.
@@ -26,6 +28,7 @@ type apertusParserState uint8
 
 const (
 	apertusContent apertusParserState = iota
+	apertusThinking
 	apertusToolCalls
 )
 
@@ -36,6 +39,7 @@ type ApertusParser struct {
 	initErr     error
 	callIndex   int
 	pendingBare bool
+	thinking    bool
 }
 
 func (p *ApertusParser) Init(tools []api.Tool, lastMessage *api.Message, thinkValue *api.ThinkValue) []api.Tool {
@@ -45,6 +49,7 @@ func (p *ApertusParser) Init(tools []api.Tool, lastMessage *api.Message, thinkVa
 	p.initErr = nil
 	p.callIndex = 0
 	p.pendingBare = false
+	p.thinking = thinkValue != nil && thinkValue.Bool()
 	for _, tool := range tools {
 		name := tool.Function.Name
 		if !apertusIdentifier(name) {
@@ -72,12 +77,21 @@ func (p *ApertusParser) Add(s string, done bool) (content, thinking string, call
 		return "", "", nil, fmt.Errorf("apertus tool call exceeds %d bytes", maxApertusToolCallBytes)
 	}
 
-	var out strings.Builder
+	var out, thought strings.Builder
 	for {
 		current := p.acc.String()
 		switch p.state {
 		case apertusContent:
-			if idx := strings.Index(current, apertusToolOpenTag); idx >= 0 {
+			innerIdx := strings.Index(current, apertusInnerOpenTag)
+			toolIdx := strings.Index(current, apertusToolOpenTag)
+			if innerIdx >= 0 && (toolIdx < 0 || innerIdx < toolIdx) {
+				out.WriteString(cleanApertusContent(current[:innerIdx]))
+				p.acc.Reset()
+				p.acc.WriteString(current[innerIdx+len(apertusInnerOpenTag):])
+				p.state = apertusThinking
+				continue
+			}
+			if idx := toolIdx; idx >= 0 {
 				p.pendingBare = false
 				out.WriteString(cleanApertusContent(current[:idx]))
 				p.acc.Reset()
@@ -94,7 +108,7 @@ func (p *ApertusParser) Add(s string, done bool) (content, thinking string, call
 					if parsed, parseErr := p.parseToolCalls(cleaned); parseErr == nil {
 						p.acc.Reset()
 						p.pendingBare = false
-						return out.String(), "", parsed, nil
+						return out.String(), thought.String(), parsed, nil
 					} else if !isSoftApertusToolParseError(parseErr) {
 						return "", "", nil, parseErr
 					}
@@ -102,20 +116,21 @@ func (p *ApertusParser) Add(s string, done bool) (content, thinking string, call
 				p.acc.Reset()
 				p.pendingBare = false
 				out.WriteString(cleaned)
-				return out.String(), "", calls, nil
+				return out.String(), thought.String(), calls, nil
 			}
 			if p.looksLikeToolCallStart(current) {
 				p.pendingBare = true
 				if p.acc.Len() > maxApertusToolCallBytes {
 					return "", "", nil, fmt.Errorf("apertus tool call exceeds %d bytes", maxApertusToolCallBytes)
 				}
-				return out.String(), "", nil, nil
+				return out.String(), thought.String(), nil, nil
 			}
 			p.pendingBare = false
 			overlapLen := max(
 				overlap(current, apertusToolOpenTag),
 				overlap(current, apertusAssistantOpenTag),
 				overlap(current, apertusAssistantCloseTag),
+				overlap(current, apertusInnerOpenTag),
 			)
 			n := len(current) - overlapLen
 			if n == len(current) {
@@ -130,7 +145,43 @@ func (p *ApertusParser) Add(s string, done bool) (content, thinking string, call
 				p.acc.Reset()
 				p.acc.WriteString(current[n:])
 			}
-			return out.String(), "", calls, nil
+			return out.String(), thought.String(), calls, nil
+
+		case apertusThinking:
+			if idx := strings.Index(current, apertusInnerCloseTag); idx >= 0 {
+				inner := current[:idx]
+				if p.thinking {
+					thought.WriteString(inner)
+				} else {
+					out.WriteString(cleanApertusContent(inner))
+				}
+				p.acc.Reset()
+				p.acc.WriteString(strings.TrimLeftFunc(current[idx+len(apertusInnerCloseTag):], unicode.IsSpace))
+				p.state = apertusContent
+				continue
+			}
+			if done {
+				if p.thinking {
+					thought.WriteString(current)
+				} else {
+					out.WriteString(cleanApertusContent(current))
+				}
+				p.acc.Reset()
+				p.state = apertusContent
+				return out.String(), thought.String(), calls, nil
+			}
+			n := len(current) - overlap(current, apertusInnerCloseTag)
+			if n > 0 {
+				emit := current[:n]
+				if p.thinking {
+					thought.WriteString(emit)
+				} else {
+					out.WriteString(cleanApertusContent(emit))
+				}
+				p.acc.Reset()
+				p.acc.WriteString(current[n:])
+			}
+			return out.String(), thought.String(), calls, nil
 
 		case apertusToolCalls:
 			if idx := strings.Index(current, apertusToolCloseTag); idx >= 0 {
@@ -162,9 +213,9 @@ func (p *ApertusParser) Add(s string, done bool) (content, thinking string, call
 				p.acc.Reset()
 				p.state = apertusContent
 				p.pendingBare = false
-				return out.String(), "", calls, nil
+				return out.String(), thought.String(), calls, nil
 			}
-			return out.String(), "", calls, nil
+			return out.String(), thought.String(), calls, nil
 		}
 	}
 }
@@ -206,12 +257,14 @@ func apertusPendingBarePrefix(s string) bool {
 func cleanApertusContent(s string) string {
 	s = strings.ReplaceAll(s, apertusAssistantOpenTag, "")
 	s = strings.ReplaceAll(s, apertusAssistantCloseTag, "")
+	s = strings.ReplaceAll(s, apertusInnerOpenTag, "")
+	s = strings.ReplaceAll(s, apertusInnerCloseTag, "")
 	return strings.TrimRightFunc(s, unicode.IsSpace)
 }
 func (p *ApertusParser) HasToolSupport() bool     { return true }
-func (p *ApertusParser) HasThinkingSupport() bool { return false }
+func (p *ApertusParser) HasThinkingSupport() bool { return true }
 func (p *ApertusParser) PreservedTokens() []string {
-	return []string{apertusToolOpenTag, apertusToolCloseTag, apertusAssistantOpenTag, apertusAssistantCloseTag}
+	return []string{apertusToolOpenTag, apertusToolCloseTag, apertusAssistantOpenTag, apertusAssistantCloseTag, apertusInnerOpenTag, apertusInnerCloseTag}
 }
 
 func (p *ApertusParser) parseToolCalls(raw string) ([]api.ToolCall, error) {
