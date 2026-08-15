@@ -379,12 +379,13 @@ type DecoderLayer struct {
 
 // Model is the Gemma 4 model (text + optional vision).
 type Model struct {
-	EmbedTokens nn.EmbeddingLayer
-	Layers      []*DecoderLayer
-	Norm        *nn.RMSNorm
-	LMHead      nn.LinearLayer
-	Vision      *VisionModel
-	EmbedVision *MultimodalEmbedder
+	EmbedTokens   nn.EmbeddingLayer
+	Layers        []*DecoderLayer
+	Norm          *nn.RMSNorm
+	LMHead        nn.LinearLayer
+	Vision        *VisionModel
+	UnifiedVision *UnifiedVisionEmbedder
+	EmbedVision   *MultimodalEmbedder
 
 	// PLE model-level components (nil if no PLE).
 	EmbedTokensPerLayer nn.EmbeddingLayer
@@ -781,15 +782,23 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		return fmt.Errorf("invalid Gemma4 vision tensors: %w", err)
 	}
 	if visionReady {
-		vision, err := loadVisionModel(tensors, m.VisionConfig, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
-		if err != nil {
-			return err
+		if m.VisionConfig.unified() {
+			vision, err := loadUnifiedVisionEmbedder(tensors, m.VisionConfig, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+			if err != nil {
+				return err
+			}
+			m.UnifiedVision = vision
+		} else {
+			vision, err := loadVisionModel(tensors, m.VisionConfig, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+			if err != nil {
+				return err
+			}
+			m.Vision = vision
 		}
 		embedVision, err := loadMultimodalEmbedder(tensors, "embed_vision", m.VisionConfig.RMSNormEps, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 		if err != nil {
 			return err
 		}
-		m.Vision = vision
 		m.EmbedVision = embedVision
 	}
 
@@ -1380,7 +1389,7 @@ func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positio
 		// kernel only handles L < 4 (generation). For prefill, we fall back
 		// to explicit matmul+softmax+matmul on CUDA.
 		var k, v *mlx.Array
-		mask := nn.CausalMask().Intersect(nn.QPaddingMask(b, q.DType()))
+		mask := gemma4AttentionMask(b, isSliding).Intersect(nn.QPaddingMask(b, q.DType()))
 		if kv.history != nil {
 			k, v = kv.history.K(), kv.history.V()
 			mask = kv.history.Mask(mask)
@@ -1410,7 +1419,7 @@ func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positio
 		out = mlx.Reshape(out, B, cfg.NumAttentionHeads, L, headDim)
 	} else {
 		var opt nn.SDPAOption
-		mask := nn.CausalMask()
+		mask := gemma4AttentionMask(b, isSliding)
 		if kv.history != nil {
 			opt = nn.WithKVHistory(kv.history)
 		} else {
@@ -1426,6 +1435,23 @@ func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positio
 		out = mlx.Contiguous(out, false)
 	}
 	return a.OProj.Forward(out), kv
+}
+
+func gemma4AttentionMask(b *batch.Batch, isSliding bool) nn.AttentionMask {
+	mask := nn.CausalMask()
+	if !isSliding {
+		return mask
+	}
+	for seq, raw := range b.Layout {
+		layout, ok := raw.(*gemma4MediaLayout)
+		if !ok || layout == nil {
+			continue
+		}
+		for _, span := range layout.ImageSpans {
+			mask = mask.Relax(seq, span[0], span[1], span[0], span[1])
+		}
+	}
+	return mask
 }
 
 func (m *MLP) Forward(x *mlx.Array) *mlx.Array {

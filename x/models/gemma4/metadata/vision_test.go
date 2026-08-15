@@ -386,3 +386,125 @@ func TestVisionInventoryDescriptorAndConfigMatrix(t *testing.T) {
 		}
 	}
 }
+
+func unifiedVisionConfig() ConfigFile {
+	return ConfigFile{
+		Architectures: []string{"Gemma4UnifiedForConditionalGeneration"},
+		ModelType:     "gemma4_unified", TextConfig: TextConfig{HiddenSize: 5},
+		VisionConfig: &VisionConfig{ModelType: "gemma4_unified_vision", MMEmbedDim: 3, MMPosembSize: 4, ModelPatchSize: 2, NumSoftTokens: 2, PatchSize: 1, PoolingKernelSize: 2},
+	}
+}
+
+func unifiedVisionDescriptors() map[string]TensorDescriptor {
+	return map[string]TensorDescriptor{
+		"model.vision_embedder.patch_ln1.weight":         {Dtype: "F32", Shape: []int32{12}},
+		"model.vision_embedder.patch_ln1.bias":           {Dtype: "F32", Shape: []int32{12}},
+		"model.vision_embedder.patch_dense.weight":       {Dtype: "F32", Shape: []int32{3, 12}},
+		"model.vision_embedder.patch_dense.bias":         {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.patch_ln2.weight":         {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.patch_ln2.bias":           {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.pos_embedding":            {Dtype: "F32", Shape: []int32{4, 2, 3}},
+		"model.vision_embedder.pos_norm.weight":          {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.pos_norm.bias":            {Dtype: "F32", Shape: []int32{3}},
+		"model.embed_vision.embedding_projection.weight": {Dtype: "F32", Shape: []int32{5, 3}},
+	}
+}
+
+func TestUnifiedVisionInventoryDispatchAndBoundaries(t *testing.T) {
+	cfg, valid := unifiedVisionConfig(), unifiedVisionDescriptors()
+	for name, validate := range map[string]func(ConfigFile, map[string]TensorDescriptor) error{
+		"source": ValidateVisionSourceInventory, "installed": ValidateVisionInstalledInventory, "runtime": ValidateVisionRuntimeInventory,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validate(cfg, valid); err != nil {
+				t.Fatalf("complete unified inventory: %v", err)
+			}
+			for _, tensor := range []string{"model.vision_embedder.patch_ln1.bias", "model.vision_embedder.patch_dense.weight", "model.embed_vision.embedding_projection.weight"} {
+				partial := cloneDescriptors(valid)
+				delete(partial, tensor)
+				if err := validate(cfg, partial); err == nil {
+					t.Fatalf("missing %s accepted", tensor)
+				}
+			}
+			bad := cloneDescriptors(valid)
+			d := bad["model.vision_embedder.pos_embedding"]
+			d.Shape = []int32{4, 3, 3}
+			bad["model.vision_embedder.pos_embedding"] = d
+			if err := validate(cfg, bad); err == nil {
+				t.Fatal("invalid position shape accepted")
+			}
+		})
+	}
+
+	for _, mutate := range []func(*ConfigFile){
+		func(c *ConfigFile) { c.TextConfig.HiddenSize = 0 },
+		func(c *ConfigFile) { c.VisionConfig.MMEmbedDim = MaxVisionHidden + 1 },
+		func(c *ConfigFile) { c.VisionConfig.MMPosembSize = 1 },
+		func(c *ConfigFile) { c.VisionConfig.ModelPatchSize = 3 },
+		func(c *ConfigFile) { c.VisionConfig.NumSoftTokens = MaxVisionSoftTokens + 1 },
+	} {
+		bad := cfg
+		v := *cfg.VisionConfig
+		bad.VisionConfig = &v
+		mutate(&bad)
+		if _, err := ProjectVisionArchitecture(bad); err == nil {
+			t.Fatalf("invalid unified architecture accepted: %+v", bad.VisionConfig)
+		}
+	}
+
+	boundary := cfg
+	boundaryVision := *cfg.VisionConfig
+	boundaryVision.ModelPatchSize = 8
+	boundaryVision.PatchSize = 8
+	boundaryVision.PoolingKernelSize = 1
+	boundaryVision.NumSoftTokens = MaxVisionSoftTokens
+	boundaryVision.MMPosembSize = MaxVisionSoftTokens
+	boundary.VisionConfig = &boundaryVision
+	if _, err := ProjectVisionArchitecture(boundary); err != nil {
+		t.Fatalf("exact unified patch allocation boundary: %v", err)
+	}
+	over := boundary
+	overVision := boundaryVision
+	overVision.ModelPatchSize, overVision.PatchSize = 9, 9
+	over.VisionConfig = &overVision
+	if _, err := ProjectVisionArchitecture(over); err == nil || !strings.Contains(err.Error(), "patch allocation") {
+		t.Fatalf("over unified patch allocation error = %v", err)
+	}
+
+	near := cfg
+	near.ModelType = "gemma4_unified_extra"
+	near.Architectures = []string{"NotGemma4UnifiedForConditionalGeneration"}
+	v := *cfg.VisionConfig
+	v.ModelType = "gemma4_unified_vision_extra"
+	near.VisionConfig = &v
+	a, err := ProjectVisionArchitecture(near)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Unified {
+		t.Fatal("near-match unified identifiers dispatched as unified")
+	}
+
+	packedCfg := cfg
+	packedVision := *cfg.VisionConfig
+	packedVision.ModelPatchSize, packedVision.PatchSize = 4, 2
+	packedCfg.VisionConfig = &packedVision
+	packed := cloneDescriptors(valid)
+	packed["model.vision_embedder.patch_ln1.weight"] = TensorDescriptor{Dtype: "F32", Shape: []int32{48}}
+	packed["model.vision_embedder.patch_ln1.bias"] = TensorDescriptor{Dtype: "F32", Shape: []int32{48}}
+	const dense = "model.vision_embedder.patch_dense"
+	delete(packed, dense+".weight")
+	packed[dense+".weight_packed"] = TensorDescriptor{Dtype: "U8", Shape: []int32{3, 24}}
+	packed[dense+".weight_scale"] = TensorDescriptor{Dtype: "F8_E4M3", Shape: []int32{3, 3}}
+	packed[dense+".weight_global_scale"] = TensorDescriptor{Dtype: "F32"}
+	if err := ValidateVisionSourceInventory(packedCfg, packed); err != nil {
+		t.Fatalf("packed unified source: %v", err)
+	}
+	if err := ValidateVisionInstalledInventory(packedCfg, packed); err == nil {
+		t.Fatal("source-only packed unified inventory accepted as installed")
+	}
+	delete(packed, dense+".weight_global_scale")
+	if err := ValidateVisionSourceInventory(packedCfg, packed); err == nil {
+		t.Fatal("incomplete packed unified inventory accepted")
+	}
+}

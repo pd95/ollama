@@ -570,6 +570,8 @@ func gemma4ModelDirHasVisionTensors(modelDir string) bool {
 	}
 	tensors := make(map[string]gemma4metadata.TensorDescriptor, len(inv.Tensors))
 	for name, tensor := range inv.Tensors {
+		// Unified vision is encoder-free, so dispatch and readiness depend on
+		// descriptor shapes rather than the released tower sentinel alone.
 		tensors[name] = gemma4metadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
 	}
 	return gemma4metadata.ValidateVisionSourceInventory(cfg, tensors) == nil
