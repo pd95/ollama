@@ -21,6 +21,8 @@ const (
 	apertusToolsPrefix    = "<|tools_prefix|>"
 	apertusToolsSuffix    = "<|tools_suffix|>"
 	apertusImageToken     = "<|image|>"
+	apertusInnerOpenTag   = "<|inner_prefix|>"
+	apertusInnerCloseTag  = "<|inner_suffix|>"
 	maxApertusSchemaDepth = 32
 	maxApertusSchemaNodes = 4096
 )
@@ -30,9 +32,7 @@ type ApertusRenderer struct{}
 func (r *ApertusRenderer) LeadingBOS() string { return "" }
 
 func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
-	if think != nil && think.Bool() {
-		return "", fmt.Errorf("apertus renderer does not support thinking")
-	}
+	thinkingEnabled := think != nil && think.Bool()
 	if err := validateApertusTools(tools); err != nil {
 		return "", err
 	}
@@ -42,6 +42,9 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 	}
 	for _, message := range messages {
 		if err := validateApertusText(message.Content); err != nil {
+			return "", err
+		}
+		if err := validateApertusText(message.Thinking); err != nil {
 			return "", err
 		}
 	}
@@ -59,7 +62,11 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 		sb.WriteString(apertusSystemEnd)
 	}
 	sb.WriteString(apertusDeveloperStart)
-	sb.WriteString("Deliberation: disabled\n")
+	if thinkingEnabled {
+		sb.WriteString("Deliberation: enabled\n")
+	} else {
+		sb.WriteString("Deliberation: disabled\n")
+	}
 	if len(tools) == 0 {
 		sb.WriteString("Tool Capabilities: disabled")
 	} else {
@@ -111,6 +118,11 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 			if inTool {
 				sb.WriteString("]")
 				inTool = false
+			}
+			if thinkingEnabled && message.Thinking != "" {
+				sb.WriteString(apertusInnerOpenTag)
+				sb.WriteString(message.Thinking)
+				sb.WriteString(apertusInnerCloseTag)
 			}
 			sb.WriteString(message.Content)
 			if len(message.ToolCalls) > 0 {
@@ -418,7 +430,7 @@ func validateApertusProperty(prop api.ToolProperty, depth int, budget *int) erro
 }
 
 func validateApertusText(s string) error {
-	for _, token := range []string{apertusSystemStart, apertusSystemEnd, apertusDeveloperStart, apertusDeveloperEnd, apertusUserStart, apertusUserEnd, apertusAssistantStart, apertusAssistantEnd, apertusToolsPrefix, apertusToolsSuffix, apertusImageToken} {
+	for _, token := range []string{apertusSystemStart, apertusSystemEnd, apertusDeveloperStart, apertusDeveloperEnd, apertusUserStart, apertusUserEnd, apertusAssistantStart, apertusAssistantEnd, apertusToolsPrefix, apertusToolsSuffix, apertusImageToken, apertusInnerOpenTag, apertusInnerCloseTag} {
 		if strings.Contains(s, token) {
 			return fmt.Errorf("apertus content contains reserved token %q", token)
 		}
