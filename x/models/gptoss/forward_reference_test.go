@@ -1,5 +1,3 @@
-//go:build gptoss_forward_reference
-
 package gptoss
 
 import (
@@ -241,7 +239,12 @@ func materializedInts(a *mlx.Array) []int {
 	}
 	cloned := a.Clone()
 	mlx.Eval(cloned)
-	return cloned.Ints()
+	values := cloned.Ints()
+	ints := make([]int, len(values))
+	for i, value := range values {
+		ints[i] = int(value)
+	}
+	return ints
 }
 
 func compareForwardReferenceArrays(t *testing.T, name string, got, want *mlx.Array, absTol float64) {
