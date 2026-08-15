@@ -67,6 +67,10 @@ type TextConfig struct {
 	ExpertIntermediateSize int32                  `json:"moe_intermediate_size"`
 	RopeParameters         map[string]*RopeParams `json:"rope_parameters"`
 	ImageTokenIDValue      int32                  `json:"image_token_id"`
+	AudioTokenIDValue      int32                  `json:"-"`
+	BOITokenIDValue        int32                  `json:"-"`
+	EOITokenIDValue        int32                  `json:"-"`
+	VisionSoftTokens       int32                  `json:"-"`
 
 	// Quantization parameters.
 	QuantGroupSize int                               `json:"-"`
@@ -374,6 +378,8 @@ type Model struct {
 	Layers      []*DecoderLayer
 	Norm        *nn.RMSNorm
 	LMHead      nn.LinearLayer
+	Vision      *VisionModel
+	EmbedVision *MultimodalEmbedder
 
 	// PLE model-level components (nil if no PLE).
 	EmbedTokensPerLayer nn.EmbeddingLayer
@@ -386,9 +392,11 @@ type Model struct {
 
 	tok *tokenizer.Tokenizer
 	*TextConfig
+	VisionConfig *VisionConfig
 
 	SuppressLogitBias *mlx.Array
 	weightPrefix      string
+	mediaTokens       gemma4MediaTokens
 }
 
 func parseTextConfig(configData []byte) (TextConfig, error) {
@@ -407,6 +415,23 @@ func parseTextConfig(configData []byte) (TextConfig, error) {
 	if wrapped.TextConfig != nil {
 		cfg = *wrapped.TextConfig
 	}
+	var top struct {
+		ImageTokenID             int32 `json:"image_token_id"`
+		AudioTokenID             int32 `json:"audio_token_id"`
+		BOITokenID               int32 `json:"boi_token_id"`
+		EOITokenID               int32 `json:"eoi_token_id"`
+		VisionSoftTokensPerImage int32 `json:"vision_soft_tokens_per_image"`
+	}
+	if err := json.Unmarshal(configData, &top); err != nil {
+		return TextConfig{}, fmt.Errorf("parse top-level multimodal config: %w", err)
+	}
+	if cfg.ImageTokenIDValue == 0 {
+		cfg.ImageTokenIDValue = top.ImageTokenID
+	}
+	cfg.AudioTokenIDValue = top.AudioTokenID
+	cfg.BOITokenIDValue = top.BOITokenID
+	cfg.EOITokenIDValue = top.EOITokenID
+	cfg.VisionSoftTokens = top.VisionSoftTokensPerImage
 
 	// Apply defaults.
 	if cfg.HeadDim == 0 {
@@ -432,6 +457,24 @@ func parseTextConfig(configData []byte) (TextConfig, error) {
 	}
 	if cfg.MaxPositionEmbeddings == 0 {
 		cfg.MaxPositionEmbeddings = 131072
+	}
+	if cfg.ImageTokenIDValue == 0 {
+		cfg.ImageTokenIDValue = 258880
+	}
+	if cfg.AudioTokenIDValue == 0 {
+		cfg.AudioTokenIDValue = 258881
+	}
+	if cfg.BOITokenIDValue == 0 {
+		cfg.BOITokenIDValue = 255999
+	}
+	if cfg.EOITokenIDValue == 0 {
+		cfg.EOITokenIDValue = 258882
+	}
+	if cfg.VisionSoftTokens == 0 {
+		cfg.VisionSoftTokens = 280
+	}
+	if err := validateGemma4ImageTokenConfig(&cfg); err != nil {
+		return TextConfig{}, err
 	}
 
 	// Gemma 4 uses scaling=1.0 (no 1/sqrt(head_dim) scaling); the Q/K norms
@@ -511,6 +554,31 @@ func parseTextConfig(configData []byte) (TextConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func validateGemma4ImageTokenConfig(cfg *TextConfig) error {
+	if cfg.VisionSoftTokens <= 0 || cfg.VisionSoftTokens > maxGemma4VisionSoftTokens {
+		return fmt.Errorf("invalid Gemma4 vision soft-token count %d", cfg.VisionSoftTokens)
+	}
+	tokens := []struct {
+		name string
+		id   int32
+	}{
+		{"boi_token_id", cfg.BOITokenIDValue},
+		{"image_token_id", cfg.ImageTokenIDValue},
+		{"eoi_token_id", cfg.EOITokenIDValue},
+	}
+	seen := make(map[int32]string, len(tokens))
+	for _, token := range tokens {
+		if token.id < 0 || token.id >= cfg.VocabSize {
+			return fmt.Errorf("invalid Gemma4 %s %d for vocab size %d", token.name, token.id, cfg.VocabSize)
+		}
+		if other, ok := seen[token.id]; ok {
+			return fmt.Errorf("Gemma4 %s duplicates %s at token %d", token.name, other, token.id)
+		}
+		seen[token.id] = token.name
+	}
+	return nil
 }
 
 func parseSuppressTokens(configData []byte) []int32 {
@@ -610,6 +678,10 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	visionConfig, err := parseVisionConfig(configData)
+	if err != nil {
+		return nil, err
+	}
 
 	if qt := root.QuantType(); qt != "" {
 		cfg.QuantGroupSize, cfg.QuantBits, cfg.QuantMode = model.QuantizationParams(qt)
@@ -632,8 +704,10 @@ func newModel(root *model.Root) (base.Model, error) {
 		tokConfig.GenerationConfigJSON = genConfigData
 		suppressTokens = parseSuppressTokens(genConfigData)
 	}
+	mediaTokens := defaultGemma4MediaTokens()
 	if tokConfigData, err := root.Manifest.ReadConfig("tokenizer_config.json"); err == nil {
 		tokConfig.TokenizerConfigJSON = tokConfigData
+		mediaTokens = parseGemma4MediaTokens(tokConfigData, mediaTokens)
 	}
 
 	tok, err := tokenizer.LoadFromBytesWithConfig(tokData, tokConfig)
@@ -644,7 +718,9 @@ func newModel(root *model.Root) (base.Model, error) {
 	m := &Model{
 		Layers:            make([]*DecoderLayer, cfg.NumHiddenLayers),
 		TextConfig:        &cfg,
+		VisionConfig:      visionConfig,
 		tok:               tok,
+		mediaTokens:       mediaTokens,
 		SuppressLogitBias: makeSuppressLogitBias(suppressTokens, cfg.VocabSize),
 	}
 
@@ -693,6 +769,19 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	} else {
 		// Gemma 4 ties output projection to embeddings.
 		m.LMHead = m.EmbedTokens.AsLinear()
+	}
+
+	if m.VisionConfig != nil && hasGemma4VisionWeights(tensors) {
+		vision, err := loadVisionModel(tensors, m.VisionConfig, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+		if err != nil {
+			return err
+		}
+		embedVision, err := loadMultimodalEmbedder(tensors, "embed_vision", m.VisionConfig.RMSNormEps, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+		if err != nil {
+			return err
+		}
+		m.Vision = vision
+		m.EmbedVision = embedVision
 	}
 
 	// PLE model-level weights.
@@ -983,13 +1072,19 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (hidden, auxHidden
 	dims := b.InputIDs.Dims()
 	B, L := int32(dims[0]), int32(dims[1])
 	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
-	h := m.EmbedTokens.Forward(b.InputIDs)
-	h = mlx.MulScalar(h, m.EmbedScale)
+	h := m.TokenEmbeddings(b.InputIDs)
+	if len(b.Media) > 0 {
+		h = m.scatterMedia(h, b)
+	}
 
 	// Compute PLE inputs if configured.
 	var perLayerInputs *mlx.Array
 	if m.HiddenSizePerLayer > 0 && m.EmbedTokensPerLayer != nil {
-		perLayerInputs = m.computePLEInputs(b.InputIDs, h)
+		pleTokens := b.InputIDs
+		if len(b.Media) > 0 {
+			pleTokens = gemma4PLETokens(pleTokens, b)
+		}
+		perLayerInputs = m.computePLEInputs(pleTokens, h)
 	}
 
 	// KV sharing: each donor layer stores its KVHistory here so later
