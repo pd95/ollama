@@ -2,11 +2,14 @@ package glimmer
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
+	"image/color"
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 	"math"
 
 	"golang.org/x/image/draw"
@@ -33,9 +36,15 @@ type preparedImage struct {
 // PrepareMedia implements base.MediaModel: splice each image segment's
 // placeholder expansion — image_start, the patch-token run, image_end — into
 // the stream, decoding, resizing, and patchifying the image on the CPU.
-func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
+func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	prepared := &base.PreparedRequest{}
 	for s, seg := range segments {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if seg.Data == nil {
 			prepared.Tokens = append(prepared.Tokens, seg.Tokens...)
 			continue
@@ -47,14 +56,19 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 			return nil, fmt.Errorf("glimmer does not support %s input", seg.Kind)
 		}
 
-		patches, geom, err := m.preprocessImage(seg.Data)
+		patches, geom, err := m.preprocessImage(ctx, seg.Data)
 		if err != nil {
 			return nil, fmt.Errorf("preprocess image: %w", err)
 		}
 
 		start := len(prepared.Tokens)
 		prepared.Tokens = append(prepared.Tokens, m.ImageStartTokenID)
-		for range geom.outputTokens {
+		for i := range geom.outputTokens {
+			if i%256 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			prepared.Tokens = append(prepared.Tokens, m.PatchTokenID)
 		}
 		prepared.Tokens = append(prepared.Tokens, m.ImageEndTokenID)
@@ -70,6 +84,9 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 			// relaxed image-span mask), so chunked prefill may split the run.
 			Causal: true,
 		})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return prepared, nil
 }
@@ -155,9 +172,15 @@ func computeImageSize(width, height, patchStride, maxTokens int) (targetWidth, t
 // preprocessImage decodes and prepares one image on the CPU: budgeted
 // resize, [-1,1] rescale, and patchify to the tower's layout — one row per
 // patch, (temporal, RGB, pixel row, pixel column) within it.
-func (m *Model) preprocessImage(data []byte) ([]float32, preparedImage, error) {
-	src, _, err := image.Decode(bytes.NewReader(data))
+func (m *Model) preprocessImage(ctx context.Context, data []byte) ([]float32, preparedImage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, preparedImage{}, err
+	}
+	src, _, err := image.Decode(glimmerContextReader{check: ctx.Err, r: bytes.NewReader(data)})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, preparedImage{}, ctxErr
+		}
 		return nil, preparedImage{}, fmt.Errorf("decode: %w", err)
 	}
 
@@ -168,17 +191,25 @@ func (m *Model) preprocessImage(data []byte) ([]float32, preparedImage, error) {
 		return nil, preparedImage{}, fmt.Errorf("invalid image dimensions %dx%d", bounds.Dx(), bounds.Dy())
 	}
 
-	resized := image.NewNRGBA(image.Rect(0, 0, targetW, targetH))
-	draw.CatmullRom.Scale(resized, resized.Bounds(), src, bounds, draw.Src, nil)
+	resized, err := resizeGlimmerImage(ctx, src, bounds, targetW, targetH)
+	if err != nil {
+		return nil, preparedImage{}, err
+	}
 
 	patchSize := int(m.VisionPatchSize)
 	temporal := int(m.VisionPatchTemporal)
 	gridH, gridW := targetH/patchSize, targetW/patchSize
 	patchDim := temporal * 3 * patchSize * patchSize
+	if err := ctx.Err(); err != nil {
+		return nil, preparedImage{}, err
+	}
 	patches := make([]float32, gridH*gridW*patchDim)
 
 	at := 0
 	for patchY := range gridH {
+		if err := ctx.Err(); err != nil {
+			return nil, preparedImage{}, err
+		}
 		for patchX := range gridW {
 			for range temporal {
 				for channel := range 3 {
@@ -195,5 +226,57 @@ func (m *Model) preprocessImage(data []byte) ([]float32, preparedImage, error) {
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, preparedImage{}, err
+	}
 	return patches, preparedImage{gridH: gridH, gridW: gridW, outputTokens: outputTokens}, nil
+}
+
+type glimmerContextReader struct {
+	check func() error
+	r     io.Reader
+}
+
+func (r glimmerContextReader) Read(p []byte) (int, error) {
+	if err := r.check(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
+type glimmerResizeCancellation struct{ marker byte }
+
+var glimmerResizeCanceled = &glimmerResizeCancellation{marker: 1}
+
+type glimmerCancellableImage struct {
+	*image.NRGBA
+	check func() error
+}
+
+func (dst glimmerCancellableImage) Set(x, y int, c color.Color) {
+	if dst.check() != nil {
+		panic(glimmerResizeCanceled)
+	}
+	dst.NRGBA.Set(x, y, c)
+}
+
+func resizeGlimmerImage(ctx context.Context, src image.Image, bounds image.Rectangle, width, height int) (resized *image.NRGBA, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	dst := image.NewNRGBA(image.Rect(0, 0, width, height))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if recovered == glimmerResizeCanceled {
+				resized, err = nil, ctx.Err()
+				return
+			}
+			panic(recovered)
+		}
+	}()
+	draw.CatmullRom.Scale(glimmerCancellableImage{NRGBA: dst, check: ctx.Err}, dst.Bounds(), src, bounds, draw.Src, nil)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return dst, nil
 }

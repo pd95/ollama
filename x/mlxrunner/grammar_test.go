@@ -1,6 +1,7 @@
 package mlxrunner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -189,7 +190,7 @@ func TestPrepareGrammarUnavailable(t *testing.T) {
 		Prompt: "0",
 		Format: json.RawMessage(`"json"`),
 	}}
-	err := r.Prepare(request)
+	err := r.Prepare(context.Background(), request)
 	var statusErr api.StatusError
 	if !errors.As(err, &statusErr) {
 		t.Fatalf("Prepare error = %T %v, want api.StatusError", err, err)

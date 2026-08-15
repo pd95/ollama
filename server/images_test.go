@@ -2,12 +2,18 @@ package server
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -18,6 +24,8 @@ import (
 	"github.com/ollama/ollama/manifest"
 	"github.com/ollama/ollama/template"
 	"github.com/ollama/ollama/types/model"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
+	"github.com/ollama/ollama/x/safetensors"
 )
 
 func TestPruneLayersSkipsRecentOrphans(t *testing.T) {
@@ -553,8 +561,10 @@ func TestModelCapabilities(t *testing.T) {
 					Renderer:     gemma4RendererSmall,
 					Capabilities: []string{"vision", "audio"},
 				},
-				TensorLayerNames: []string{"model.vision_tower.patch_embedder.input_proj.weight", "model.embed_vision.embedding_projection.weight"},
-				Template:         chatTemplate,
+				TensorLayerNames:    gemma4VisionTensorNames(2),
+				Gemma4VisionConfig:  gemma4VisionConfig(2),
+				Gemma4VisionTensors: testGemma4VisionTensorDescriptors(2),
+				Template:            chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
@@ -566,8 +576,10 @@ func TestModelCapabilities(t *testing.T) {
 					Renderer:     gemma4RendererLarge,
 					Capabilities: []string{"vision", "audio"},
 				},
-				TensorLayerNames: []string{"model.vision_tower.patch_embedder.input_proj.weight", "model.embed_vision.embedding_projection.weight"},
-				Template:         chatTemplate,
+				TensorLayerNames:    gemma4VisionTensorNames(2),
+				Gemma4VisionConfig:  gemma4VisionConfig(2),
+				Gemma4VisionTensors: testGemma4VisionTensorDescriptors(2),
+				Template:            chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
@@ -579,8 +591,10 @@ func TestModelCapabilities(t *testing.T) {
 					Renderer:     gemma4RendererLegacy,
 					Capabilities: []string{"vision", "audio"},
 				},
-				TensorLayerNames: []string{"model.vision_tower.patch_embedder.input_proj.weight", "model.embed_vision.embedding_projection.weight"},
-				Template:         chatTemplate,
+				TensorLayerNames:    gemma4VisionTensorNames(2),
+				Gemma4VisionConfig:  gemma4VisionConfig(2),
+				Gemma4VisionTensors: testGemma4VisionTensorDescriptors(2),
+				Template:            chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
@@ -664,9 +678,30 @@ func TestGemma4SafetensorsVisionCapabilityRequiresTensorLayers(t *testing.T) {
 	if slices.Contains(caps, model.CapabilityAudio) {
 		t.Fatalf("capabilities = %v, did not expect audio", caps)
 	}
+
+	partialLayers := slices.DeleteFunc(gemma4VisionManifestLayers(t), func(layer manifest.Layer) bool {
+		return layer.MediaType == manifest.MediaTypeImageTensor &&
+			layer.Name != "model.vision_tower.patch_embedder.input_proj.weight" &&
+			layer.Name != "model.embed_vision.embedding_projection.weight"
+	})
+	createSafetensorsTestModel(t, "gemma4-partial-vision", cfg, partialLayers)
+	m, err = GetModel("gemma4-partial-vision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(m.Capabilities(), model.CapabilityVision) {
+		t.Fatalf("partial vision capabilities = %v, did not expect vision", m.Capabilities())
+	}
 }
 
-func TestGemma4VisionTensorLayerNamesRejectIncompleteAndNearMatches(t *testing.T) {
+func TestGemma4VisionTensorValidationRejectsIncompleteAndNearMatches(t *testing.T) {
+	bareTensorNames := func() []string {
+		names := gemma4VisionTensorNames(2)
+		for i := range names {
+			names[i] = strings.TrimPrefix(names[i], "model.")
+		}
+		return names
+	}
 	tests := []struct {
 		name  string
 		names []string
@@ -682,28 +717,60 @@ func TestGemma4VisionTensorLayerNamesRejectIncompleteAndNearMatches(t *testing.T
 				"model.embed_visionary.embedding_projection.weight",
 			},
 		},
-		{
-			name: "complete model prefix",
-			names: []string{
-				"model.vision_tower.patch_embedder.input_proj.weight",
-				"model.embed_vision.embedding_projection.weight",
-			},
-			want: true,
-		},
-		{
-			name: "complete bare prefix",
-			names: []string{
-				"vision_tower.patch_embedder.input_proj.weight",
-				"embed_vision.embedding_projection.weight",
-			},
-			want: true,
-		},
+		{name: "sentinels only", names: []string{"model.vision_tower.patch_embedder.input_proj.weight", "model.embed_vision.embedding_projection.weight"}},
+		{name: "complete model prefix", names: gemma4VisionTensorNames(2), want: true},
+		{name: "complete bare prefix", names: bareTensorNames(), want: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := hasGemma4VisionTensorLayerNames(tt.names); got != tt.want {
-				t.Fatalf("hasGemma4VisionTensorLayerNames(%v) = %t, want %t", tt.names, got, tt.want)
+			got := gemma4metadata.ValidateVisionTensors(*gemma4VisionConfig(2), tt.names) == nil
+			if got != tt.want {
+				t.Fatalf("ValidateVisionTensors(%v) success = %t, want %t", tt.names, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGemma4InstalledVisionCapabilityRejectsMalformedDescriptors(t *testing.T) {
+	valid := Model{
+		Config:              model.ConfigV2{ModelFormat: "safetensors", Renderer: gemma4RendererLarge, Capabilities: []string{"vision"}},
+		Gemma4VisionConfig:  gemma4VisionConfig(2),
+		Gemma4VisionTensors: testGemma4VisionTensorDescriptors(2),
+	}
+	if !slices.Contains(valid.Capabilities(), model.CapabilityVision) {
+		t.Fatal("valid installed descriptors did not expose vision")
+	}
+	malformed := valid
+	malformed.Gemma4VisionTensors = maps.Clone(valid.Gemma4VisionTensors)
+	name := "model.vision_tower.patch_embedder.input_proj.weight"
+	descriptor := malformed.Gemma4VisionTensors[name]
+	descriptor.Shape = []int32{4, 11}
+	malformed.Gemma4VisionTensors[name] = descriptor
+	if slices.Contains(malformed.Capabilities(), model.CapabilityVision) {
+		t.Fatal("complete-name installed inventory with wrong shape exposed vision")
+	}
+	packedAlias := valid
+	packedAlias.Gemma4VisionTensors = maps.Clone(valid.Gemma4VisionTensors)
+	delete(packedAlias.Gemma4VisionTensors, name)
+	packedAlias.Gemma4VisionTensors[strings.TrimSuffix(name, ".weight")+".weight_packed"] = gemma4metadata.TensorDescriptor{Dtype: "U8", Shape: []int32{4, 6}}
+	if slices.Contains(packedAlias.Capabilities(), model.CapabilityVision) {
+		t.Fatal("source-only packed alias exposed installed vision")
+	}
+}
+
+func TestGemma4InstalledVisionCapabilityRejectsMissingOrZeroTextWidth(t *testing.T) {
+	for _, name := range []string{"missing", "zero"} {
+		t.Run(name, func(t *testing.T) {
+			cfg := gemma4VisionConfig(2)
+			cfg.TextConfig.HiddenSize = 0
+			m := Model{
+				Config:              model.ConfigV2{ModelFormat: "safetensors", Renderer: gemma4RendererLarge, Capabilities: []string{"vision"}},
+				Gemma4VisionConfig:  cfg,
+				Gemma4VisionTensors: testGemma4VisionTensorDescriptors(2),
+			}
+			if slices.Contains(m.Capabilities(), model.CapabilityVision) {
+				t.Fatal("non-executable text width exposed installed vision")
 			}
 		})
 	}
@@ -712,22 +779,215 @@ func TestGemma4VisionTensorLayerNamesRejectIncompleteAndNearMatches(t *testing.T
 func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
 	t.Helper()
 
-	data := []byte("fake-gemma4-vision-tensor")
+	layers := make([]manifest.Layer, 0, len(gemma4VisionTensorNames(2))+1)
+	for name, descriptor := range testGemma4VisionTensorDescriptors(2) {
+		shape := make([]int64, len(descriptor.Shape))
+		for i, dim := range descriptor.Shape {
+			shape[i] = int64(dim)
+		}
+		payloadSize, err := gemma4SafetensorByteSize(descriptor.Dtype, shape)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader([]*safetensors.TensorData{
+			safetensors.NewTensorDataFromBytes(name, descriptor.Dtype, descriptor.Shape, make([]byte, int(payloadSize))),
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := createTestBlob(t, data)
+		layers = append(layers, manifest.Layer{
+			MediaType: manifest.MediaTypeImageTensor,
+			Digest:    digest,
+			Size:      int64(len(data)),
+			Name:      name,
+		})
+	}
+	config := []byte(`{"text_config":{"hidden_size":6},"vision_config":{"hidden_size":4,"intermediate_size":8,"num_hidden_layers":2,"num_attention_heads":1,"num_key_value_heads":1,"head_dim":4,"default_output_length":1,"patch_size":2,"position_embedding_size":16,"pooling_kernel_size":1}}`)
+	configDigest := createTestBlob(t, config)
+	layers = append(layers, manifest.Layer{
+		MediaType: "application/vnd.ollama.image.json",
+		Digest:    configDigest,
+		Size:      int64(len(config)),
+		Name:      "config.json",
+	})
+	if descriptors, err := gemma4VisionTensorDescriptors(layers); err != nil {
+		t.Fatalf("read Gemma4 descriptor fixture: %v", err)
+	} else if err := gemma4metadata.ValidateVisionInstalledInventory(*gemma4VisionConfig(2), descriptors); err != nil {
+		t.Fatalf("validate Gemma4 descriptor fixture: %v", err)
+	}
+	return layers
+}
+
+func TestOpenGemma4TensorLayerRejectsUnsafeHeaders(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "truncated length", data: []byte{1, 2, 3, 4}},
+		{name: "truncated header", data: append(binary.LittleEndian.AppendUint64(nil, 32), []byte("{}")...)},
+		{name: "oversized header", data: binary.LittleEndian.AppendUint64(nil, maxGemma4SafetensorsHeaderSize+1)},
+		{name: "uint64 overflow header", data: binary.LittleEndian.AppendUint64(nil, ^uint64(0))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "model.safetensors")
+			if err := os.WriteFile(path, tt.data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if ext, err := openGemma4TensorLayer(path); err == nil {
+				ext.Close()
+				t.Fatal("unsafe safetensors header accepted")
+			}
+		})
+	}
+}
+
+func TestOpenGemma4TensorLayerRejectsInvalidPayloadRanges(t *testing.T) {
+	write := func(t *testing.T, dtype string, shape []int64, offsets [2]int64, payload int) string {
+		t.Helper()
+		header, err := json.Marshal(map[string]any{
+			"tensor": map[string]any{"dtype": dtype, "shape": shape, "data_offsets": offsets},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := binary.LittleEndian.AppendUint64(nil, uint64(len(header)))
+		data = append(data, header...)
+		data = append(data, make([]byte, payload)...)
+		path := filepath.Join(t.TempDir(), "model.safetensors")
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	tests := []struct {
+		name    string
+		dtype   string
+		shape   []int64
+		offsets [2]int64
+		payload int
+	}{
+		{name: "truncated range", dtype: "F32", shape: []int64{2}, offsets: [2]int64{0, 4}, payload: 4},
+		{name: "overlong range", dtype: "F32", shape: []int64{1}, offsets: [2]int64{0, 8}, payload: 8},
+		{name: "overlong payload", dtype: "F32", shape: []int64{1}, offsets: [2]int64{0, 4}, payload: 8},
+		{name: "shape byte overflow", dtype: "F64", shape: []int64{math.MaxInt64, 2}, offsets: [2]int64{0, 0}},
+		{name: "out of file", dtype: "U8", shape: []int64{2}, offsets: [2]int64{0, 2}, payload: 1},
+		{name: "negative range", dtype: "U8", shape: []int64{1}, offsets: [2]int64{-1, 0}, payload: 1},
+		{name: "reversed range", dtype: "U8", shape: []int64{1}, offsets: [2]int64{1, 0}, payload: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if ext, err := openGemma4TensorLayer(write(t, tt.dtype, tt.shape, tt.offsets, tt.payload)); err == nil {
+				ext.Close()
+				t.Fatal("invalid safetensors payload range accepted")
+			}
+		})
+	}
+}
+
+func TestGemma4VisionTensorDescriptorsRejectsExcessiveInventory(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", t.TempDir())
+	tensors := make([]*safetensors.TensorData, 0, maxGemma4VisionDescriptors+1)
+	for i := 0; i <= maxGemma4VisionDescriptors; i++ {
+		tensors = append(tensors, safetensors.NewTensorDataFromBytes(fmt.Sprintf("tensor.%04d", i), "U8", []int32{1}, []byte{0}))
+	}
+	data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader(tensors))
+	if err != nil {
+		t.Fatal(err)
+	}
 	digest := createTestBlob(t, data)
-	return []manifest.Layer{
-		{
-			MediaType: manifest.MediaTypeImageTensor,
-			Digest:    digest,
-			Size:      int64(len(data)),
-			Name:      "model.vision_tower.patch_embedder.input_proj.weight",
-		},
-		{
-			MediaType: manifest.MediaTypeImageTensor,
-			Digest:    digest,
-			Size:      int64(len(data)),
-			Name:      "model.embed_vision.embedding_projection.weight",
+	layers := []manifest.Layer{{
+		MediaType: manifest.MediaTypeImageTensor,
+		Digest:    digest,
+		Size:      int64(len(data)),
+		Name:      "model.vision_tower.synthetic.weight",
+	}}
+	if _, err := gemma4VisionTensorDescriptors(layers); err == nil || !strings.Contains(err.Error(), "descriptors") {
+		t.Fatalf("excessive inventory error = %v", err)
+	}
+}
+
+func gemma4VisionConfig(layers int) *gemma4metadata.ConfigFile {
+	return &gemma4metadata.ConfigFile{
+		TextConfig:   gemma4metadata.TextConfig{HiddenSize: 6},
+		VisionConfig: &gemma4metadata.VisionConfig{HiddenSize: 4, IntermediateSize: 8, NumHiddenLayers: layers, NumAttentionHeads: 1, NumKeyValueHeads: 1, HeadDim: 4, DefaultOutputLength: 1, PatchSize: 2, PositionEmbeddingSize: 16, PoolingKernelSize: 1},
+	}
+}
+
+func testGemma4VisionTensorDescriptors(layers int) map[string]gemma4metadata.TensorDescriptor {
+	return testGemma4VisionTensorDescriptorsForGeometry(layers, 4, 8, 6, 2, 16, 4)
+}
+
+func testGemma4VisionTensorDescriptorsForGeometry(layers int, hidden, intermediate, textHidden, patch, positions, headDim int32) map[string]gemma4metadata.TensorDescriptor {
+	descriptors := map[string]gemma4metadata.TensorDescriptor{
+		"model.vision_tower.patch_embedder.input_proj.weight":        {Dtype: "F32", Shape: []int32{hidden, 3 * patch * patch}},
+		"model.vision_tower.patch_embedder.position_embedding_table": {Dtype: "F32", Shape: []int32{2, positions, hidden}},
+		"model.embed_vision.embedding_projection.weight":             {Dtype: "F32", Shape: []int32{textHidden, hidden}},
+	}
+	for i := range layers {
+		layer := fmt.Sprintf("model.vision_tower.encoder.layers.%d", i)
+		for _, suffix := range []string{".self_attn.q_proj.linear.weight", ".self_attn.k_proj.linear.weight", ".self_attn.v_proj.linear.weight", ".self_attn.o_proj.linear.weight"} {
+			descriptors[layer+suffix] = gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{hidden, hidden}}
+		}
+		for _, suffix := range []string{".mlp.gate_proj.linear.weight", ".mlp.up_proj.linear.weight"} {
+			descriptors[layer+suffix] = gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{intermediate, hidden}}
+		}
+		descriptors[layer+".mlp.down_proj.linear.weight"] = gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{hidden, intermediate}}
+		for _, suffix := range []string{".self_attn.q_norm.weight", ".self_attn.k_norm.weight"} {
+			descriptors[layer+suffix] = gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{headDim}}
+		}
+		for _, suffix := range []string{".input_layernorm.weight", ".post_attention_layernorm.weight", ".pre_feedforward_layernorm.weight", ".post_feedforward_layernorm.weight"} {
+			descriptors[layer+suffix] = gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{hidden}}
+		}
+	}
+	return descriptors
+}
+
+func TestGemma4InstalledVisionCapabilityReleasedUnequalHeadGeometry(t *testing.T) {
+	cfg := &gemma4metadata.ConfigFile{
+		TextConfig: gemma4metadata.TextConfig{HiddenSize: 2560},
+		VisionConfig: &gemma4metadata.VisionConfig{
+			HiddenSize: 768, IntermediateSize: 3072, NumHiddenLayers: 1,
+			NumAttentionHeads: 12, NumKeyValueHeads: 12, HeadDim: 64,
+			RMSNormEps: 1e-6, DefaultOutputLength: 280, PatchSize: 16,
+			PositionEmbeddingSize: 10240, PoolingKernelSize: 3,
 		},
 	}
+	m := Model{
+		Config:              model.ConfigV2{ModelFormat: "safetensors", Renderer: gemma4RendererLarge, Capabilities: []string{"vision"}},
+		Gemma4VisionConfig:  cfg,
+		Gemma4VisionTensors: testGemma4VisionTensorDescriptorsForGeometry(1, 768, 3072, 2560, 16, 10240, 64),
+	}
+	if !slices.Contains(m.Capabilities(), model.CapabilityVision) {
+		t.Fatal("released-compatible unequal hidden/head geometry did not expose vision")
+	}
+}
+
+func gemma4VisionTensorNames(layers int) []string {
+	names := []string{
+		"model.vision_tower.patch_embedder.input_proj.weight",
+		"model.vision_tower.patch_embedder.position_embedding_table",
+		"model.embed_vision.embedding_projection.weight",
+	}
+	for i := range layers {
+		layer := fmt.Sprintf("model.vision_tower.encoder.layers.%d", i)
+		for _, projection := range []string{
+			".self_attn.q_proj.linear.weight", ".self_attn.k_proj.linear.weight",
+			".self_attn.v_proj.linear.weight", ".self_attn.o_proj.linear.weight",
+			".mlp.gate_proj.linear.weight", ".mlp.up_proj.linear.weight", ".mlp.down_proj.linear.weight",
+		} {
+			names = append(names, layer+projection)
+		}
+		for _, norm := range []string{
+			".self_attn.q_norm.weight", ".self_attn.k_norm.weight",
+			".input_layernorm.weight", ".post_attention_layernorm.weight",
+			".pre_feedforward_layernorm.weight", ".post_feedforward_layernorm.weight",
+		} {
+			names = append(names, layer+norm)
+		}
+	}
+	return names
 }
 
 func TestModelCheckCapabilities(t *testing.T) {

@@ -1,16 +1,21 @@
 package gemma4
 
 // Portions of the Gemma 4 vision preprocessing and embedding flow are adapted
-// from MLX-VLM's MIT-licensed Gemma 4 implementation.
+// from MLX-VLM's MIT-licensed Gemma 4 implementation. See
+// docs/third-party/mlx-vlm.md for the pinned source revision and license.
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
+	stddraw "image/draw"
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 	"math"
 
 	xdraw "golang.org/x/image/draw"
@@ -19,6 +24,7 @@ import (
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/models/nn"
 )
 
@@ -156,46 +162,27 @@ func parseVisionConfig(configData []byte) (*VisionConfig, error) {
 	if wrapped.VisionConfig == nil {
 		return nil, nil
 	}
-	cfg := *wrapped.VisionConfig
-	if cfg.HiddenSize == 0 {
-		cfg.HiddenSize = 768
+	var metadataConfig gemma4metadata.ConfigFile
+	if err := json.Unmarshal(configData, &metadataConfig); err != nil {
+		return nil, fmt.Errorf("parse vision metadata: %w", err)
 	}
-	if cfg.IntermediateSize == 0 {
-		cfg.IntermediateSize = 3072
-	}
-	if cfg.NumHiddenLayers == 0 {
-		cfg.NumHiddenLayers = 16
-	}
-	if cfg.NumAttentionHeads == 0 {
-		cfg.NumAttentionHeads = 12
-	}
-	if cfg.NumKeyValueHeads == 0 {
-		cfg.NumKeyValueHeads = cfg.NumAttentionHeads
-	}
-	if cfg.HeadDim == 0 {
-		cfg.HeadDim = 64
-	}
-	if cfg.RMSNormEps == 0 {
-		cfg.RMSNormEps = 1e-6
-	}
-	if cfg.DefaultOutputLength == 0 {
-		cfg.DefaultOutputLength = 280
-	}
-	if cfg.PatchSize == 0 {
-		cfg.PatchSize = 16
-	}
-	if cfg.PositionEmbeddingSize == 0 {
-		cfg.PositionEmbeddingSize = 10240
-	}
-	if cfg.PoolingKernelSize == 0 {
-		cfg.PoolingKernelSize = 3
-	}
-	if cfg.RopeParameters.RopeTheta == 0 {
-		cfg.RopeParameters.RopeTheta = 100
-	}
-	if err := validateVisionConfig(&cfg); err != nil {
+	architecture, err := gemma4metadata.ProjectVisionArchitecture(metadataConfig)
+	if err != nil {
 		return nil, err
 	}
+	cfg := *wrapped.VisionConfig
+	cfg.HiddenSize = int32(architecture.HiddenSize)
+	cfg.IntermediateSize = int32(architecture.IntermediateSize)
+	cfg.NumHiddenLayers = int32(architecture.NumHiddenLayers)
+	cfg.NumAttentionHeads = int32(architecture.NumAttentionHeads)
+	cfg.NumKeyValueHeads = int32(architecture.NumKeyValueHeads)
+	cfg.HeadDim = int32(architecture.HeadDim)
+	cfg.RMSNormEps = float32(architecture.RMSNormEps)
+	cfg.DefaultOutputLength = int32(architecture.DefaultOutputLength)
+	cfg.PatchSize = int32(architecture.PatchSize)
+	cfg.PositionEmbeddingSize = int32(architecture.PositionEmbeddingSize)
+	cfg.PoolingKernelSize = int32(architecture.PoolingKernelSize)
+	cfg.RopeParameters.RopeTheta = float32(architecture.RopeTheta)
 	return &cfg, nil
 }
 
@@ -203,61 +190,10 @@ func validateVisionConfig(cfg *VisionConfig) error {
 	if cfg == nil {
 		return errors.New("missing Gemma4 vision config")
 	}
-	positiveBounded := func(name string, value, limit int32) error {
-		if value <= 0 || value > limit {
-			return fmt.Errorf("invalid Gemma4 vision %s %d (limit %d)", name, value, limit)
-		}
-		return nil
-	}
-	for _, field := range []struct {
-		name         string
-		value, limit int32
-	}{
-		{"hidden_size", cfg.HiddenSize, maxGemma4VisionHiddenSize},
-		{"intermediate_size", cfg.IntermediateSize, maxGemma4VisionIntermediate},
-		{"num_hidden_layers", cfg.NumHiddenLayers, maxGemma4VisionLayers},
-		{"num_attention_heads", cfg.NumAttentionHeads, maxGemma4VisionHeads},
-		{"num_key_value_heads", cfg.NumKeyValueHeads, maxGemma4VisionHeads},
-		{"head_dim", cfg.HeadDim, maxGemma4VisionHeadDim},
-		{"default_output_length", cfg.DefaultOutputLength, maxGemma4VisionSoftTokens},
-		{"patch_size", cfg.PatchSize, maxGemma4ImageDimension},
-		{"position_embedding_size", cfg.PositionEmbeddingSize, maxGemma4PositionTableEntries},
-		{"pooling_kernel_size", cfg.PoolingKernelSize, maxGemma4ImageDimension},
-	} {
-		if err := positiveBounded(field.name, field.value, field.limit); err != nil {
-			return err
-		}
-	}
-	if cfg.NumKeyValueHeads > cfg.NumAttentionHeads || cfg.NumAttentionHeads%cfg.NumKeyValueHeads != 0 {
-		return fmt.Errorf("invalid Gemma4 vision attention heads %d/%d", cfg.NumAttentionHeads, cfg.NumKeyValueHeads)
-	}
-	attentionWidth := int64(cfg.NumAttentionHeads) * int64(cfg.HeadDim)
-	if attentionWidth != int64(cfg.HiddenSize) {
-		return fmt.Errorf("Gemma4 vision attention width %d does not match hidden_size %d", attentionWidth, cfg.HiddenSize)
-	}
-	if cfg.RMSNormEps <= 0 || math.IsNaN(float64(cfg.RMSNormEps)) || math.IsInf(float64(cfg.RMSNormEps), 0) {
-		return fmt.Errorf("invalid Gemma4 vision rms_norm_eps %v", cfg.RMSNormEps)
-	}
-	if cfg.RopeParameters.RopeTheta <= 0 || math.IsNaN(float64(cfg.RopeParameters.RopeTheta)) || math.IsInf(float64(cfg.RopeParameters.RopeTheta), 0) {
-		return fmt.Errorf("invalid Gemma4 vision rope_theta %v", cfg.RopeParameters.RopeTheta)
-	}
-
-	if _, ok := checkedPositiveProduct(maxGemma4ResizePixels,
-		int64(cfg.DefaultOutputLength), int64(cfg.PoolingKernelSize), int64(cfg.PoolingKernelSize), int64(cfg.PatchSize), int64(cfg.PatchSize)); !ok {
-		return fmt.Errorf("Gemma4 vision resize budget exceeds limit %d", maxGemma4ResizePixels)
-	}
-	if _, ok := checkedPositiveProduct(maxGemma4PositionValues,
-		int64(cfg.DefaultOutputLength), int64(cfg.PoolingKernelSize), int64(cfg.PoolingKernelSize), int64(cfg.HeadDim)); !ok {
-		return fmt.Errorf("Gemma4 vision position allocation exceeds limit %d", maxGemma4PositionValues)
-	}
-	if _, ok := checkedPositiveProduct(maxGemma4ImageDimension, int64(cfg.PoolingKernelSize), int64(cfg.PatchSize)); !ok {
-		return fmt.Errorf("invalid Gemma4 pooled patch size (limit %d)", maxGemma4ImageDimension)
-	}
-	maxPatchSide, ok := checkedPositiveProduct(maxGemma4PositionTableEntries, int64(cfg.DefaultOutputLength), int64(cfg.PoolingKernelSize))
-	if !ok || maxPatchSide > int64(cfg.PositionEmbeddingSize) {
-		return fmt.Errorf("Gemma4 vision patch side %d exceeds position table size %d", maxPatchSide, cfg.PositionEmbeddingSize)
-	}
-	return nil
+	// This validates vision-only call sites before the enclosing text model is
+	// available. Executable inventory validation supplies the real text width.
+	_, err := gemma4metadata.ProjectVisionArchitecture(metadataConfigFromVision(cfg, 1))
+	return err
 }
 
 func checkedPositiveProduct(limit int64, values ...int64) (int64, bool) {
@@ -303,11 +239,47 @@ func parseGemma4MediaTokens(data []byte, fallback gemma4MediaTokens) gemma4Media
 	return fallback
 }
 
-func hasGemma4VisionWeights(tensors map[string]*mlx.Array) bool {
-	return firstNonNil(tensors,
-		"vision_tower.patch_embedder.input_proj.weight",
-		"model.vision_tower.patch_embedder.input_proj.weight",
-	) != nil
+func metadataConfigFromVision(cfg *VisionConfig, textHidden int) gemma4metadata.ConfigFile {
+	if cfg == nil {
+		return gemma4metadata.ConfigFile{}
+	}
+	v := &gemma4metadata.VisionConfig{
+		HiddenSize: int(cfg.HiddenSize), IntermediateSize: int(cfg.IntermediateSize), NumHiddenLayers: int(cfg.NumHiddenLayers),
+		NumAttentionHeads: int(cfg.NumAttentionHeads), NumKeyValueHeads: int(cfg.NumKeyValueHeads), HeadDim: int(cfg.HeadDim),
+		RMSNormEps: float64(cfg.RMSNormEps), DefaultOutputLength: int(cfg.DefaultOutputLength), PatchSize: int(cfg.PatchSize),
+		PositionEmbeddingSize: int(cfg.PositionEmbeddingSize), PoolingKernelSize: int(cfg.PoolingKernelSize),
+		UseClippedLinears: cfg.UseClippedLinears, Standardize: cfg.Standardize,
+	}
+	v.RopeParameters.RopeTheta = float64(cfg.RopeParameters.RopeTheta)
+	return gemma4metadata.ConfigFile{TextConfig: gemma4metadata.TextConfig{HiddenSize: textHidden}, VisionConfig: v}
+}
+
+func validateGemma4VisionWeights(tensors map[string]*mlx.Array, cfg *VisionConfig, textHidden int, tq map[string]*model.TensorQuantInfo) (bool, error) {
+	if firstNonNil(tensors, "vision_tower.patch_embedder.input_proj.weight", "model.vision_tower.patch_embedder.input_proj.weight") == nil {
+		if firstNonNil(tensors, "vision_tower.patch_embedder.input_proj.weight_packed", "model.vision_tower.patch_embedder.input_proj.weight_packed") != nil {
+			return false, fmt.Errorf("runtime contains source-only Gemma4 vision packed sentinel")
+		}
+		return false, nil
+	}
+	descriptors := make(map[string]gemma4metadata.TensorDescriptor, len(tensors))
+	for name, tensor := range tensors {
+		if tensor != nil {
+			shape := make([]int32, tensor.NumDims())
+			for i, d := range tensor.Dims() {
+				shape[i] = int32(d)
+			}
+			d := gemma4metadata.TensorDescriptor{Dtype: tensor.DType().String(), Shape: shape}
+			if q := tq[name]; q != nil {
+				d.QuantType = q.QuantType
+				d.GroupSize = q.GroupSize
+			}
+			descriptors[name] = d
+		}
+	}
+	if err := gemma4metadata.ValidateVisionRuntimeInventory(metadataConfigFromVision(cfg, textHidden), descriptors); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func resolveVisionPrefix(tensors map[string]*mlx.Array) string {
@@ -451,9 +423,12 @@ func (m *MultimodalEmbedder) Forward(x *mlx.Array) *mlx.Array {
 
 // PrepareMedia implements the runner's media contract. Each image is expanded
 // in stream order and remains a separate cache-identity item.
-func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
+func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
 	prepared := &base.PreparedRequest{}
 	for source, seg := range segments {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if seg.Data == nil {
 			prepared.Tokens = append(prepared.Tokens, seg.Tokens...)
 			continue
@@ -465,7 +440,7 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 			return nil, fmt.Errorf("gemma4 does not support %s input", seg.Kind)
 		}
 
-		img, err := preprocessGemma4Image(seg.Data, m.VisionConfig, int(m.VisionSoftTokens))
+		img, err := preprocessGemma4Image(ctx, seg.Data, m.VisionConfig, int(m.VisionSoftTokens))
 		if err != nil {
 			return nil, err
 		}
@@ -481,7 +456,7 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 		geom := *img
 		pixels := geom.Pixels
 		geom.Pixels = nil
-		prepared.Items = append(prepared.Items, base.PreparedItem{
+		item := base.PreparedItem{
 			Range:     [2]int{start, len(prepared.Tokens)},
 			Source:    source,
 			MediaData: pixels,
@@ -491,7 +466,14 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 				ImageStart: imageStart,
 				ImageEnd:   imageEnd,
 			},
-		})
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		prepared.Items = append(prepared.Items, item)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return prepared, nil
 }
@@ -546,21 +528,24 @@ func gemma4PLETokens(tokens *mlx.Array, b *batch.Batch) *mlx.Array {
 	return tokens
 }
 
-func preprocessGemma4Image(data []byte, cfg *VisionConfig, maxSoftTokens int) (*gemma4ImageInput, error) {
+func preprocessGemma4Image(ctx context.Context, data []byte, cfg *VisionConfig, maxSoftTokens int) (*gemma4ImageInput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := validateVisionConfig(cfg); err != nil {
 		return nil, err
 	}
 	if err := validateGemma4ImageDataSize(len(data)); err != nil {
 		return nil, err
 	}
-	imageConfig, _, err := image.DecodeConfig(bytes.NewReader(data))
+	imageConfig, _, err := decodeGemma4ImageConfig(ctx, data)
 	if err != nil {
 		return nil, fmt.Errorf("decode Gemma4 image config: %w", err)
 	}
 	if err := validateGemma4ImageDimensions(imageConfig.Width, imageConfig.Height); err != nil {
 		return nil, err
 	}
-	img, _, err := image.Decode(bytes.NewReader(data))
+	img, _, err := decodeGemma4Image(ctx, data)
 	if err != nil {
 		return nil, fmt.Errorf("decode Gemma4 image: %w", err)
 	}
@@ -593,12 +578,13 @@ func preprocessGemma4Image(data []byte, cfg *VisionConfig, maxSoftTokens int) (*
 
 	resized := img
 	if targetW != width || targetH != height {
-		dst := image.NewRGBA(image.Rect(0, 0, targetW, targetH))
-		xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Over, nil)
-		resized = dst
+		resized, err = resizeGemma4Image(ctx, img, b, targetW, targetH)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	pixels, err := imageToCHWFloat32(resized)
+	pixels, err := imageToCHWFloat32Context(ctx, resized)
 	if err != nil {
 		return nil, err
 	}
@@ -626,6 +612,41 @@ func preprocessGemma4Image(data []byte, cfg *VisionConfig, maxSoftTokens int) (*
 	}, nil
 }
 
+type gemma4CancellationPanic struct{ err error }
+
+type cancellableDrawImage struct {
+	stddraw.Image
+	contextErr func() error
+}
+
+func (dst cancellableDrawImage) Set(x, y int, c color.Color) {
+	if err := dst.contextErr(); err != nil {
+		panic(gemma4CancellationPanic{err: err})
+	}
+	dst.Image.Set(x, y, c)
+}
+
+func resizeGemma4Image(ctx context.Context, src image.Image, bounds image.Rectangle, width, height int) (resized image.Image, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if canceled, ok := recovered.(gemma4CancellationPanic); ok {
+				resized, err = nil, canceled.err
+				return
+			}
+			panic(recovered)
+		}
+	}()
+	xdraw.CatmullRom.Scale(cancellableDrawImage{Image: dst, contextErr: ctx.Err}, dst.Bounds(), src, bounds, xdraw.Over, nil)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return dst, nil
+}
+
 func validateGemma4ImageDataSize(size int) error {
 	if size <= 0 {
 		return errors.New("Gemma4 image is empty")
@@ -634,6 +655,36 @@ func validateGemma4ImageDataSize(size int) error {
 		return fmt.Errorf("Gemma4 image is %d bytes, limit %d", size, maxGemma4ImageBytes)
 	}
 	return nil
+}
+
+type contextReader struct {
+	contextErr func() error
+	r          io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.contextErr(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
+func decodeGemma4ImageConfig(ctx context.Context, data []byte) (image.Config, string, error) {
+	r := func() io.Reader { return contextReader{contextErr: ctx.Err, r: bytes.NewReader(data)} }
+	cfg, format, err := image.DecodeConfig(r())
+	if err != nil && ctx.Err() != nil {
+		return image.Config{}, "", ctx.Err()
+	}
+	return cfg, format, err
+}
+
+func decodeGemma4Image(ctx context.Context, data []byte) (image.Image, string, error) {
+	r := func() io.Reader { return contextReader{contextErr: ctx.Err, r: bytes.NewReader(data)} }
+	img, format, err := image.Decode(r())
+	if err != nil && ctx.Err() != nil {
+		return nil, "", ctx.Err()
+	}
+	return img, format, err
 }
 
 func validateGemma4ImageDimensions(width, height int) error {
@@ -707,6 +758,10 @@ func gemma4ResizeDimensions(width, height, patchSize, maxPatches, poolingKernelS
 }
 
 func imageToCHWFloat32(img image.Image) ([]float32, error) {
+	return imageToCHWFloat32Context(context.Background(), img)
+}
+
+func imageToCHWFloat32Context(ctx context.Context, img image.Image) ([]float32, error) {
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
 	if err := validateGemma4ImageDimensions(width, height); err != nil {
@@ -717,9 +772,15 @@ func imageToCHWFloat32(img image.Image) ([]float32, error) {
 	if values64 <= 0 || values64 > maxIntValue {
 		return nil, errors.New("Gemma4 pixel allocation exceeds platform limits")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	plane := int(plane64)
 	out := make([]float32, int(values64))
 	for y := range height {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		for x := range width {
 			r, g, blue, _ := img.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
 			i := y*width + x

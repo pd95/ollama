@@ -1,6 +1,7 @@
 package qwen3_5
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -140,8 +141,8 @@ func NewVisionAdapter(configData []byte, tensors map[string]*mlx.Array, cfg Visi
 	return &VisionAdapter{Model: m}, nil
 }
 
-func (a *VisionAdapter) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
-	return a.Model.PrepareMedia(segments)
+func (a *VisionAdapter) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
+	return a.Model.PrepareMedia(ctx, segments)
 }
 
 func (a *VisionAdapter) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
@@ -268,7 +269,10 @@ func (m *Model) visionLoaded() bool { return m.VisionTower != nil }
 // PrepareMedia implements base.MediaModel: preprocess each image segment,
 // splice its vision_start + pads + vision_end expansion, and precompute the
 // request's 3-channel rope positions.
-func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
+func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	prepared := &base.PreparedRequest{}
 
 	// pos walks the reference's multimodal position rule: text advances one
@@ -277,18 +281,29 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 	var positions []int32
 	cur := int32(0)
 	maxPos := int32(-1)
-	text := func(n int) {
-		for range n {
+	text := func(n int) error {
+		for i := range n {
+			if i%256 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			positions = append(positions, cur, cur, cur)
 			maxPos = max(maxPos, cur)
 			cur++
 		}
+		return nil
 	}
 
 	for s, seg := range segments {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if seg.Data == nil {
 			prepared.Tokens = append(prepared.Tokens, seg.Tokens...)
-			text(len(seg.Tokens))
+			if err := text(len(seg.Tokens)); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		if !m.visionLoaded() {
@@ -298,17 +313,22 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 			return nil, fmt.Errorf("qwen3.5 does not support %s input", seg.Kind)
 		}
 
-		pixels, prep, err := m.preprocessImage(seg.Data)
+		pixels, prep, err := m.preprocessImage(ctx, seg.Data)
 		if err != nil {
 			return nil, err
 		}
 
 		start := len(prepared.Tokens)
 		prepared.Tokens = append(prepared.Tokens, m.MM.VisionStartTokenID)
-		text(1)
+		if err := text(1); err != nil {
+			return nil, err
+		}
 		merge := m.Vision.SpatialMergeSize
 		mh, mw := prep.gridH/merge, prep.gridW/merge
 		for bh := range mh {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			for bw := range mw {
 				prepared.Tokens = append(prepared.Tokens, m.MM.ImageTokenID)
 				positions = append(positions, cur, cur+bh, cur+bw)
@@ -317,7 +337,9 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 		}
 		cur += max(mh, mw)
 		prepared.Tokens = append(prepared.Tokens, m.MM.VisionEndTokenID)
-		text(1)
+		if err := text(1); err != nil {
+			return nil, err
+		}
 
 		n := int(prep.numPatches())
 		prepared.Items = append(prepared.Items, base.PreparedItem{
@@ -336,11 +358,19 @@ func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, er
 		L := int32(len(prepared.Tokens))
 		table := make([]int32, 3*L)
 		for i := range L {
+			if i%256 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			table[i] = positions[3*i]
 			table[L+i] = positions[3*i+1]
 			table[2*L+i] = positions[3*i+2]
 		}
 		prepared.Layout = &visionLayout{positions: table, promptLen: L, delta: maxPos + 1 - L}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return prepared, nil
 }

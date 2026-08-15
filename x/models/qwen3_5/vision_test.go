@@ -2,15 +2,92 @@ package qwen3_5
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"image"
+	"image/color"
 	"image/png"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ollama/ollama/x/internal/mlxtest"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
 )
+
+type qwenPanickingImage struct{ payload any }
+
+func (qwenPanickingImage) ColorModel() color.Model   { return color.NRGBAModel }
+func (qwenPanickingImage) Bounds() image.Rectangle   { return image.Rect(0, 0, 4, 4) }
+func (p qwenPanickingImage) At(int, int) color.Color { panic(p.payload) }
+
+type qwenTestContext struct{}
+
+func (qwenTestContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (qwenTestContext) Done() <-chan struct{}       { return nil }
+func (qwenTestContext) Value(any) any               { return nil }
+
+type qwenCountingContext struct {
+	qwenTestContext
+	calls atomic.Int32
+}
+
+func (c *qwenCountingContext) Err() error {
+	c.calls.Add(1)
+	return nil
+}
+
+type qwenCheckpointContext struct {
+	qwenTestContext
+	blockAt  int32
+	calls    atomic.Int32
+	canceled atomic.Bool
+	reached  chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+func newQwenCheckpointContext(blockAt int32) *qwenCheckpointContext {
+	return &qwenCheckpointContext{
+		blockAt: blockAt,
+		reached: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (c *qwenCheckpointContext) Err() error {
+	if c.calls.Add(1) == c.blockAt {
+		c.once.Do(func() { close(c.reached) })
+		<-c.release
+	}
+	if c.canceled.Load() {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *qwenCheckpointContext) cancel() {
+	c.canceled.Store(true)
+	close(c.release)
+}
+
+func testQwenVisionModel() *Model {
+	cfg := &VisionConfig{PatchSize: 16, SpatialMergeSize: 2, TemporalPatchSize: 2, InChannels: 3, NumPositionEmbeddings: 2304}
+	return &Model{
+		Config:      &Config{},
+		VisionTower: &VisionTower{},
+		Vision:      cfg,
+		MM: multimodalConfig{
+			ImageTokenID:       9,
+			VisionStartTokenID: 7,
+			VisionEndTokenID:   8,
+			VisionConfig:       cfg,
+		},
+	}
+}
 
 func TestVisionAdapterWeightsAreCollectable(t *testing.T) {
 	mlxtest.Setup(t)
@@ -71,20 +148,9 @@ func TestParseMultimodalConfig(t *testing.T) {
 // image grid anchors T at the current position, offsets H/W by row/column,
 // and advances the position by the grid's longer side.
 func TestMRopePositionRule(t *testing.T) {
-	cfg := &VisionConfig{PatchSize: 16, SpatialMergeSize: 2, TemporalPatchSize: 2, InChannels: 3, NumPositionEmbeddings: 2304}
-	m := &Model{
-		Config:      &Config{},
-		VisionTower: &VisionTower{},
-		Vision:      cfg,
-		MM: multimodalConfig{
-			ImageTokenID:       9,
-			VisionStartTokenID: 7,
-			VisionEndTokenID:   8,
-			VisionConfig:       cfg,
-		},
-	}
+	m := testQwenVisionModel()
 
-	prepared, err := m.PrepareMedia([]base.Segment{{Tokens: []int32{1, 2, 3}}})
+	prepared, err := m.PrepareMedia(context.Background(), []base.Segment{{Tokens: []int32{1, 2, 3}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +164,7 @@ func TestMRopePositionRule(t *testing.T) {
 	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 64, 64))); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err = m.PrepareMedia([]base.Segment{
+	prepared, err = m.PrepareMedia(context.Background(), []base.Segment{
 		{Tokens: []int32{1, 2, 3}},
 		{Kind: "image", Data: buf.Bytes()},
 	})
@@ -147,10 +213,29 @@ func TestMRopePositionRule(t *testing.T) {
 	}
 }
 
+func TestPrepareMediaPreCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, mediaModel := range map[string]base.MediaModel{
+		"model":   &Model{},
+		"adapter": &VisionAdapter{Model: &Model{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			prepared, err := mediaModel.PrepareMedia(ctx, []base.Segment{{Tokens: []int32{1}}})
+			if !errors.Is(err, context.Canceled) || prepared != nil {
+				t.Fatalf("PrepareMedia() = (%v, %v), want (nil, context.Canceled)", prepared, err)
+			}
+		})
+	}
+}
+
 func TestVisionPatchLookups(t *testing.T) {
 	// 4x6 pre-merge grid, merge 2: token order is block-major; rope
 	// positions are the pre-merge (h, w) indices.
-	ropePos, posIdx, posWt := visionPatchLookups(4, 6, 2, 2304)
+	ropePos, posIdx, posWt, err := visionPatchLookups(context.Background(), 4, 6, 2, 2304)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(ropePos) != 2*24 || len(posIdx) != 4*24 || len(posWt) != 4*24 {
 		t.Fatalf("lengths %d %d %d", len(ropePos), len(posIdx), len(posWt))
 	}
@@ -174,5 +259,136 @@ func TestVisionPatchLookups(t *testing.T) {
 		if sum < 0.999 || sum > 1.001 {
 			t.Fatalf("patch %d weights sum %f", i, sum)
 		}
+	}
+}
+
+func TestImageReaderCancellation(t *testing.T) {
+	ctx := newQwenCheckpointContext(1)
+	result := make(chan error, 1)
+	go func() {
+		_, err := qwenImageContextReader{check: ctx.Err, r: bytes.NewReader([]byte("image"))}.Read(make([]byte, 1))
+		result <- err
+	}()
+	<-ctx.reached
+	ctx.cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Read() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestDropAlphaCancellation(t *testing.T) {
+	src := image.NewNRGBA(image.Rect(0, 0, 64, 64))
+	src.SetNRGBA(0, 0, color.NRGBA{R: 1, A: 1})
+	ctx := newQwenCheckpointContext(1)
+	type result struct {
+		image image.Image
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		img, err := dropAlpha(ctx, src, src.Bounds())
+		done <- result{image: img, err: err}
+	}()
+	<-ctx.reached
+	ctx.cancel()
+	got := <-done
+	if !errors.Is(got.err, context.Canceled) || got.image != nil {
+		t.Fatalf("dropAlpha() = (%v, %v), want (nil, context.Canceled)", got.image, got.err)
+	}
+}
+
+func TestResizeCancellation(t *testing.T) {
+	ctx := newQwenCheckpointContext(2) // entry check, then the first destination pixel
+	result := make(chan error, 1)
+	go func() {
+		_, err := resizeQwenImage(ctx, image.NewRGBA(image.Rect(0, 0, 4, 4)), image.Rect(0, 0, 4, 4), 64, 64)
+		result <- err
+	}()
+	<-ctx.reached
+	ctx.cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("resizeQwenImage() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestResizeRepanicsUnrelatedPayload(t *testing.T) {
+	payload := &struct{ marker byte }{marker: 1}
+	recovered := func() (got any) {
+		defer func() { got = recover() }()
+		_, _ = resizeQwenImage(context.Background(), qwenPanickingImage{payload: payload}, image.Rect(0, 0, 4, 4), 64, 64)
+		return nil
+	}()
+	if recovered != payload {
+		t.Fatalf("recovered payload = %v, want exact unrelated payload %v", recovered, payload)
+	}
+}
+
+func TestPatchifyCancellation(t *testing.T) {
+	ctx := newQwenCheckpointContext(2) // allocation check, then the first merge-block row
+	type result struct {
+		pixels []float32
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		pixels, err := patchifyImage(ctx, image.NewRGBA(image.Rect(0, 0, 64, 64)), 4, 4, 16, 2, 2)
+		done <- result{pixels: pixels, err: err}
+	}()
+	<-ctx.reached
+	ctx.cancel()
+	got := <-done
+	if !errors.Is(got.err, context.Canceled) || got.pixels != nil {
+		t.Fatalf("patchifyImage() = (%v, %v), want (nil, context.Canceled)", got.pixels, got.err)
+	}
+}
+
+func TestVisionPatchLookupsCancellation(t *testing.T) {
+	ctx := newQwenCheckpointContext(2) // allocation check, then the first merge-block row
+	type result struct {
+		ropePos []int32
+		posIdx  []int32
+		posWt   []float32
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ropePos, posIdx, posWt, err := visionPatchLookups(ctx, 16, 16, 2, 2304)
+		done <- result{ropePos: ropePos, posIdx: posIdx, posWt: posWt, err: err}
+	}()
+	<-ctx.reached
+	ctx.cancel()
+	got := <-done
+	if !errors.Is(got.err, context.Canceled) || got.ropePos != nil || got.posIdx != nil || got.posWt != nil {
+		t.Fatalf("visionPatchLookups() returned partial results on cancellation: %+v", got)
+	}
+}
+
+func TestPrepareMediaFinalCancellation(t *testing.T) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 64, 64))); err != nil {
+		t.Fatal(err)
+	}
+	m := testQwenVisionModel()
+	segments := []base.Segment{{Kind: "image", Data: buf.Bytes()}}
+	counting := &qwenCountingContext{}
+	if _, err := m.PrepareMedia(counting, segments); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := newQwenCheckpointContext(counting.calls.Load())
+	type result struct {
+		prepared *base.PreparedRequest
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		prepared, err := m.PrepareMedia(ctx, segments)
+		done <- result{prepared: prepared, err: err}
+	}()
+	<-ctx.reached
+	ctx.cancel()
+	got := <-done
+	if !errors.Is(got.err, context.Canceled) || got.prepared != nil {
+		t.Fatalf("PrepareMedia() = (%v, %v), want (nil, context.Canceled)", got.prepared, got.err)
 	}
 }

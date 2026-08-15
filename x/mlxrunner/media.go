@@ -1,6 +1,7 @@
 package mlxrunner
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -46,7 +47,7 @@ func foldValue(data []byte, dims []int) uint32 {
 // use, released when the expansion is fully evaluated. A nil
 // *requestMedia is a text-only request; every method is nil-safe.
 type requestMedia struct {
-	model    base.MediaModel
+	model    base.MediaEncoder
 	items    []mediaItem
 	inputLen int
 
@@ -65,7 +66,7 @@ func (r *Runner) openMedia(request Request) *requestMedia {
 		return nil
 	}
 	m := &requestMedia{
-		model:    r.Model.(base.MediaModel),
+		model:    r.Model.(base.MediaEncoder),
 		items:    request.MediaItems,
 		inputLen: len(request.Tokens),
 		manifest: make([]batch.MediaItem, len(request.MediaItems)),
@@ -172,7 +173,7 @@ func (m *requestMedia) close() {
 // expandMedia tokenizes the [img-N]-tagged prompt into segments, expands
 // them in a single PrepareMedia call, and validates the authored items
 // before keying cache identity on them.
-func (r *Runner) expandMedia(mm base.MediaModel, prompt string, media []llm.MediaData) (*base.PreparedRequest, []mediaItem, error) {
+func (r *Runner) expandMedia(ctx context.Context, prepare func(context.Context, []base.Segment) (*base.PreparedRequest, error), prompt string, media []llm.MediaData) (*base.PreparedRequest, []mediaItem, error) {
 	matches := imgTagPattern.FindAllStringSubmatch(prompt, -1)
 	parts := imgTagPattern.Split(prompt, -1)
 
@@ -205,7 +206,7 @@ func (r *Runner) expandMedia(mm base.MediaModel, prompt string, media []llm.Medi
 		}
 	}
 
-	prepared, err := mm.PrepareMedia(segments)
+	prepared, err := prepare(ctx, segments)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -2,8 +2,11 @@ package qwen3_5
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
+	"image/color"
+	"io"
 	"math"
 
 	"golang.org/x/image/draw"
@@ -66,42 +69,68 @@ func smartResize(height, width, factor int32) (int32, int32, error) {
 // preprocessImage decodes and prepares one image: aspect-preserving resize,
 // (x/255-0.5)/0.5 normalization, and patchification into the tower's
 // block-major row layout.
-func (m *Model) preprocessImage(data []byte) (pixels []float32, prep preparedImage, err error) {
-	img, _, err := image.Decode(bytes.NewReader(data))
+func (m *Model) preprocessImage(ctx context.Context, data []byte) (pixels []float32, prep preparedImage, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, preparedImage{}, err
+	}
+	img, _, err := image.Decode(qwenImageContextReader{check: ctx.Err, r: bytes.NewReader(data)})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, preparedImage{}, ctxErr
+		}
 		return nil, preparedImage{}, fmt.Errorf("decode image: %w", err)
 	}
 
 	v := m.Vision
 	patch, merge, temporal := v.PatchSize, v.SpatialMergeSize, v.TemporalPatchSize
 	bounds := img.Bounds()
-	img = dropAlpha(img, bounds)
+	img, err = dropAlpha(ctx, img, bounds)
+	if err != nil {
+		return nil, preparedImage{}, err
+	}
 	targetH, targetW, err := smartResize(int32(bounds.Dy()), int32(bounds.Dx()), patch*merge)
 	if err != nil {
 		return nil, preparedImage{}, err
 	}
 
-	resized := image.NewRGBA(image.Rect(0, 0, int(targetW), int(targetH)))
-	draw.CatmullRom.Scale(resized, resized.Bounds(), img, bounds, draw.Src, nil)
+	resized, err := resizeQwenImage(ctx, img, bounds, int(targetW), int(targetH))
+	if err != nil {
+		return nil, preparedImage{}, err
+	}
 	gridH, gridW := targetH/patch, targetW/patch
 	prep = preparedImage{gridH: gridH, gridW: gridW}
-	pixels = patchifyImage(resized, gridH, gridW, patch, merge, temporal)
-	prep.ropePos, prep.posIdx, prep.posWt = visionPatchLookups(gridH, gridW, merge, v.NumPositionEmbeddings)
+	pixels, err = patchifyImage(ctx, resized, gridH, gridW, patch, merge, temporal)
+	if err != nil {
+		return nil, preparedImage{}, err
+	}
+	prep.ropePos, prep.posIdx, prep.posWt, err = visionPatchLookups(ctx, gridH, gridW, merge, v.NumPositionEmbeddings)
+	if err != nil {
+		return nil, preparedImage{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, preparedImage{}, err
+	}
 	return pixels, prep, nil
 }
 
 // patchifyImage converts the resized image to the tower's row layout:
 // block-major over merge blocks, each row [channel][temporal duplicate]
 // [pixel row][pixel column].
-func patchifyImage(resized *image.RGBA, gridH, gridW, patch, merge, temporal int32) []float32 {
+func patchifyImage(ctx context.Context, resized *image.RGBA, gridH, gridW, patch, merge, temporal int32) ([]float32, error) {
 	n := int(gridH * gridW)
 	rowLen := int(3 * temporal * patch * patch)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	pixels := make([]float32, n*rowLen)
 
 	p, t := int(patch), int(temporal)
 	patchArea := p * p
 	row := 0
 	for bh := range gridH / merge {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		for bw := range gridW / merge {
 			for mh := range merge {
 				for mw := range merge {
@@ -126,15 +155,21 @@ func patchifyImage(resized *image.RGBA, gridH, gridW, patch, merge, temporal int
 			}
 		}
 	}
-	return pixels
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return pixels, nil
 }
 
 // visionPatchLookups computes, in the block-major token order, each patch's
 // (h, w) rotary position and its four bilinear corners into the learned
 // side*side position grid with their weights.
-func visionPatchLookups(gridH, gridW, merge, numPosEmbeddings int32) (ropePos, posIdx []int32, posWt []float32) {
+func visionPatchLookups(ctx context.Context, gridH, gridW, merge, numPosEmbeddings int32) (ropePos, posIdx []int32, posWt []float32, err error) {
 	side := int32(math.Sqrt(float64(numPosEmbeddings)))
 	n := int(gridH * gridW)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
 	ropePos = make([]int32, 0, 2*n)
 	posIdx = make([]int32, 0, 4*n)
 	posWt = make([]float32, 0, 4*n)
@@ -148,6 +183,9 @@ func visionPatchLookups(gridH, gridW, merge, numPosEmbeddings int32) (ropePos, p
 	}
 
 	for bh := range gridH / merge {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		for bw := range gridW / merge {
 			for mh := range merge {
 				for mw := range merge {
@@ -165,19 +203,80 @@ func visionPatchLookups(gridH, gridW, merge, numPosEmbeddings int32) (ropePos, p
 			}
 		}
 	}
-	return ropePos, posIdx, posWt
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	return ropePos, posIdx, posWt, nil
 }
 
 // dropAlpha flattens a non-opaque image to straight RGB: the reference
 // drops alpha via RGB conversion before resizing, not by compositing.
-func dropAlpha(img image.Image, bounds image.Rectangle) image.Image {
+func dropAlpha(ctx context.Context, img image.Image, bounds image.Rectangle) (image.Image, error) {
 	if o, ok := img.(interface{ Opaque() bool }); ok && o.Opaque() {
-		return img
+		return img, ctx.Err()
 	}
 	flat := image.NewNRGBA(bounds)
-	draw.Draw(flat, bounds, img, bounds.Min, draw.Src)
-	for i := 3; i < len(flat.Pix); i += 4 {
-		flat.Pix[i] = 0xff
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			c := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+			c.A = 0xff
+			flat.SetNRGBA(x, y, c)
+		}
 	}
-	return flat
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return flat, nil
+}
+
+type qwenImageContextReader struct {
+	check func() error
+	r     io.Reader
+}
+
+func (r qwenImageContextReader) Read(p []byte) (int, error) {
+	if err := r.check(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
+type qwenResizeCancellation struct{ marker byte }
+
+var qwenResizeCanceled = &qwenResizeCancellation{marker: 1}
+
+type qwenCancellableImage struct {
+	*image.RGBA
+	check func() error
+}
+
+func (dst qwenCancellableImage) Set(x, y int, c color.Color) {
+	if dst.check() != nil {
+		panic(qwenResizeCanceled)
+	}
+	dst.RGBA.Set(x, y, c)
+}
+
+func resizeQwenImage(ctx context.Context, src image.Image, bounds image.Rectangle, width, height int) (resized *image.RGBA, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if recovered == qwenResizeCanceled {
+				resized, err = nil, ctx.Err()
+				return
+			}
+			panic(recovered)
+		}
+	}()
+	draw.CatmullRom.Scale(qwenCancellableImage{RGBA: dst, check: ctx.Err}, dst.Bounds(), src, bounds, draw.Src, nil)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return dst, nil
 }
