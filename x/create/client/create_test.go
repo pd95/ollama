@@ -473,6 +473,78 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 	}
 }
 
+func TestApertusMetadataInference(t *testing.T) {
+	tests := []struct {
+		name       string
+		configJSON string
+		parser     string
+		renderer   string
+		caps       []string
+	}{
+		{
+			name:       "architecture wins over top-level and nested model type",
+			configJSON: `{"architectures":["ApertusForCausalLM"],"model_type":"qwen3","llm_config":{"model_type":"gpt_oss"}}`,
+			parser:     "apertus",
+			renderer:   "apertus",
+			caps:       []string{"completion", "tools"},
+		},
+		{
+			name:       "top-level wins over nested model type",
+			configJSON: `{"model_type":"apertus","llm_config":{"model_type":"qwen3"}}`,
+			parser:     "apertus",
+			renderer:   "apertus",
+			caps:       []string{"completion", "tools"},
+		},
+		{
+			name:       "nested model type",
+			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"apertus"}}`,
+			parser:     "apertus",
+			renderer:   "apertus",
+			caps:       []string{"completion", "tools"},
+		},
+		{
+			name:       "near matches are not Apertus",
+			configJSON: `{"architectures":["ApertusForCausalLMExtra"],"model_type":"apertus-next","llm_config":{"model_type":"not_apertus"}}`,
+			caps:       []string{"completion"},
+		},
+		{
+			name:       "missing identifiers",
+			configJSON: `{}`,
+			caps:       []string{"completion"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(tt.configJSON), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got := getParserName(dir); got != tt.parser {
+				t.Fatalf("parser = %q, want %q", got, tt.parser)
+			}
+			if got := getRendererName(dir); got != tt.renderer {
+				t.Fatalf("renderer = %q, want %q", got, tt.renderer)
+			}
+			if got := inferSafetensorsCapabilities(dir, getParserName(dir)); !slices.Equal(got, tt.caps) {
+				t.Fatalf("capabilities = %v, want %v", got, tt.caps)
+			}
+		})
+	}
+
+	for _, invalid := range []string{"not json", `{"architectures":"ApertusForCausalLM"}`} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(invalid), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := getParserName(dir); got != "" {
+			t.Fatalf("invalid config parser = %q, want empty", got)
+		}
+		if got := getRendererName(dir); got != "" {
+			t.Fatalf("invalid config renderer = %q, want empty", got)
+		}
+	}
+}
+
 func TestCreateModelfileLayersIncludesParameters(t *testing.T) {
 	t.Setenv("OLLAMA_MODELS", t.TempDir())
 
