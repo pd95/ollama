@@ -24,6 +24,8 @@ const (
 )
 
 type ConfigFile struct {
+	Architectures      []string      `json:"architectures"`
+	ModelType          string        `json:"model_type"`
 	TextConfig         TextConfig    `json:"text_config"`
 	VisionConfig       *VisionConfig `json:"vision_config"`
 	Quantization       Quantization  `json:"quantization"`
@@ -42,6 +44,7 @@ type Quantization struct {
 }
 
 type VisionConfig struct {
+	ModelType             string  `json:"model_type"`
 	HiddenSize            int     `json:"hidden_size"`
 	IntermediateSize      int     `json:"intermediate_size"`
 	NumHiddenLayers       int     `json:"num_hidden_layers"`
@@ -55,12 +58,18 @@ type VisionConfig struct {
 	PoolingKernelSize     int     `json:"pooling_kernel_size"`
 	UseClippedLinears     bool    `json:"use_clipped_linears"`
 	Standardize           bool    `json:"standardize"`
+	MMEmbedDim            int     `json:"mm_embed_dim"`
+	MMPosembSize          int     `json:"mm_posemb_size"`
+	ModelPatchSize        int     `json:"model_patch_size"`
+	NumSoftTokens         int     `json:"num_soft_tokens"`
+	OutputProjDims        int     `json:"output_proj_dims"`
 	RopeParameters        struct {
 		RopeTheta float64 `json:"rope_theta"`
 	} `json:"rope_parameters"`
 }
 
 type Architecture struct {
+	Unified                bool
 	TextHiddenSize         int
 	HiddenSize             int
 	IntermediateSize       int
@@ -77,6 +86,9 @@ type Architecture struct {
 	ClippingBoundsOptional bool
 	Standardize            bool
 	RopeTheta              float64
+	MMEmbedDim             int
+	MMPosembSize           int
+	ModelPatchSize         int
 }
 
 type TensorDescriptor struct {
@@ -95,6 +107,36 @@ func projectVisionArchitecture(cfg ConfigFile, requireTextWidth bool) (Architect
 		return Architecture{}, fmt.Errorf("missing vision_config")
 	}
 	v := *cfg.VisionConfig
+	if isUnifiedConfig(cfg) {
+		if v.NumSoftTokens == 0 {
+			v.NumSoftTokens = 280
+		}
+		if v.PatchSize == 0 {
+			v.PatchSize = 16
+		}
+		if v.PoolingKernelSize == 0 {
+			v.PoolingKernelSize = 3
+		}
+		if v.ModelPatchSize == 0 {
+			v.ModelPatchSize = v.PatchSize * v.PoolingKernelSize
+		}
+		if v.MMEmbedDim == 0 {
+			v.MMEmbedDim = v.OutputProjDims
+		}
+		if v.MMPosembSize == 0 {
+			v.MMPosembSize = 1120
+		}
+		a := Architecture{
+			Unified: true, TextHiddenSize: cfg.TextConfig.HiddenSize,
+			DefaultOutputLength: v.NumSoftTokens, PatchSize: v.PatchSize,
+			PoolingKernelSize: v.PoolingKernelSize, MMEmbedDim: v.MMEmbedDim,
+			MMPosembSize: v.MMPosembSize, ModelPatchSize: v.ModelPatchSize, RMSNormEps: 1e-6,
+		}
+		if err := validateUnifiedArchitecture(a, requireTextWidth); err != nil {
+			return Architecture{}, err
+		}
+		return a, nil
+	}
 	if v.HiddenSize == 0 {
 		v.HiddenSize = 768
 	}
@@ -149,6 +191,57 @@ func projectVisionArchitecture(cfg ConfigFile, requireTextWidth bool) (Architect
 		return Architecture{}, err
 	}
 	return a, nil
+}
+
+func isUnifiedConfig(cfg ConfigFile) bool {
+	if strings.EqualFold(cfg.ModelType, "gemma4_unified") || strings.EqualFold(cfg.VisionConfig.ModelType, "gemma4_unified_vision") {
+		return true
+	}
+	for _, architecture := range cfg.Architectures {
+		switch strings.ToLower(architecture) {
+		case "gemma4unifiedforcausallm", "gemma4unifiedforconditionalgeneration":
+			return true
+		}
+	}
+	return false
+}
+
+func validateUnifiedArchitecture(a Architecture, requireTextWidth bool) error {
+	if a.TextHiddenSize < 0 || a.TextHiddenSize > MaxVisionHidden || (requireTextWidth && a.TextHiddenSize == 0) {
+		return fmt.Errorf("invalid Gemma4 text hidden_size %d", a.TextHiddenSize)
+	}
+	for _, f := range []struct {
+		name       string
+		value, max int
+	}{
+		{"mm_embed_dim", a.MMEmbedDim, MaxVisionHidden},
+		{"mm_posemb_size", a.MMPosembSize, MaxPositionEntries},
+		{"model_patch_size", a.ModelPatchSize, MaxImageDimension},
+		{"num_soft_tokens", a.DefaultOutputLength, MaxVisionSoftTokens},
+		{"patch_size", a.PatchSize, MaxImageDimension},
+		{"pooling_kernel_size", a.PoolingKernelSize, MaxImageDimension},
+	} {
+		if f.value <= 0 || f.value > f.max {
+			return fmt.Errorf("invalid Gemma4 unified vision %s %d (limit %d)", f.name, f.value, f.max)
+		}
+	}
+	expectedPatch, ok := checkedProduct(MaxImageDimension, int64(a.PatchSize), int64(a.PoolingKernelSize))
+	if !ok || expectedPatch != int64(a.ModelPatchSize) {
+		return fmt.Errorf("unified model_patch_size %d does not match patch_size * pooling_kernel_size (%d)", a.ModelPatchSize, expectedPatch)
+	}
+	if _, ok := checkedProduct(math.MaxInt32, 3, int64(a.ModelPatchSize), int64(a.ModelPatchSize)); !ok {
+		return fmt.Errorf("invalid Gemma4 unified patch dimension")
+	}
+	if _, ok := checkedProduct(3*MaxResizePixels, int64(a.DefaultOutputLength), int64(a.ModelPatchSize), int64(a.ModelPatchSize), 3); !ok {
+		return fmt.Errorf("Gemma4 unified patch allocation exceeds %d values", 3*MaxResizePixels)
+	}
+	if _, ok := checkedProduct(MaxPositionValues, int64(a.DefaultOutputLength), 2); !ok {
+		return fmt.Errorf("Gemma4 unified position allocation exceeds %d values", MaxPositionValues)
+	}
+	if a.MMPosembSize < a.DefaultOutputLength {
+		return fmt.Errorf("Gemma4 unified position table %d is smaller than token count %d", a.MMPosembSize, a.DefaultOutputLength)
+	}
+	return nil
 }
 
 func validateArchitecture(a Architecture, requireTextWidth bool) error {
@@ -267,6 +360,9 @@ func validateInventory(cfg ConfigFile, tensors map[string]TensorDescriptor, mode
 	if a.TextHiddenSize <= 0 {
 		return fmt.Errorf("missing Gemma4 text hidden_size")
 	}
+	if a.Unified {
+		return validateUnifiedInventory(cfg, a, tensors, mode)
+	}
 	names := make([]string, 0, len(tensors))
 	for name := range tensors {
 		names = append(names, name)
@@ -331,6 +427,9 @@ func validateInventory(cfg ConfigFile, tensors map[string]TensorDescriptor, mode
 }
 
 func validateNames(a Architecture, names []string, mode inventoryMode) error {
+	if a.Unified {
+		return validateUnifiedNames(names, mode)
+	}
 	prefix, ok := visionPrefix(names, mode)
 	if !ok {
 		return fmt.Errorf("missing vision_tower.patch_embedder.input_proj weight")
@@ -374,6 +473,54 @@ func validateNames(a Architecture, names []string, mode inventoryMode) error {
 		}
 	}
 	return fmt.Errorf("missing embed_vision.embedding_projection weight")
+}
+
+func validateUnifiedNames(names []string, mode inventoryMode) error {
+	for _, name := range []string{
+		"model.vision_embedder.patch_ln1.weight", "model.vision_embedder.patch_ln1.bias",
+		"model.vision_embedder.patch_dense.bias", "model.vision_embedder.patch_ln2.weight",
+		"model.vision_embedder.patch_ln2.bias", "model.vision_embedder.pos_embedding",
+		"model.vision_embedder.pos_norm.weight", "model.vision_embedder.pos_norm.bias",
+	} {
+		if !slices.Contains(names, name) {
+			return fmt.Errorf("missing %s", name)
+		}
+	}
+	for _, path := range []string{"model.vision_embedder.patch_dense", "model.embed_vision.embedding_projection"} {
+		if !linearNamePresent(names, path, mode) {
+			return fmt.Errorf("missing %s weight", path)
+		}
+	}
+	return nil
+}
+
+func validateUnifiedInventory(cfg ConfigFile, a Architecture, tensors map[string]TensorDescriptor, mode inventoryMode) error {
+	names := make([]string, 0, len(tensors))
+	for name := range tensors {
+		names = append(names, name)
+	}
+	if err := validateUnifiedNames(names, mode); err != nil {
+		return err
+	}
+	patchDim, _ := checkedProduct(math.MaxInt32, 3, int64(a.ModelPatchSize), int64(a.ModelPatchSize))
+	for name, shape := range map[string][]int32{
+		"model.vision_embedder.patch_ln1.weight": {int32(patchDim)},
+		"model.vision_embedder.patch_ln1.bias":   {int32(patchDim)},
+		"model.vision_embedder.patch_dense.bias": {int32(a.MMEmbedDim)},
+		"model.vision_embedder.patch_ln2.weight": {int32(a.MMEmbedDim)},
+		"model.vision_embedder.patch_ln2.bias":   {int32(a.MMEmbedDim)},
+		"model.vision_embedder.pos_embedding":    {int32(a.MMPosembSize), 2, int32(a.MMEmbedDim)},
+		"model.vision_embedder.pos_norm.weight":  {int32(a.MMEmbedDim)},
+		"model.vision_embedder.pos_norm.bias":    {int32(a.MMEmbedDim)},
+	} {
+		if err := requireDense(tensors, name, shape); err != nil {
+			return err
+		}
+	}
+	if err := requireLinearDescriptor(tensors, "model.vision_embedder.patch_dense", []int32{int32(a.MMEmbedDim), int32(patchDim)}, mode, cfg); err != nil {
+		return err
+	}
+	return requireLinearDescriptor(tensors, "model.embed_vision.embedding_projection", []int32{int32(a.TextHiddenSize), int32(a.MMEmbedDim)}, mode, cfg)
 }
 
 func visionPrefix(names []string, mode inventoryMode) (string, bool) {

@@ -17,6 +17,7 @@ import (
 	_ "image/png"
 	"io"
 	"math"
+	"slices"
 
 	xdraw "golang.org/x/image/draw"
 
@@ -54,6 +55,8 @@ type VisionRopeParameters struct {
 }
 
 type VisionConfig struct {
+	Unified               bool                 `json:"-"`
+	ModelType             string               `json:"model_type"`
 	HiddenSize            int32                `json:"hidden_size"`
 	IntermediateSize      int32                `json:"intermediate_size"`
 	NumHiddenLayers       int32                `json:"num_hidden_layers"`
@@ -67,7 +70,16 @@ type VisionConfig struct {
 	PoolingKernelSize     int32                `json:"pooling_kernel_size"`
 	UseClippedLinears     bool                 `json:"use_clipped_linears"`
 	Standardize           bool                 `json:"standardize"`
+	MMEmbedDim            int32                `json:"mm_embed_dim"`
+	MMPosembSize          int32                `json:"mm_posemb_size"`
+	ModelPatchSize        int32                `json:"model_patch_size"`
+	NumSoftTokens         int32                `json:"num_soft_tokens"`
+	OutputProjDims        int32                `json:"output_proj_dims"`
 	RopeParameters        VisionRopeParameters `json:"rope_parameters"`
+}
+
+func (c *VisionConfig) unified() bool {
+	return c != nil && c.Unified
 }
 
 type gemma4MediaTokens struct {
@@ -83,6 +95,12 @@ type gemma4ImageInput struct {
 	PatchWidth  int
 	PatchHeight int
 	SoftTokens  int
+	Patches     []float32
+	Positions   []int32
+}
+
+type gemma4MediaLayout struct {
+	ImageSpans [][2]int
 }
 
 type gemma4MediaPayload struct {
@@ -140,6 +158,15 @@ type VisionModel struct {
 	StdScale      *mlx.Array
 }
 
+type UnifiedVisionEmbedder struct {
+	PatchLN1     *nn.LayerNorm
+	PatchDense   nn.LinearLayer
+	PatchLN2     *nn.LayerNorm
+	PosEmbedding *mlx.Array
+	PosNorm      *nn.LayerNorm
+	PatchDim     int32
+}
+
 type MultimodalEmbedder struct {
 	Projection nn.LinearLayer
 	Eps        float32
@@ -171,6 +198,7 @@ func parseVisionConfig(configData []byte) (*VisionConfig, error) {
 		return nil, err
 	}
 	cfg := *wrapped.VisionConfig
+	cfg.Unified = architecture.Unified
 	cfg.HiddenSize = int32(architecture.HiddenSize)
 	cfg.IntermediateSize = int32(architecture.IntermediateSize)
 	cfg.NumHiddenLayers = int32(architecture.NumHiddenLayers)
@@ -183,6 +211,13 @@ func parseVisionConfig(configData []byte) (*VisionConfig, error) {
 	cfg.PositionEmbeddingSize = int32(architecture.PositionEmbeddingSize)
 	cfg.PoolingKernelSize = int32(architecture.PoolingKernelSize)
 	cfg.RopeParameters.RopeTheta = float32(architecture.RopeTheta)
+	cfg.MMEmbedDim = int32(architecture.MMEmbedDim)
+	cfg.MMPosembSize = int32(architecture.MMPosembSize)
+	cfg.ModelPatchSize = int32(architecture.ModelPatchSize)
+	if architecture.Unified {
+		cfg.DefaultOutputLength = int32(architecture.DefaultOutputLength)
+		cfg.RMSNormEps = float32(architecture.RMSNormEps)
+	}
 	return &cfg, nil
 }
 
@@ -244,19 +279,31 @@ func metadataConfigFromVision(cfg *VisionConfig, textHidden int) gemma4metadata.
 		return gemma4metadata.ConfigFile{}
 	}
 	v := &gemma4metadata.VisionConfig{
+		ModelType:  cfg.ModelType,
 		HiddenSize: int(cfg.HiddenSize), IntermediateSize: int(cfg.IntermediateSize), NumHiddenLayers: int(cfg.NumHiddenLayers),
 		NumAttentionHeads: int(cfg.NumAttentionHeads), NumKeyValueHeads: int(cfg.NumKeyValueHeads), HeadDim: int(cfg.HeadDim),
 		RMSNormEps: float64(cfg.RMSNormEps), DefaultOutputLength: int(cfg.DefaultOutputLength), PatchSize: int(cfg.PatchSize),
 		PositionEmbeddingSize: int(cfg.PositionEmbeddingSize), PoolingKernelSize: int(cfg.PoolingKernelSize),
 		UseClippedLinears: cfg.UseClippedLinears, Standardize: cfg.Standardize,
+		MMEmbedDim: int(cfg.MMEmbedDim), MMPosembSize: int(cfg.MMPosembSize), ModelPatchSize: int(cfg.ModelPatchSize),
+		NumSoftTokens: int(cfg.DefaultOutputLength), OutputProjDims: int(cfg.OutputProjDims),
+	}
+	if cfg.Unified {
+		v.ModelType = "gemma4_unified_vision"
 	}
 	v.RopeParameters.RopeTheta = float64(cfg.RopeParameters.RopeTheta)
 	return gemma4metadata.ConfigFile{TextConfig: gemma4metadata.TextConfig{HiddenSize: textHidden}, VisionConfig: v}
 }
 
 func validateGemma4VisionWeights(tensors map[string]*mlx.Array, cfg *VisionConfig, textHidden int, tq map[string]*model.TensorQuantInfo) (bool, error) {
-	if firstNonNil(tensors, "vision_tower.patch_embedder.input_proj.weight", "model.vision_tower.patch_embedder.input_proj.weight") == nil {
-		if firstNonNil(tensors, "vision_tower.patch_embedder.input_proj.weight_packed", "model.vision_tower.patch_embedder.input_proj.weight_packed") != nil {
+	sentinel := firstNonNil(tensors, "vision_tower.patch_embedder.input_proj.weight", "model.vision_tower.patch_embedder.input_proj.weight")
+	packedSentinel := firstNonNil(tensors, "vision_tower.patch_embedder.input_proj.weight_packed", "model.vision_tower.patch_embedder.input_proj.weight_packed")
+	if cfg != nil && cfg.unified() {
+		sentinel = firstNonNil(tensors, "model.vision_embedder.patch_ln1.weight")
+		packedSentinel = firstNonNil(tensors, "model.vision_embedder.patch_dense.weight_packed")
+	}
+	if sentinel == nil {
+		if packedSentinel != nil {
 			return false, fmt.Errorf("runtime contains source-only Gemma4 vision packed sentinel")
 		}
 		return false, nil
@@ -280,6 +327,43 @@ func validateGemma4VisionWeights(tensors map[string]*mlx.Array, cfg *VisionConfi
 		return false, err
 	}
 	return true, nil
+}
+
+func loadUnifiedVisionEmbedder(tensors map[string]*mlx.Array, cfg *VisionConfig, groupSize, bits int, mode string, tq map[string]*model.TensorQuantInfo) (*UnifiedVisionEmbedder, error) {
+	const prefix = "model.vision_embedder."
+	patchDim, ok := checkedPositiveProduct(math.MaxInt32, int64(cfg.ModelPatchSize), int64(cfg.ModelPatchSize), 3)
+	if !ok {
+		return nil, errors.New("invalid Gemma4 unified patch dimension")
+	}
+	linears := model.NewLinearFactory(tensors, groupSize, bits, mode, tq)
+	patchDense := linears.Make(prefix + "patch_dense")
+	if patchDense == nil {
+		return nil, errors.New("missing Gemma4 unified patch projection")
+	}
+	makeLayerNorm := func(path string, width int) (*nn.LayerNorm, error) {
+		weight, bias := tensors[path+".weight"], tensors[path+".bias"]
+		if weight == nil || bias == nil || !slices.Equal(weight.Dims(), []int{width}) || !slices.Equal(bias.Dims(), []int{width}) {
+			return nil, fmt.Errorf("invalid Gemma4 unified layer norm %s", path)
+		}
+		return &nn.LayerNorm{Weight: weight, Bias: bias, Eps: 1e-5}, nil
+	}
+	patchLN1, err := makeLayerNorm(prefix+"patch_ln1", int(patchDim))
+	if err != nil {
+		return nil, err
+	}
+	patchLN2, err := makeLayerNorm(prefix+"patch_ln2", int(cfg.MMEmbedDim))
+	if err != nil {
+		return nil, err
+	}
+	posNorm, err := makeLayerNorm(prefix+"pos_norm", int(cfg.MMEmbedDim))
+	if err != nil {
+		return nil, err
+	}
+	pos := tensors[prefix+"pos_embedding"]
+	if pos == nil || !slices.Equal(pos.Dims(), []int{int(cfg.MMPosembSize), 2, int(cfg.MMEmbedDim)}) {
+		return nil, errors.New("invalid Gemma4 unified position embedding")
+	}
+	return &UnifiedVisionEmbedder{PatchLN1: patchLN1, PatchDense: patchDense, PatchLN2: patchLN2, PosEmbedding: pos, PosNorm: posNorm, PatchDim: int32(patchDim)}, nil
 }
 
 func resolveVisionPrefix(tensors map[string]*mlx.Array) string {
@@ -425,6 +509,7 @@ func (m *MultimodalEmbedder) Forward(x *mlx.Array) *mlx.Array {
 // in stream order and remains a separate cache-identity item.
 func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
 	prepared := &base.PreparedRequest{}
+	var layout gemma4MediaLayout
 	for source, seg := range segments {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -433,7 +518,7 @@ func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*bas
 			prepared.Tokens = append(prepared.Tokens, seg.Tokens...)
 			continue
 		}
-		if m.VisionConfig == nil || m.Vision == nil || m.EmbedVision == nil {
+		if m.VisionConfig == nil || (m.Vision == nil && m.UnifiedVision == nil) || m.EmbedVision == nil {
 			return nil, fmt.Errorf("this model does not support %s input", seg.Kind)
 		}
 		if seg.Kind != "image" {
@@ -454,13 +539,20 @@ func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*bas
 		prepared.Tokens = append(prepared.Tokens, m.EOITokenIDValue)
 
 		geom := *img
-		pixels := geom.Pixels
+		mediaData := geom.Pixels
+		dims := []int{1, 3, geom.Height, geom.Width}
 		geom.Pixels = nil
+		if m.UnifiedVision != nil {
+			mediaData = geom.Patches
+			dims = []int{1, geom.SoftTokens, int(m.UnifiedVision.PatchDim)}
+			geom.Patches = nil
+			layout.ImageSpans = append(layout.ImageSpans, [2]int{start + imageStart, start + imageEnd})
+		}
 		item := base.PreparedItem{
 			Range:     [2]int{start, len(prepared.Tokens)},
 			Source:    source,
-			MediaData: pixels,
-			Dims:      []int{1, 3, geom.Height, geom.Width},
+			MediaData: mediaData,
+			Dims:      dims,
 			Opaque: gemma4MediaPayload{
 				Image:      geom,
 				ImageStart: imageStart,
@@ -472,6 +564,9 @@ func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*bas
 		}
 		prepared.Items = append(prepared.Items, item)
 	}
+	if len(layout.ImageSpans) > 0 {
+		prepared.Layout = &layout
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -482,8 +577,15 @@ func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*bas
 // MediaData, so pixels are always read from data rather than Opaque.
 func (m *Model) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
 	payload := item.Opaque.(gemma4MediaPayload)
-	pixels := mlx.Reshape(data, 1, 3, int32(payload.Image.Height), int32(payload.Image.Width))
-	features := m.EmbedVision.Forward(m.Vision.Forward(pixels, &payload.Image))
+	var encoded *mlx.Array
+	if m.UnifiedVision != nil {
+		patches := mlx.Reshape(data, 1, int32(payload.Image.SoftTokens), m.UnifiedVision.PatchDim)
+		encoded = m.UnifiedVision.Forward(patches, &payload.Image)
+	} else {
+		pixels := mlx.Reshape(data, 1, 3, int32(payload.Image.Height), int32(payload.Image.Width))
+		encoded = m.Vision.Forward(pixels, &payload.Image)
+	}
+	features := m.EmbedVision.Forward(encoded)
 	return mlx.Squeeze(features, 0)
 }
 
@@ -584,32 +686,99 @@ func preprocessGemma4Image(ctx context.Context, data []byte, cfg *VisionConfig, 
 		}
 	}
 
-	pixels, err := imageToCHWFloat32Context(ctx, resized)
-	if err != nil {
-		return nil, err
-	}
 	patchW := targetW / patchSize
 	patchH := targetH / patchSize
 	patchCount, ok := checkedPositiveProduct(maxIntValue, int64(patchW), int64(patchH))
 	if !ok {
 		return nil, errors.New("Gemma4 image patch count exceeds platform limits")
 	}
-	if _, ok := checkedPositiveProduct(maxGemma4PositionValues, patchCount, int64(cfg.HeadDim)); !ok {
-		return nil, fmt.Errorf("Gemma4 image position allocation exceeds limit %d", maxGemma4PositionValues)
+	if !cfg.unified() {
+		if _, ok := checkedPositiveProduct(maxGemma4PositionValues, patchCount, int64(cfg.HeadDim)); !ok {
+			return nil, fmt.Errorf("Gemma4 image position allocation exceeds limit %d", maxGemma4PositionValues)
+		}
 	}
 	softTokens := int(patchCount / (int64(pooling) * int64(pooling)))
 	if softTokens <= 0 || softTokens > maxSoftTokens {
 		return nil, fmt.Errorf("Gemma4 image produced %d soft tokens, limit %d", softTokens, maxSoftTokens)
 	}
 
-	return &gemma4ImageInput{
-		Pixels:      pixels,
+	input := &gemma4ImageInput{
 		Width:       targetW,
 		Height:      targetH,
 		PatchWidth:  patchW,
 		PatchHeight: patchH,
 		SoftTokens:  softTokens,
-	}, nil
+	}
+	if cfg.unified() {
+		input.Patches, input.Positions, err = imageToUnifiedPatchesContext(ctx, resized, int(cfg.ModelPatchSize))
+		if err != nil {
+			return nil, err
+		}
+		expected, ok := checkedPositiveProduct(maxIntValue, int64(softTokens), int64(cfg.ModelPatchSize), int64(cfg.ModelPatchSize), 3)
+		if !ok || int64(len(input.Patches)) != expected || len(input.Positions) != softTokens*2 {
+			return nil, errors.New("Gemma4 unified patch count does not match soft token count")
+		}
+	} else {
+		input.Pixels, err = imageToCHWFloat32Context(ctx, resized)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return input, nil
+}
+
+func imageToUnifiedPatchesContext(ctx context.Context, img image.Image, patchSize int) ([]float32, []int32, error) {
+	if patchSize <= 0 {
+		return nil, nil, errors.New("invalid Gemma4 unified model patch size")
+	}
+	b := img.Bounds()
+	width, height := b.Dx(), b.Dy()
+	if width%patchSize != 0 || height%patchSize != 0 {
+		return nil, nil, fmt.Errorf("Gemma4 unified image dimensions %dx%d are not divisible by patch size %d", width, height, patchSize)
+	}
+	patchW, patchH := width/patchSize, height/patchSize
+	patchDim, ok := checkedPositiveProduct(maxIntValue, int64(patchSize), int64(patchSize), 3)
+	if !ok {
+		return nil, nil, errors.New("Gemma4 unified patch dimension exceeds platform limits")
+	}
+	patchCount, ok := checkedPositiveProduct(maxIntValue, int64(patchW), int64(patchH))
+	if !ok || patchCount > math.MaxInt32 {
+		return nil, nil, errors.New("Gemma4 unified patch count exceeds platform limits")
+	}
+	values, ok := checkedPositiveProduct(maxIntValue, patchCount, patchDim)
+	if !ok {
+		return nil, nil, errors.New("Gemma4 unified patch allocation exceeds platform limits")
+	}
+	positionsCount, ok := checkedPositiveProduct(maxIntValue, patchCount, 2)
+	if !ok {
+		return nil, nil, errors.New("Gemma4 unified position allocation exceeds platform limits")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	patches := make([]float32, int(values))
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	positions := make([]int32, int(positionsCount))
+	for py := range patchH {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		for px := range patchW {
+			patch := py*patchW + px
+			positions[2*patch], positions[2*patch+1] = int32(px), int32(py)
+			offset := patch * int(patchDim)
+			for y := range patchSize {
+				for x := range patchSize {
+					r, g, blue, _ := img.At(b.Min.X+px*patchSize+x, b.Min.Y+py*patchSize+y).RGBA()
+					i := offset + (y*patchSize+x)*3
+					patches[i], patches[i+1], patches[i+2] = float32(r)/65535, float32(g)/65535, float32(blue)/65535
+				}
+			}
+		}
+	}
+	return patches, positions, nil
 }
 
 type gemma4CancellationPanic struct{ err error }
@@ -803,6 +972,17 @@ func (m *VisionModel) Forward(pixels *mlx.Array, img *gemma4ImageInput) *mlx.Arr
 		h = mlx.Mul(mlx.Sub(h, m.StdBias), m.StdScale)
 	}
 	return h
+}
+
+func (m *UnifiedVisionEmbedder) Forward(patches *mlx.Array, img *gemma4ImageInput) *mlx.Array {
+	hidden := m.PatchLN2.Forward(m.PatchDense.Forward(m.PatchLN1.Forward(patches)))
+	positions := mlx.FromValues(img.Positions, 1, img.SoftTokens, 2)
+	x := mlx.Squeeze(mlx.SliceStartStop(positions, []int32{0, 0, 0}, []int32{1, int32(img.SoftTokens), 1}), 2)
+	y := mlx.Squeeze(mlx.SliceStartStop(positions, []int32{0, 0, 1}, []int32{1, int32(img.SoftTokens), 2}), 2)
+	tableX := mlx.Squeeze(mlx.SliceStartStop(m.PosEmbedding, []int32{0, 0, 0}, []int32{int32(m.PosEmbedding.Dim(0)), 1, int32(m.PosEmbedding.Dim(2))}), 1)
+	tableY := mlx.Squeeze(mlx.SliceStartStop(m.PosEmbedding, []int32{0, 1, 0}, []int32{int32(m.PosEmbedding.Dim(0)), 2, int32(m.PosEmbedding.Dim(2))}), 1)
+	pos := mlx.Add(tableX.TakeAxis(x, 0), tableY.TakeAxis(y, 0)).AsType(hidden.DType())
+	return m.PosNorm.Forward(mlx.Add(hidden, pos))
 }
 
 func (m *VisionModel) positionArrays(img *gemma4ImageInput) visionPositionArrays {

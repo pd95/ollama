@@ -615,6 +615,46 @@ func TestInferSafetensorsCapabilitiesGemma4VisionRequiresTensors(t *testing.T) {
 	}
 }
 
+func TestInferSafetensorsCapabilitiesGemma4UnifiedVision(t *testing.T) {
+	const configJSON = `{
+		"architectures":["Gemma4UnifiedForConditionalGeneration"],"model_type":"gemma4_unified",
+		"text_config":{"hidden_size":5},
+		"vision_config":{"model_type":"gemma4_unified_vision","mm_embed_dim":3,"mm_posemb_size":4,"model_patch_size":2,"num_soft_tokens":2,"patch_size":1,"pooling_kernel_size":2}
+	}`
+	valid := map[string]gemma4metadata.TensorDescriptor{
+		"model.vision_embedder.patch_ln1.weight":         {Dtype: "F32", Shape: []int32{12}},
+		"model.vision_embedder.patch_ln1.bias":           {Dtype: "F32", Shape: []int32{12}},
+		"model.vision_embedder.patch_dense.weight":       {Dtype: "F32", Shape: []int32{3, 12}},
+		"model.vision_embedder.patch_dense.bias":         {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.patch_ln2.weight":         {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.patch_ln2.bias":           {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.pos_embedding":            {Dtype: "F32", Shape: []int32{4, 2, 3}},
+		"model.vision_embedder.pos_norm.weight":          {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.pos_norm.bias":            {Dtype: "F32", Shape: []int32{3}},
+		"model.embed_vision.embedding_projection.weight": {Dtype: "F32", Shape: []int32{5, 3}},
+	}
+	check := func(t *testing.T, tensors map[string]gemma4metadata.TensorDescriptor, wantVision bool) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeClientSafetensorDescriptors(t, dir, tensors)
+		got := inferSafetensorsCapabilities(dir, "")
+		if slices.Contains(got, "vision") != wantVision {
+			t.Fatalf("capabilities = %v, want vision %t", got, wantVision)
+		}
+	}
+	check(t, valid, true)
+	partial := maps.Clone(valid)
+	delete(partial, "model.vision_embedder.pos_norm.bias")
+	check(t, partial, false)
+	wrong := maps.Clone(valid)
+	d := wrong["model.vision_embedder.patch_dense.weight"]
+	d.Shape = []int32{3, 11}
+	wrong["model.vision_embedder.patch_dense.weight"] = d
+	check(t, wrong, false)
+}
+
 func TestInferSafetensorsCapabilitiesGemma4PackedSourceRequiresProducerContract(t *testing.T) {
 	const configJSON = `{
 		"architectures":["Gemma4ForConditionalGeneration"],"model_type":"gemma4",
