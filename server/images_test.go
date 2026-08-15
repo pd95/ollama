@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -539,7 +540,8 @@ func TestModelCapabilities(t *testing.T) {
 					Renderer:     gemma4RendererSmall,
 					Capabilities: []string{"vision", "audio"},
 				},
-				Template: chatTemplate,
+				TensorLayerNames: []string{"model.vision_tower.patch_embedder.input_proj.weight", "model.embed_vision.embedding_projection.weight"},
+				Template:         chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
@@ -551,7 +553,8 @@ func TestModelCapabilities(t *testing.T) {
 					Renderer:     gemma4RendererLarge,
 					Capabilities: []string{"vision", "audio"},
 				},
-				Template: chatTemplate,
+				TensorLayerNames: []string{"model.vision_tower.patch_embedder.input_proj.weight", "model.embed_vision.embedding_projection.weight"},
+				Template:         chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
@@ -563,7 +566,8 @@ func TestModelCapabilities(t *testing.T) {
 					Renderer:     gemma4RendererLegacy,
 					Capabilities: []string{"vision", "audio"},
 				},
-				Template: chatTemplate,
+				TensorLayerNames: []string{"model.vision_tower.patch_embedder.input_proj.weight", "model.embed_vision.embedding_projection.weight"},
+				Template:         chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityVision},
 		},
@@ -602,6 +606,114 @@ func TestModelCapabilities(t *testing.T) {
 				t.Errorf("Expected capabilities %v, got %v", tt.expectedCaps, caps)
 			}
 		})
+	}
+}
+
+func TestGemma4SafetensorsVisionCapabilityRequiresTensorLayers(t *testing.T) {
+	setTestHome(t, t.TempDir())
+
+	cfg := model.ConfigV2{
+		ModelFormat:  "safetensors",
+		Renderer:     gemma4RendererLarge,
+		Capabilities: []string{"completion", "vision", "audio"},
+	}
+
+	createSafetensorsTestModel(t, "gemma4-text-only", cfg, nil)
+	m, err := GetModel("gemma4-text-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps := m.Capabilities()
+	if !slices.Contains(caps, model.CapabilityCompletion) {
+		t.Fatalf("capabilities = %v, want completion", caps)
+	}
+	if slices.Contains(caps, model.CapabilityVision) {
+		t.Fatalf("capabilities = %v, did not expect vision", caps)
+	}
+	if slices.Contains(caps, model.CapabilityAudio) {
+		t.Fatalf("capabilities = %v, did not expect audio", caps)
+	}
+
+	err = m.CheckCapabilities(model.CapabilityVision)
+	if err == nil || !strings.Contains(err.Error(), "includes Gemma 4 vision tensor layers") {
+		t.Fatalf("CheckCapabilities(vision) error = %v, want Gemma 4 vision tensor hint", err)
+	}
+
+	createSafetensorsTestModel(t, "gemma4-vision", cfg, gemma4VisionManifestLayers(t))
+	m, err = GetModel("gemma4-vision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps = m.Capabilities()
+	if !slices.Contains(caps, model.CapabilityVision) {
+		t.Fatalf("capabilities = %v, want vision", caps)
+	}
+	if slices.Contains(caps, model.CapabilityAudio) {
+		t.Fatalf("capabilities = %v, did not expect audio", caps)
+	}
+}
+
+func TestGemma4VisionTensorLayerNamesRejectIncompleteAndNearMatches(t *testing.T) {
+	tests := []struct {
+		name  string
+		names []string
+		want  bool
+	}{
+		{name: "missing"},
+		{name: "tower only", names: []string{"model.vision_tower.patch_embedder.input_proj.weight"}},
+		{name: "projector only", names: []string{"model.embed_vision.embedding_projection.weight"}},
+		{
+			name: "near matches",
+			names: []string{
+				"model.vision_tower.patch_embedder.input_proj.weight.extra",
+				"model.embed_visionary.embedding_projection.weight",
+			},
+		},
+		{
+			name: "complete model prefix",
+			names: []string{
+				"model.vision_tower.patch_embedder.input_proj.weight",
+				"model.embed_vision.embedding_projection.weight",
+			},
+			want: true,
+		},
+		{
+			name: "complete bare prefix",
+			names: []string{
+				"vision_tower.patch_embedder.input_proj.weight",
+				"embed_vision.embedding_projection.weight",
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasGemma4VisionTensorLayerNames(tt.names); got != tt.want {
+				t.Fatalf("hasGemma4VisionTensorLayerNames(%v) = %t, want %t", tt.names, got, tt.want)
+			}
+		})
+	}
+}
+
+func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
+	t.Helper()
+
+	data := []byte("fake-gemma4-vision-tensor")
+	digest := createTestBlob(t, data)
+	return []manifest.Layer{
+		{
+			MediaType: manifest.MediaTypeImageTensor,
+			Digest:    digest,
+			Size:      int64(len(data)),
+			Name:      "model.vision_tower.patch_embedder.input_proj.weight",
+		},
+		{
+			MediaType: manifest.MediaTypeImageTensor,
+			Digest:    digest,
+			Size:      int64(len(data)),
+			Name:      "model.embed_vision.embedding_projection.weight",
+		},
 	}
 }
 
