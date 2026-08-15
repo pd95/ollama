@@ -590,6 +590,11 @@ func isQwen4Family(s string) bool {
 		strings.Contains(s, "qwen4_exp")
 }
 
+func isGPTOSSFamily(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "gptoss") || strings.Contains(s, "gpt_oss") || strings.Contains(s, "gpt-oss")
+}
+
 func qwen35RendererName(modelDir string) string {
 	template := readChatTemplate(modelDir)
 	if strings.Contains(template, "resolved_reasoning_effort") &&
@@ -676,6 +681,8 @@ func parserNameForIdentifier(modelDir, s string) string {
 		return lagunaRendererParserName(modelDir)
 	case strings.Contains(s, "cohere2moe") || strings.Contains(s, "cohere2_moe"):
 		return "cohere"
+	case isGPTOSSFamily(s):
+		return "harmony"
 	case strings.Contains(s, "glm4") || strings.Contains(s, "glm-4"):
 		return "glm-4.7"
 	case strings.Contains(s, "deepseek"):
