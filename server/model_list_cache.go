@@ -391,6 +391,11 @@ func buildModelListSummary(name model.Name, mf *manifest.Manifest) (modelListSum
 		summary.Capabilities = appendModelListCapability(summary.Capabilities, model.CapabilityVision)
 	}
 
+	if isLocalGemma4SafetensorsConfig(cfg) && !hasGemma4VisionTensorLayers(mf.Layers) {
+		summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
+			return c == model.CapabilityVision
+		})
+	}
 	summary.Capabilities = filterUnsupportedModelListCapabilities(summary.Capabilities, cfg)
 
 	return summary, nil

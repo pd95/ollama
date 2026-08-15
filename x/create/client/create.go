@@ -560,8 +560,13 @@ func detectCapabilities(modelDir string) modelCapabilities {
 		_ = json.Unmarshal(data, &cfg)
 	}
 
+	vision := cfg.VisionConfig != nil || cfg.HasVision
+	if vision && isGemma4ModelConfig(cfg.Architectures, cfg.ModelType) {
+		vision = gemma4ModelDirHasVisionTensors(modelDir)
+	}
+
 	return modelCapabilities{
-		vision: cfg.VisionConfig != nil || cfg.HasVision,
+		vision: vision,
 		audio:  cfg.AudioConfig != nil || cfg.SoundConfig != nil,
 		thinking: chatTemplateHasThinkingSupport(readChatTemplate(modelDir)) ||
 			alwaysSupportsThinking(cfg.Architectures, cfg.ModelType),
@@ -611,6 +616,45 @@ func isApertus1p0ModelDir(modelDir, parserName string) bool {
 	}
 	for _, identifier := range identifiers {
 		if isApertusFamily(identifier) {
+			return true
+		}
+	}
+	return false
+}
+
+func isGemma4ModelConfig(architectures []string, modelType string) bool {
+	for _, arch := range architectures {
+		if isGemma4ModelIdentifier(arch) {
+			return true
+		}
+	}
+	return isGemma4ModelIdentifier(modelType)
+}
+
+func isGemma4ModelIdentifier(value string) bool {
+	switch strings.ToLower(value) {
+	case "gemma4", "gemma4_unified",
+		"gemma4forcausallm", "gemma4forconditionalgeneration",
+		"gemma4unifiedforcausallm", "gemma4unifiedforconditionalgeneration":
+		return true
+	default:
+		return false
+	}
+}
+
+func gemma4ModelDirHasVisionTensors(modelDir string) bool {
+	inv, err := create.ReadInventory(modelDir)
+	if err != nil {
+		return false
+	}
+
+	return hasAnySourceTensor(inv, "vision_tower.patch_embedder.input_proj.weight", "model.vision_tower.patch_embedder.input_proj.weight") &&
+		hasAnySourceTensor(inv, "embed_vision.embedding_projection.weight", "model.embed_vision.embedding_projection.weight")
+}
+
+func hasAnySourceTensor(inv create.Inventory, names ...string) bool {
+	for _, name := range names {
+		if inv.Has(name) {
 			return true
 		}
 	}

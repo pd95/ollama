@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"github.com/ollama/ollama/parser"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
+	"github.com/ollama/ollama/x/safetensors"
 )
 
 func TestModelfileConfig(t *testing.T) {
@@ -422,14 +424,14 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 			want: []string{"completion", "vision", "thinking"},
 		},
 		{
-			name: "model with audio config",
+			name: "gemma4 with audio config and missing vision tensors",
 			configJSON: `{
 				"architectures": ["Gemma4ForConditionalGeneration"],
 				"model_type": "gemma4",
 				"vision_config": {"hidden_size": 1024},
 				"audio_config": {"num_mel_bins": 128}
 			}`,
-			want: []string{"completion", "vision", "audio"},
+			want: []string{"completion", "audio"},
 		},
 		{
 			name: "model with audio but no vision",
@@ -549,6 +551,90 @@ func TestApertusMetadataInference(t *testing.T) {
 		if got := getRendererName(dir); got != "" {
 			t.Fatalf("invalid config renderer = %q, want empty", got)
 		}
+	}
+}
+
+func TestInferSafetensorsCapabilitiesGemma4VisionRequiresTensors(t *testing.T) {
+	configJSON := `{
+		"architectures": ["Gemma4ForConditionalGeneration"],
+		"model_type": "gemma4",
+		"vision_config": {"hidden_size": 1024}
+	}`
+
+	tests := []struct {
+		name    string
+		tensors []string
+		want    []string
+	}{
+		{name: "missing vision tensors", want: []string{"completion"}},
+		{
+			name:    "patch only",
+			tensors: []string{"model.vision_tower.patch_embedder.input_proj.weight"},
+			want:    []string{"completion"},
+		},
+		{
+			name:    "projector only",
+			tensors: []string{"model.embed_vision.embedding_projection.weight"},
+			want:    []string{"completion"},
+		},
+		{
+			name: "near-match names",
+			tensors: []string{
+				"model.vision_tower.patch_embedder.input_proj.weight.extra",
+				"model.embed_visionary.embedding_projection.weight",
+			},
+			want: []string{"completion"},
+		},
+		{
+			name: "vision tower and projector",
+			tensors: []string{
+				"model.vision_tower.patch_embedder.input_proj.weight",
+				"model.embed_vision.embedding_projection.weight",
+			},
+			want: []string{"completion", "vision"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if len(tt.tensors) > 0 {
+				writeClientSafetensors(t, dir, tt.tensors...)
+			}
+
+			if got := inferSafetensorsCapabilities(dir, ""); !slices.Equal(got, tt.want) {
+				t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGemma4ModelConfigRejectsNearMatches(t *testing.T) {
+	if isGemma4ModelConfig([]string{"NotGemma4ForConditionalGeneration"}, "gemma4-next") {
+		t.Fatal("near-match Gemma 4 identifiers classified as Gemma 4")
+	}
+	if !isGemma4ModelConfig([]string{"Gemma4ForConditionalGeneration"}, "") {
+		t.Fatal("released Gemma 4 architecture not classified")
+	}
+}
+
+func writeClientSafetensors(t *testing.T, dir string, names ...string) {
+	t.Helper()
+
+	tensors := make([]*safetensors.TensorData, 0, len(names))
+	for _, name := range names {
+		tensors = append(tensors, safetensors.NewTensorDataFromBytes(name, "U8", []int32{1}, []byte{0}))
+	}
+
+	data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader(tensors))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -808,8 +894,8 @@ func TestDetectCapabilities(t *testing.T) {
 			want:       modelCapabilities{thinking: true},
 		},
 		{
-			name:       "vision config",
-			configJSON: `{"architectures": ["Gemma4ForConditionalGeneration"], "vision_config": {}}`,
+			name:       "non-gemma vision config",
+			configJSON: `{"architectures": ["SomeVisionModel"], "model_type": "other", "vision_config": {}}`,
 			want:       modelCapabilities{vision: true},
 		},
 		{
@@ -825,6 +911,11 @@ func TestDetectCapabilities(t *testing.T) {
 		{
 			name:       "llama has no extra capabilities",
 			configJSON: `{"architectures": ["LlamaForCausalLM"], "model_type": "llama"}`,
+			want:       modelCapabilities{},
+		},
+		{
+			name:       "apertus uses parser-level thinking, not config-level detection",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
 			want:       modelCapabilities{},
 		},
 		{
