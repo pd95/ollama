@@ -23,6 +23,7 @@ import (
 	ollamatemplate "github.com/ollama/ollama/template"
 	"github.com/ollama/ollama/thinking"
 	"github.com/ollama/ollama/types/model"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 )
 
 type modelListSummary struct {
@@ -391,10 +392,13 @@ func buildModelListSummary(name model.Name, mf *manifest.Manifest) (modelListSum
 		summary.Capabilities = appendModelListCapability(summary.Capabilities, model.CapabilityVision)
 	}
 
-	if isLocalGemma4SafetensorsConfig(cfg) && !hasGemma4VisionTensorLayers(mf.Layers) {
-		summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
-			return c == model.CapabilityVision
-		})
+	if isLocalGemma4SafetensorsConfig(cfg) {
+		var gemma4cfg gemma4metadata.ConfigFile
+		if err := mf.ReadConfigJSON("config.json", &gemma4cfg); err != nil || !hasGemma4VisionTensorLayers(gemma4cfg, mf.Layers) {
+			summary.Capabilities = slices.DeleteFunc(summary.Capabilities, func(c model.Capability) bool {
+				return c == model.CapabilityVision
+			})
+		}
 	}
 	summary.Capabilities = filterUnsupportedModelListCapabilities(summary.Capabilities, cfg)
 

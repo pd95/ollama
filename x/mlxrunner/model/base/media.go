@@ -1,6 +1,7 @@
 package base
 
 import (
+	"context"
 	// Every model's PrepareMedia decodes through image.Decode; the decoder
 	// set is registered once here so all models accept the same formats.
 	_ "image/gif"
@@ -61,13 +62,20 @@ type PreparedRequest struct {
 	Layout any
 }
 
-// MediaModel is implemented by models that accept media inputs.
+// MediaEncoder is the MLX-thread half of a model's media contract.
+type MediaEncoder interface {
+	EncodeMedia(item *PreparedItem, data *mlx.Array) *mlx.Array
+}
+
+// MediaModel is implemented by models that accept media inputs. Its CPU
+// preparation receives the live request context so expensive work can stop
+// before the request is queued.
 type MediaModel interface {
 	// PrepareMedia runs once per request on the request goroutine, CPU
 	// only, and returns the expanded stream. It must be deterministic for
 	// given segments: prefix-cache restores splice cached state with
 	// recomputed state.
-	PrepareMedia(segments []Segment) (*PreparedRequest, error)
+	PrepareMedia(ctx context.Context, segments []Segment) (*PreparedRequest, error)
 
 	// EncodeMedia builds one item's lazy feature graph on the MLX thread;
 	// it must not evaluate — the consuming forward's evaluation pulls it.
