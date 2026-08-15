@@ -435,7 +435,7 @@ func TestInferSafetensorsCapabilities(t *testing.T) {
 				"vision_config": {"hidden_size": 1024},
 				"audio_config": {"num_mel_bins": 128}
 			}`,
-			want: []string{"completion", "audio"},
+			want: []string{"completion"},
 		},
 		{
 			name: "model with audio but no vision",
@@ -662,6 +662,131 @@ func TestInferSafetensorsCapabilitiesGemma4UnifiedVision(t *testing.T) {
 	check(t, wrong, false)
 }
 
+func TestInferSafetensorsCapabilitiesGemma4AudioInventory(t *testing.T) {
+	identities := []struct {
+		name         string
+		architecture string
+		modelType    string
+	}{
+		{name: "released", architecture: "Gemma4ForConditionalGeneration", modelType: "gemma4"},
+		{name: "unified", architecture: "Gemma4UnifiedForConditionalGeneration", modelType: "gemma4_unified"},
+	}
+	for _, identity := range identities {
+		t.Run(identity.name, func(t *testing.T) {
+			cfg := gemma4metadata.ConfigFile{
+				Architectures: []string{identity.architecture},
+				ModelType:     identity.modelType,
+				TextConfig:    gemma4metadata.TextConfig{HiddenSize: 5},
+				AudioConfig: &gemma4metadata.AudioConfig{
+					AttentionChunkSize: 2, AttentionContextLeft: 2,
+					ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
+					NumHiddenLayers: 1, OutputProjDims: 3,
+					SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
+				},
+			}
+			configJSON, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			shapes, err := gemma4metadata.RequiredAudioTensorShapes(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			valid := make(map[string]gemma4metadata.TensorDescriptor, len(shapes))
+			for name, shape := range shapes {
+				valid[name] = gemma4metadata.TensorDescriptor{Dtype: "BF16", Shape: shape}
+			}
+
+			check := func(t *testing.T, tensors map[string]gemma4metadata.TensorDescriptor, wantAudio bool) {
+				t.Helper()
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				writeClientSafetensorDescriptors(t, dir, tensors)
+				got := inferSafetensorsCapabilities(dir, "")
+				if slices.Contains(got, "audio") != wantAudio {
+					t.Fatalf("capabilities = %v, want audio %t", got, wantAudio)
+				}
+			}
+
+			t.Run("complete", func(t *testing.T) { check(t, valid, true) })
+			t.Run("partial", func(t *testing.T) {
+				partial := maps.Clone(valid)
+				delete(partial, "model.audio_tower.layers.0.self_attn.q_proj.input_max")
+				check(t, partial, false)
+			})
+			t.Run("malformed", func(t *testing.T) {
+				malformed := maps.Clone(valid)
+				d := malformed["model.audio_tower.output_proj.weight"]
+				d.Shape = []int32{4, 3}
+				malformed["model.audio_tower.output_proj.weight"] = d
+				check(t, malformed, false)
+			})
+			t.Run("near match", func(t *testing.T) {
+				near := maps.Clone(valid)
+				name := "model.embed_audio.embedding_projection.weight"
+				near[name+".extra"] = near[name]
+				delete(near, name)
+				check(t, near, false)
+			})
+		})
+	}
+}
+
+func TestInferSafetensorsCapabilitiesGemma4AudioRejectsUnboundedConfig(t *testing.T) {
+	base := gemma4metadata.ConfigFile{
+		Architectures: []string{"Gemma4ForConditionalGeneration"}, ModelType: "gemma4",
+		TextConfig: gemma4metadata.TextConfig{HiddenSize: 5},
+		AudioConfig: &gemma4metadata.AudioConfig{
+			AttentionChunkSize: 2, AttentionContextLeft: 2,
+			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
+			NumHiddenLayers: 1, OutputProjDims: 3,
+			SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
+		},
+	}
+	shapes, err := gemma4metadata.RequiredAudioTensorShapes(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := make(map[string]gemma4metadata.TensorDescriptor, len(shapes))
+	for name, shape := range shapes {
+		valid[name] = gemma4metadata.TensorDescriptor{Dtype: "BF16", Shape: shape}
+	}
+	tests := []struct {
+		name string
+		edit func(*gemma4metadata.ConfigFile)
+	}{
+		{name: "shape product overflow", edit: func(cfg *gemma4metadata.ConfigFile) {
+			cfg.AudioConfig.HiddenSize = 1 << 30
+			cfg.AudioConfig.NumAttentionHeads = 1
+		}},
+		{name: "impractical layer count", edit: func(cfg *gemma4metadata.ConfigFile) { cfg.AudioConfig.NumHiddenLayers = 1 << 30 }},
+		{name: "impractical convolution channels", edit: func(cfg *gemma4metadata.ConfigFile) { cfg.AudioConfig.SubsamplingConvChannels = []int{2, 1 << 30} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			audio := *base.AudioConfig
+			audio.SubsamplingConvChannels = slices.Clone(base.AudioConfig.SubsamplingConvChannels)
+			cfg.AudioConfig = &audio
+			tt.edit(&cfg)
+			configJSON, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeClientSafetensorDescriptors(t, dir, valid)
+			if got := inferSafetensorsCapabilities(dir, ""); slices.Contains(got, "audio") {
+				t.Fatalf("unbounded config capabilities = %v, did not expect audio", got)
+			}
+		})
+	}
+}
+
 func TestInferSafetensorsCapabilitiesGemma4PackedSourceRequiresProducerContract(t *testing.T) {
 	const configJSON = `{
 		"architectures":["Gemma4ForConditionalGeneration"],"model_type":"gemma4",
@@ -806,6 +931,9 @@ func TestGemma4ModelConfigRejectsNearMatches(t *testing.T) {
 	}
 	if !isGemma4ModelConfig([]string{"Gemma4ForConditionalGeneration"}, "") {
 		t.Fatal("released Gemma 4 architecture not classified")
+	}
+	if !isGemma4ModelConfig([]string{"Gemma4UnifiedForConditionalGeneration"}, "") {
+		t.Fatal("unified Gemma 4 architecture not classified")
 	}
 }
 

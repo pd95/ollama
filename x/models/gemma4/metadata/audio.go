@@ -1,0 +1,227 @@
+package metadata
+
+import (
+	"fmt"
+	"math"
+	"slices"
+)
+
+const gemma4AudioFeatureSize = 128
+
+const (
+	maxAudioHiddenSize   = 8_192
+	maxAudioLayers       = 128
+	maxAudioHeads        = 256
+	maxAudioOutputDims   = 16_384
+	maxAudioConvChannels = 4_096
+	maxAudioKernelSize   = 255
+	maxAudioContextSize  = 4_096
+	maxTextHiddenSize    = 65_536
+)
+
+type AudioConfig struct {
+	AttentionChunkSize      int   `json:"attention_chunk_size"`
+	AttentionContextLeft    int   `json:"attention_context_left"`
+	AttentionContextRight   int   `json:"attention_context_right"`
+	ConvKernelSize          int   `json:"conv_kernel_size"`
+	HiddenSize              int   `json:"hidden_size"`
+	NumAttentionHeads       int   `json:"num_attention_heads"`
+	NumHiddenLayers         int   `json:"num_hidden_layers"`
+	OutputProjDims          int   `json:"output_proj_dims"`
+	SubsamplingConvChannels []int `json:"subsampling_conv_channels"`
+	UseClippedLinears       bool  `json:"use_clipped_linears"`
+}
+
+// ValidateAudioTensors verifies the normalized tensor names required by the
+// released Gemma 4 MLX audio loader.
+func ValidateAudioTensors(cfg ConfigFile, names []string) error {
+	if err := validateAudioConfig(cfg); err != nil {
+		return err
+	}
+	shapes, err := requiredAudioShapes(cfg)
+	if err != nil {
+		return err
+	}
+	present := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		present[name] = struct{}{}
+	}
+	for name := range shapes {
+		if _, ok := present[name]; !ok {
+			return fmt.Errorf("missing %s", name)
+		}
+	}
+	return nil
+}
+
+// ValidateAudioSourceInventory additionally validates released tensor shapes
+// and floating-point dtypes.
+func ValidateAudioSourceInventory(cfg ConfigFile, tensors map[string]TensorDescriptor) error {
+	if err := validateAudioConfig(cfg); err != nil {
+		return err
+	}
+	shapes, err := requiredAudioShapes(cfg)
+	if err != nil {
+		return err
+	}
+	for name, shape := range shapes {
+		desc, ok := tensors[name]
+		if !ok {
+			return fmt.Errorf("missing %s", name)
+		}
+		if !slices.Equal(desc.Shape, shape) {
+			return fmt.Errorf("%s shape %v, want %v", name, desc.Shape, shape)
+		}
+		if !isFloat(desc.Dtype) {
+			return fmt.Errorf("%s dtype %s is not floating point", name, desc.Dtype)
+		}
+	}
+	return nil
+}
+
+// ValidateAudioInstalledInventory validates the normalized descriptors stored
+// in installed tensor layers. Installed audio remains source precision at this
+// row, so its descriptor contract is identical to the released source form.
+func ValidateAudioInstalledInventory(cfg ConfigFile, tensors map[string]TensorDescriptor) error {
+	return ValidateAudioSourceInventory(cfg, tensors)
+}
+
+// RequiredAudioTensorShapes returns a copy of the normalized released audio
+// tensor contract derived from config.
+func RequiredAudioTensorShapes(cfg ConfigFile) (map[string][]int32, error) {
+	if err := validateAudioConfig(cfg); err != nil {
+		return nil, err
+	}
+	shapes, err := requiredAudioShapes(cfg)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]int32, len(shapes))
+	for name, shape := range shapes {
+		out[name] = slices.Clone(shape)
+	}
+	return out, nil
+}
+
+func validateAudioConfig(cfg ConfigFile) error {
+	ac := cfg.AudioConfig
+	if ac == nil {
+		return fmt.Errorf("missing audio_config")
+	}
+	if ac.HiddenSize <= 0 || ac.HiddenSize > maxAudioHiddenSize ||
+		ac.NumHiddenLayers <= 0 || ac.NumHiddenLayers > maxAudioLayers ||
+		ac.NumAttentionHeads <= 0 || ac.NumAttentionHeads > maxAudioHeads || ac.HiddenSize%ac.NumAttentionHeads != 0 ||
+		ac.OutputProjDims <= 0 || ac.OutputProjDims > maxAudioOutputDims ||
+		ac.ConvKernelSize <= 0 || ac.ConvKernelSize > maxAudioKernelSize || ac.ConvKernelSize%2 == 0 ||
+		ac.AttentionChunkSize <= 0 || ac.AttentionChunkSize > maxAudioContextSize ||
+		ac.AttentionContextLeft <= 0 || ac.AttentionContextLeft > maxAudioContextSize ||
+		ac.AttentionContextRight < 0 || ac.AttentionContextRight > maxAudioContextSize ||
+		len(ac.SubsamplingConvChannels) != 2 ||
+		ac.SubsamplingConvChannels[0] <= 0 || ac.SubsamplingConvChannels[0] > maxAudioConvChannels ||
+		ac.SubsamplingConvChannels[1] <= 0 || ac.SubsamplingConvChannels[1] > maxAudioConvChannels ||
+		cfg.TextConfig.HiddenSize <= 0 || cfg.TextConfig.HiddenSize > maxTextHiddenSize {
+		return fmt.Errorf("invalid Gemma 4 audio dimensions")
+	}
+	return nil
+}
+
+func requiredAudioShapes(cfg ConfigFile) (map[string][]int32, error) {
+	ac := cfg.AudioConfig
+	hidden, err := checkedAudioShapeDim("hidden_size", int64(ac.HiddenSize))
+	if err != nil {
+		return nil, err
+	}
+	output, err := checkedAudioShapeDim("output_proj_dims", int64(ac.OutputProjDims))
+	if err != nil {
+		return nil, err
+	}
+	headDim, err := checkedAudioShapeDim("attention head dimension", int64(ac.HiddenSize)/int64(ac.NumAttentionHeads))
+	if err != nil {
+		return nil, err
+	}
+	c0, err := checkedAudioShapeDim("subsampling channel 0", int64(ac.SubsamplingConvChannels[0]))
+	if err != nil {
+		return nil, err
+	}
+	c1, err := checkedAudioShapeDim("subsampling channel 1", int64(ac.SubsamplingConvChannels[1]))
+	if err != nil {
+		return nil, err
+	}
+	freq0 := int32((gemma4AudioFeatureSize + 1) / 2)
+	freq1 := (freq0 + 1) / 2
+	inputWidth, err := checkedAudioShapeDim("subsampling projection width", int64(freq1), int64(c1))
+	if err != nil {
+		return nil, err
+	}
+	ffWidth, err := checkedAudioShapeDim("feed-forward width", 4, int64(hidden))
+	if err != nil {
+		return nil, err
+	}
+	convWidth, err := checkedAudioShapeDim("convolution input width", 2, int64(hidden))
+	if err != nil {
+		return nil, err
+	}
+	textHidden, err := checkedAudioShapeDim("text hidden_size", int64(cfg.TextConfig.HiddenSize))
+	if err != nil {
+		return nil, err
+	}
+	kernel, err := checkedAudioShapeDim("conv_kernel_size", int64(ac.ConvKernelSize))
+	if err != nil {
+		return nil, err
+	}
+
+	required := map[string][]int32{
+		"model.audio_tower.subsample_conv_projection.layer0.conv.weight":       {c0, 1, 3, 3},
+		"model.audio_tower.subsample_conv_projection.layer0.norm.weight":       {c0},
+		"model.audio_tower.subsample_conv_projection.layer1.conv.weight":       {c1, c0, 3, 3},
+		"model.audio_tower.subsample_conv_projection.layer1.norm.weight":       {c1},
+		"model.audio_tower.subsample_conv_projection.input_proj_linear.weight": {hidden, inputWidth},
+		"model.audio_tower.output_proj.weight":                                 {output, hidden},
+		"model.audio_tower.output_proj.bias":                                   {output},
+		"model.embed_audio.embedding_projection.weight":                        {textHidden, output},
+	}
+
+	addLinear := func(path string, shape []int32) {
+		required[path+".linear.weight"] = shape
+		if ac.UseClippedLinears {
+			for _, suffix := range []string{".input_min", ".input_max", ".output_min", ".output_max"} {
+				required[path+suffix] = []int32{}
+			}
+		}
+	}
+
+	for i := range ac.NumHiddenLayers {
+		layer := fmt.Sprintf("model.audio_tower.layers.%d", i)
+		for _, ff := range []string{"feed_forward1", "feed_forward2"} {
+			required[layer+"."+ff+".pre_layer_norm.weight"] = []int32{hidden}
+			required[layer+"."+ff+".post_layer_norm.weight"] = []int32{hidden}
+			addLinear(layer+"."+ff+".ffw_layer_1", []int32{ffWidth, hidden})
+			addLinear(layer+"."+ff+".ffw_layer_2", []int32{hidden, ffWidth})
+		}
+
+		required[layer+".norm_pre_attn.weight"] = []int32{hidden}
+		required[layer+".norm_post_attn.weight"] = []int32{hidden}
+		required[layer+".norm_out.weight"] = []int32{hidden}
+		for _, projection := range []string{"q_proj", "k_proj", "v_proj", "post"} {
+			addLinear(layer+".self_attn."+projection, []int32{hidden, hidden})
+		}
+		required[layer+".self_attn.per_dim_scale"] = []int32{headDim}
+		required[layer+".self_attn.relative_k_proj.weight"] = []int32{hidden, hidden}
+
+		required[layer+".lconv1d.pre_layer_norm.weight"] = []int32{hidden}
+		required[layer+".lconv1d.conv_norm.weight"] = []int32{hidden}
+		required[layer+".lconv1d.depthwise_conv1d.weight"] = []int32{hidden, 1, kernel}
+		addLinear(layer+".lconv1d.linear_start", []int32{convWidth, hidden})
+		addLinear(layer+".lconv1d.linear_end", []int32{hidden, hidden})
+	}
+
+	return required, nil
+}
+
+func checkedAudioShapeDim(name string, factors ...int64) (int32, error) {
+	value, ok := checkedProduct(math.MaxInt32, factors...)
+	if !ok {
+		return 0, fmt.Errorf("invalid Gemma 4 audio %s", name)
+	}
+	return int32(value), nil
+}

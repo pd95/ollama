@@ -28,6 +28,7 @@ type ConfigFile struct {
 	ModelType          string        `json:"model_type"`
 	TextConfig         TextConfig    `json:"text_config"`
 	VisionConfig       *VisionConfig `json:"vision_config"`
+	AudioConfig        *AudioConfig  `json:"audio_config"`
 	Quantization       Quantization  `json:"quantization"`
 	QuantizationConfig Quantization  `json:"quantization_config"`
 }
