@@ -50,6 +50,28 @@ func TestParseVisionConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestParseUnifiedVisionConfig(t *testing.T) {
+	cfg, err := parseVisionConfig([]byte(`{"text_config":{"hidden_size":5},"vision_config":{"model_type":"gemma4_unified_vision","mm_embed_dim":3,"mm_posemb_size":4,"model_patch_size":2,"num_soft_tokens":2,"patch_size":1,"pooling_kernel_size":2}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.unified() || cfg.MMEmbedDim != 3 || cfg.MMPosembSize != 4 || cfg.ModelPatchSize != 2 || cfg.DefaultOutputLength != 2 {
+		t.Fatalf("unexpected unified config: %+v", cfg)
+	}
+	topLevel, err := parseVisionConfig([]byte(`{"architectures":["Gemma4UnifiedForConditionalGeneration"],"text_config":{"hidden_size":5},"vision_config":{"mm_embed_dim":3,"mm_posemb_size":4,"model_patch_size":2,"num_soft_tokens":2,"patch_size":1,"pooling_kernel_size":2}}`))
+	if err != nil || !topLevel.unified() {
+		t.Fatalf("top-level unified dispatch = %+v, %v", topLevel, err)
+	}
+	for _, input := range []string{
+		`{"text_config":{"hidden_size":5},"vision_config":{"model_type":"gemma4_unified_vision","mm_embed_dim":3,"mm_posemb_size":4,"model_patch_size":3,"num_soft_tokens":2,"patch_size":1,"pooling_kernel_size":2}}`,
+		`{"text_config":{"hidden_size":5},"vision_config":{"model_type":"gemma4_unified_vision","mm_embed_dim":3,"mm_posemb_size":1,"model_patch_size":2,"num_soft_tokens":2,"patch_size":1,"pooling_kernel_size":2}}`,
+	} {
+		if _, err := parseVisionConfig([]byte(input)); err == nil {
+			t.Fatalf("invalid unified config accepted: %s", input)
+		}
+	}
+}
+
 func TestParseVisionConfigRejectsUnsafeDimensions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -223,6 +245,40 @@ func TestImageToCHWFloat32UsesBoundsAndChannelOrder(t *testing.T) {
 	}
 }
 
+func TestImageToUnifiedPatchesUsesHWCModelPatchOrder(t *testing.T) {
+	img := image.NewRGBA(image.Rect(10, 20, 14, 22))
+	for y := range 2 {
+		for x := range 4 {
+			img.SetRGBA(10+x, 20+y, color.RGBA{R: uint8(1 + x + 4*y), G: uint8(11 + x + 4*y), B: uint8(21 + x + 4*y), A: 255})
+		}
+	}
+	patches, positions, err := imageToUnifiedPatchesContext(context.Background(), img, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(positions, []int32{0, 0, 1, 0}) {
+		t.Fatalf("positions = %v", positions)
+	}
+	want := []uint8{1, 11, 21, 2, 12, 22, 5, 15, 25, 6, 16, 26, 3, 13, 23, 4, 14, 24, 7, 17, 27, 8, 18, 28}
+	if len(patches) != len(want) {
+		t.Fatalf("patch values = %d, want %d", len(patches), len(want))
+	}
+	for i, value := range want {
+		if math.Abs(float64(patches[i]-float32(value)/255)) > 1e-6 {
+			t.Fatalf("patch[%d] = %v, want %v", i, patches[i], float32(value)/255)
+		}
+	}
+	if _, _, err := imageToUnifiedPatchesContext(context.Background(), img, 3); err == nil {
+		t.Fatal("non-divisible patch geometry accepted")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	patches, positions, err = imageToUnifiedPatchesContext(canceled, img, 2)
+	if !errors.Is(err, context.Canceled) || patches != nil || positions != nil {
+		t.Fatalf("canceled patch conversion = (%v, %v, %v), want (nil, nil, context.Canceled)", patches, positions, err)
+	}
+}
+
 func TestPreprocessGemma4ImageSoftTokenBudget(t *testing.T) {
 	src := image.NewRGBA(image.Rect(0, 0, 8, 4))
 	src.SetRGBA(0, 0, color.RGBA{R: 255, A: 255})
@@ -313,6 +369,37 @@ func TestPrepareMediaPreservesOrderedImageItems(t *testing.T) {
 	}
 }
 
+func TestPrepareMediaUnifiedUsesPatchDataAndLayout(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 2))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parseVisionConfig([]byte(`{"text_config":{"hidden_size":5},"vision_config":{"model_type":"gemma4_unified_vision","mm_embed_dim":3,"mm_posemb_size":4,"model_patch_size":2,"num_soft_tokens":2,"patch_size":1,"pooling_kernel_size":2}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Model{
+		TextConfig:   &TextConfig{ImageTokenIDValue: 10, BOITokenIDValue: 11, EOITokenIDValue: 12, VisionSoftTokens: 2},
+		VisionConfig: cfg, UnifiedVision: &UnifiedVisionEmbedder{PatchDim: 12}, EmbedVision: &MultimodalEmbedder{},
+	}
+	got, err := m.PrepareMedia(context.Background(), []base.Segment{{Tokens: []int32{1}}, {Kind: "image", Data: buf.Bytes()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Items) != 1 || !slices.Equal(got.Items[0].Dims, []int{1, 2, 12}) || len(got.Items[0].MediaData) != 24 {
+		t.Fatalf("unified item = %#v", got.Items)
+	}
+	payload := got.Items[0].Opaque.(gemma4MediaPayload)
+	if payload.Image.Patches != nil || !slices.Equal(payload.Image.Positions, []int32{0, 0, 1, 0}) {
+		t.Fatalf("unified payload = %#v", payload.Image)
+	}
+	layout, ok := got.Layout.(*gemma4MediaLayout)
+	if !ok || !slices.Equal(layout.ImageSpans, [][2]int{{2, 4}}) {
+		t.Fatalf("unified layout = %#v", got.Layout)
+	}
+}
+
 func TestPrepareMediaSequentialRequestsAreIsolated(t *testing.T) {
 	pngData := func(c color.RGBA) []byte {
 		t.Helper()
@@ -398,6 +485,32 @@ func TestImageToCHWFloat32CancellationAllocationBoundary(t *testing.T) {
 	}
 	if firstRow <= preAllocation {
 		t.Fatalf("first-row cancellation allocations = %.1f, want more than pre-allocation %.1f", firstRow, preAllocation)
+	}
+}
+
+func TestImageToUnifiedPatchesCancellationAllocationBoundary(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	measure := func(target int) float64 {
+		ctx := &nthCancelContext{target: target}
+		return testing.AllocsPerRun(100, func() {
+			ctx.calls = 0
+			patches, positions, err := imageToUnifiedPatchesContext(ctx, img, 1)
+			if !errors.Is(err, context.Canceled) || patches != nil || positions != nil {
+				t.Fatalf("imageToUnifiedPatchesContext() = (%v, %v, %v), want (nil, nil, context.Canceled)", patches, positions, err)
+			}
+		})
+	}
+	preAllocation := measure(1)
+	betweenAllocations := measure(2)
+	conversionLoop := measure(3)
+	if preAllocation != 0 {
+		t.Fatalf("pre-allocation cancellation allocated %.1f objects", preAllocation)
+	}
+	if betweenAllocations <= preAllocation {
+		t.Fatalf("between-allocation cancellation allocations = %.1f, want more than pre-allocation %.1f", betweenAllocations, preAllocation)
+	}
+	if conversionLoop <= betweenAllocations {
+		t.Fatalf("conversion-loop cancellation allocations = %.1f, want more than between-allocation %.1f", conversionLoop, betweenAllocations)
 	}
 }
 
