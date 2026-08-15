@@ -3,6 +3,7 @@ package parsers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -104,13 +105,14 @@ type gemma4EventContent struct {
 	content string
 }
 
-type gemma4EventToolCall struct {
-	toolCall api.ToolCall
+type gemma4EventRawToolCall struct {
+	raw      string
+	parseErr error
 }
 
 func (gemma4EventThinkingContent) isGemma4Event() {}
 func (gemma4EventContent) isGemma4Event()         {}
-func (gemma4EventToolCall) isGemma4Event()        {}
+func (gemma4EventRawToolCall) isGemma4Event()     {}
 
 func (p *Gemma4Parser) Add(s string, done bool) (content string, thinking string, calls []api.ToolCall, err error) {
 	p.buffer.WriteString(s)
@@ -121,8 +123,17 @@ func (p *Gemma4Parser) Add(s string, done bool) (content string, thinking string
 	var thinkingSb strings.Builder
 	for _, event := range events {
 		switch event := event.(type) {
-		case gemma4EventToolCall:
-			toolCalls = append(toolCalls, event.toolCall)
+		case gemma4EventRawToolCall:
+			if event.parseErr != nil {
+				slog.Warn("gemma4 tool call parsing failed", "error", event.parseErr, "content", event.raw)
+				return "", "", nil, event.parseErr
+			}
+			toolCall, err := parseGemma4ToolCall(event.raw, p.tools)
+			if err != nil {
+				slog.Warn("gemma4 tool call parsing failed", "error", err, "content", event.raw)
+				return "", "", nil, err
+			}
+			toolCalls = append(toolCalls, toolCall)
 		case gemma4EventThinkingContent:
 			if p.thinkingEnabled {
 				thinkingSb.WriteString(event.content)
@@ -172,6 +183,10 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 	var events []gemma4Event
 	bufStr := p.buffer.String()
 	if bufStr == "" {
+		if done && p.state == Gemma4CollectingToolCall {
+			p.state = Gemma4CollectingContent
+			return []gemma4Event{gemma4EventRawToolCall{}}, false
+		}
 		return events, false
 	}
 
@@ -315,24 +330,23 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 			p.buffer.WriteString(remaining)
 			p.state = Gemma4IgnoringPostToolCallNoise
 
-			if toolCall, err := parseGemma4ToolCall(toolCallContent, p.tools); err == nil {
-				events = append(events, gemma4EventToolCall{toolCall: toolCall})
-			} else {
-				slog.Warn("gemma4 tool call parsing failed", "error", err, "content", toolCallContent)
+			event := gemma4EventRawToolCall{raw: toolCallContent}
+			switch {
+			case strings.Count(toolCallContent, gemma4StringDelimiter)%2 != 0:
+				event.parseErr = fmt.Errorf("unexpected Gemma control token %q while a tool argument string is open", gemma4ToolCallCloseTag)
+			case !strings.HasSuffix(strings.TrimSpace(toolCallContent), "}"):
+				event.parseErr = fmt.Errorf("unexpected Gemma control token %q while tool call arguments are incomplete", gemma4ToolCallCloseTag)
 			}
+			events = append(events, event)
 			return events, true
 		}
 
 		// If done, flush any accumulated tool call content even without closing tag.
 		// The model may hit a stop token before emitting <tool_call|>.
-		if done && len(bufStr) > 0 {
+		if done {
 			p.buffer.Reset()
 			p.state = Gemma4CollectingContent
-			if toolCall, err := parseGemma4ToolCall(bufStr, p.tools); err == nil {
-				events = append(events, gemma4EventToolCall{toolCall: toolCall})
-			} else {
-				slog.Warn("gemma4 tool call flush on done failed", "error", err, "content", bufStr)
-			}
+			events = append(events, gemma4EventRawToolCall{raw: bufStr})
 			return events, false
 		}
 
@@ -391,6 +405,10 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 // parseGemma4ToolCall parses a tool call in Gemma 4 format:
 // call:NAME{key:value,key:value}
 func parseGemma4ToolCall(content string, tools []api.Tool) (api.ToolCall, error) {
+	if err := validateGemma4ToolCallContent(content); err != nil {
+		return api.ToolCall{}, err
+	}
+
 	// Expected format: call:NAME{args}
 	if !strings.HasPrefix(content, "call:") {
 		return api.ToolCall{}, errors.New("expected 'call:' prefix")
@@ -424,6 +442,31 @@ func parseGemma4ToolCall(content string, tools []api.Tool) (api.ToolCall, error)
 			Arguments: args,
 		},
 	}, nil
+}
+
+// validateGemma4ToolCallContent rejects parser grammar tokens that cannot be
+// structurally valid inside a tool call. In particular, do not repair or strip
+// these tokens from executable arguments: doing so could change the command
+// while still leaving it valid enough for a client to execute.
+func validateGemma4ToolCallContent(content string) error {
+	for index, r := range content {
+		if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
+			return fmt.Errorf("unexpected control character %U at byte %d inside tool call", r, index)
+		}
+	}
+
+	for _, token := range []string{
+		gemma4ThinkingOpenTag,
+		gemma4ThinkingCloseTag,
+		gemma4ToolCallOpenTag,
+		gemma4ToolCallCloseTag,
+		gemma4ToolResponseTag,
+	} {
+		if index := strings.Index(content, token); index >= 0 {
+			return fmt.Errorf("unexpected Gemma control token %q at byte %d inside tool call", token, index)
+		}
+	}
+	return nil
 }
 
 // gemma4ArgsToJSON converts Gemma 4's custom argument format to valid JSON.
