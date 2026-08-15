@@ -648,6 +648,15 @@ func isGPTOSSFamily(s string) bool {
 	return strings.Contains(s, "gptoss") || strings.Contains(s, "gpt_oss") || strings.Contains(s, "gpt-oss")
 }
 
+func isApertusFamily(s string) bool {
+	switch strings.ToLower(s) {
+	case "apertus", "apertusforcausallm":
+		return true
+	default:
+		return false
+	}
+}
+
 func qwen35RendererName(modelDir string) string {
 	template := readChatTemplate(modelDir)
 	if strings.Contains(template, "resolved_reasoning_effort") &&
@@ -728,6 +737,8 @@ func getParserName(modelDir string) string {
 func parserNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
+	case isApertusFamily(s):
+		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer"
 	case strings.Contains(s, "laguna"):
@@ -795,6 +806,8 @@ func getRendererName(modelDir string) string {
 func rendererNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
+	case isApertusFamily(s):
+		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer"
 	case strings.Contains(s, "laguna"):
