@@ -104,6 +104,14 @@ type quantizePolicy interface {
 // weights are quantized and to what; pass defaultQuantPolicy{} for the generic
 // policy.
 func Plan(inv Inventory, class Classification, policy quantizePolicy) ([]BlobSpec, error) {
+	if inv.Config.Architecture() == "GptOssForCausalLM" {
+		specs, err := planGPTOSS(inv, class, policy)
+		if err != nil {
+			return nil, err
+		}
+		return specs, checkOutputCollisions(specs)
+	}
+
 	var (
 		specs []BlobSpec
 		err   error
