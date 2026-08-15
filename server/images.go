@@ -87,6 +87,8 @@ type Model struct {
 	TensorLayerNames    []string
 	Gemma4VisionConfig  *gemma4metadata.ConfigFile                 `json:"-"`
 	Gemma4VisionTensors map[string]gemma4metadata.TensorDescriptor `json:"-"`
+	Gemma4AudioConfig   *gemma4metadata.ConfigFile                 `json:"-"`
+	Gemma4AudioTensors  map[string]gemma4metadata.TensorDescriptor `json:"-"`
 	System              string
 	License             []string
 	Digest              string
@@ -501,7 +503,11 @@ func suppressGemma4SafetensorsVisionCapability(m *Model) bool {
 
 func suppressAudioCapability(m *Model, arch string) bool {
 	if isGemma4Renderer(m.Config.Renderer) && m.Config.ModelFormat == "safetensors" {
-		return true
+		if !isLocalGemma4SafetensorsConfig(m.Config) {
+			return true
+		}
+		return m.Gemma4AudioConfig == nil ||
+			gemma4metadata.ValidateAudioInstalledInventory(*m.Gemma4AudioConfig, m.Gemma4AudioTensors) != nil
 	}
 	if m.Config.ModelFormat == "safetensors" && m.Config.Renderer == "glimmer" {
 		return true
@@ -542,6 +548,59 @@ func isLocalGemma4SafetensorsConfig(cfg model.ConfigV2) bool {
 func hasGemma4VisionTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifest.Layer) bool {
 	tensors, err := gemma4VisionTensorDescriptors(layers)
 	return err == nil && gemma4metadata.ValidateVisionInstalledInventory(cfg, tensors) == nil
+}
+
+func hasGemma4AudioTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifest.Layer) bool {
+	tensors, err := gemma4AudioTensorDescriptors(layers)
+	return err == nil && gemma4metadata.ValidateAudioInstalledInventory(cfg, tensors) == nil
+}
+
+func gemma4AudioTensorDescriptors(layers []manifest.Layer) (map[string]gemma4metadata.TensorDescriptor, error) {
+	tensors := make(map[string]gemma4metadata.TensorDescriptor)
+	descriptorWork := 0
+	for _, layer := range layers {
+		if layer.MediaType != manifest.MediaTypeImageTensor {
+			continue
+		}
+		if !strings.HasPrefix(layer.Name, "model.audio_tower.") && !strings.HasPrefix(layer.Name, "model.embed_audio.") {
+			continue
+		}
+		filename, err := manifest.BlobsPath(layer.Digest)
+		if err != nil {
+			return nil, err
+		}
+		ext, err := openGemma4TensorLayer(filename)
+		if err != nil {
+			return nil, fmt.Errorf("open audio tensor layer %s: %w", layer.Name, err)
+		}
+		names := ext.ListTensors()
+		if len(names) > maxGemma4VisionDescriptors-len(tensors) {
+			ext.Close()
+			return nil, fmt.Errorf("Gemma4 audio tensor inventory exceeds %d descriptors", maxGemma4VisionDescriptors)
+		}
+		for _, name := range names {
+			tensor, err := ext.GetTensor(name)
+			if err != nil {
+				ext.Close()
+				return nil, err
+			}
+			if _, exists := tensors[name]; exists {
+				ext.Close()
+				return nil, fmt.Errorf("duplicate audio tensor %s", name)
+			}
+			work := len(name) + len(tensor.Dtype) + len(tensor.Shape)*4
+			if work > maxGemma4VisionDescriptorWork-descriptorWork {
+				ext.Close()
+				return nil, fmt.Errorf("Gemma4 audio tensor inventory exceeds descriptor work limit %d", maxGemma4VisionDescriptorWork)
+			}
+			descriptorWork += work
+			tensors[name] = gemma4metadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
+		}
+		if err := ext.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return tensors, nil
 }
 
 func gemma4VisionTensorDescriptors(layers []manifest.Layer) (map[string]gemma4metadata.TensorDescriptor, error) {
@@ -800,6 +859,9 @@ func (m *Model) CheckCapabilities(want ...model.Capability) error {
 	if slices.Contains(errs, errCapabilityVision) && suppressGemma4SafetensorsVisionCapability(m) {
 		return fmt.Errorf("%w. Recreate or pull the model so it includes Gemma 4 vision tensor layers", err)
 	}
+	if slices.Contains(errs, errCapabilityAudio) && isLocalGemma4SafetensorsConfig(m.Config) && suppressAudioCapability(m, "") {
+		return fmt.Errorf("%w. Recreate or pull the model so it includes Gemma 4 audio tensor layers", err)
+	}
 
 	return err
 }
@@ -929,8 +991,12 @@ func GetModel(name string) (*Model, error) {
 		var cfg gemma4metadata.ConfigFile
 		if err := mf.ReadConfigJSON("config.json", &cfg); err == nil {
 			m.Gemma4VisionConfig = &cfg
+			m.Gemma4AudioConfig = &cfg
 			if tensors, err := gemma4VisionTensorDescriptors(mf.Layers); err == nil {
 				m.Gemma4VisionTensors = tensors
+			}
+			if tensors, err := gemma4AudioTensorDescriptors(mf.Layers); err == nil {
+				m.Gemma4AudioTensors = tensors
 			}
 		}
 	}
