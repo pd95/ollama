@@ -24,6 +24,26 @@ func TestApertusRendererGrammar(t *testing.T) {
 	}
 }
 
+func TestApertusRendererThinkingModes(t *testing.T) {
+	message := []api.Message{{Role: "assistant", Thinking: "reason", Content: "answer"}}
+	for _, think := range []*api.ThinkValue{nil, {Value: false}, {Value: "low"}, {Value: true}} {
+		got, err := (&ApertusRenderer{}).Render(message, nil, think)
+		if err != nil {
+			t.Fatal(err)
+		}
+		enabled := think != nil && think.Bool()
+		if strings.Contains(got, apertusInnerOpenTag) != enabled || strings.Contains(got, "Deliberation: enabled") != enabled {
+			t.Fatalf("think=%v got=%q", think, got)
+		}
+		if !enabled && strings.Contains(got, "reason") {
+			t.Fatalf("disabled thinking leaked: %q", got)
+		}
+	}
+	if _, err := (&ApertusRenderer{}).Render([]api.Message{{Role: "assistant", Thinking: apertusAssistantStart}}, nil, &api.ThinkValue{Value: true}); err == nil {
+		t.Fatal("thinking control token accepted")
+	}
+}
+
 func TestApertusRendererHistoryAndToolCalls(t *testing.T) {
 	args := api.NewToolCallFunctionArguments()
 	args.Set("city", "Bern")
