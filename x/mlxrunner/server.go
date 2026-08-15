@@ -145,7 +145,11 @@ func Execute(args []string) error {
 			TopLogprobs:      request.TopLogprobs,
 		}
 
-		if err := runner.Prepare(&request); err != nil {
+		var cancel context.CancelFunc
+		request.Ctx, cancel = context.WithCancel(r.Context())
+		defer cancel()
+
+		if err := runner.prepareAndQueue(request.Ctx, &request); err != nil {
 			var statusErr api.StatusError
 			if errors.As(err, &statusErr) {
 				http.Error(w, statusErr.ErrorMessage, statusErr.StatusCode)
@@ -153,18 +157,6 @@ func Execute(args []string) error {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 			}
 			return
-		}
-
-		var cancel context.CancelFunc
-		request.Ctx, cancel = context.WithCancel(r.Context())
-		defer cancel()
-
-		select {
-		case <-r.Context().Done():
-			// Never queued, so the runner will not close the grammar.
-			request.Grammar.close()
-			return
-		case runner.Requests <- request:
 		}
 
 		w.Header().Set("Content-Type", "application/jsonl")
@@ -234,6 +226,36 @@ func Execute(args []string) error {
 
 		slog.Log(r.Context(), level, "ServeHTTP", "method", r.Method, "path", r.URL.Path, "took", time.Since(t), "status", recorder.Status())
 	}))
+}
+
+func (runner *Runner) prepareAndQueue(ctx context.Context, request *Request) error {
+	originalNumPredict := request.Options.NumPredict
+	queued := false
+	defer func() {
+		if !queued {
+			request.Grammar.close()
+			request.Grammar = nil
+			request.Tokens = nil
+			request.MediaItems = nil
+			request.Layout = nil
+			request.Options.NumPredict = originalNumPredict
+		}
+	}()
+
+	request.Ctx = ctx
+	if err := runner.Prepare(ctx, request); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case runner.Requests <- *request:
+		queued = true
+		return nil
+	}
 }
 
 type statusRecorder struct {

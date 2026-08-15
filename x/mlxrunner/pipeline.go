@@ -26,27 +26,39 @@ func prefillChunkSize() int {
 // Prepare tokenizes the prompt and validates it against the model's
 // context length. It is safe to call from any goroutine. On success it
 // populates request.Tokens and adjusts request.Options.NumPredict.
-func (r *Runner) Prepare(request *Request) (err error) {
+func (r *Runner) Prepare(ctx context.Context, request *Request) (err error) {
+	request.Grammar = nil
+	request.Tokens = nil
+	request.MediaItems = nil
+	request.Layout = nil
+	var grammar *grammarCompilation
+	defer func() {
+		if err != nil {
+			grammar.close()
+			request.Grammar = nil
+			request.Tokens = nil
+			request.MediaItems = nil
+			request.Layout = nil
+		}
+	}()
+
 	if r.Model == nil {
 		return errors.New("model not loaded")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Launched first so the compile overlaps tokenization and media
 	// preparation as well as prefill.
-	grammar, err := r.grammarEngine.prepare(request.Format)
+	grammar, err = r.grammarEngine.prepare(request.Format)
 	if err != nil {
 		return err
 	}
-	request.Grammar = grammar
-	defer func() {
-		if err != nil {
-			request.Grammar.close()
-			request.Grammar = nil
-		}
-	}()
 
 	var tokens []int32
 	var items []mediaItem
+	var layout any
 	if len(request.Media) == 0 {
 		tokens = r.Tokenizer.Encode(request.Prompt, r.Tokenizer.AddBOS())
 	} else {
@@ -58,12 +70,15 @@ func (r *Runner) Prepare(request *Request) (err error) {
 			}
 			return fmt.Errorf("this model does not support %s input", kind)
 		}
-		prepared, bound, err := r.expandMedia(mm, request.Prompt, request.Media)
+		prepared, bound, err := r.expandMedia(ctx, mm.PrepareMedia, request.Prompt, request.Media)
 		if err != nil {
 			return err
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		tokens, items = prepared.Tokens, bound
-		request.Layout = prepared.Layout
+		layout = prepared.Layout
 	}
 
 	if len(tokens) == 0 {
@@ -76,14 +91,21 @@ func (r *Runner) Prepare(request *Request) (err error) {
 
 	// Cap generation to stay within the model's context length
 	maxGenerate := r.contextLength - len(tokens)
-	if request.Options.NumPredict <= 0 {
-		request.Options.NumPredict = maxGenerate
+	numPredict := request.Options.NumPredict
+	if numPredict <= 0 {
+		numPredict = maxGenerate
 	} else {
-		request.Options.NumPredict = min(request.Options.NumPredict, maxGenerate)
+		numPredict = min(numPredict, maxGenerate)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
+	request.Grammar = grammar
 	request.Tokens = tokens
 	request.MediaItems = items
+	request.Layout = layout
+	request.Options.NumPredict = numPredict
 	return nil
 }
 

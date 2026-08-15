@@ -2,6 +2,7 @@
 package qwen4_exp
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/ollama/ollama/x/mlxrunner/batch"
@@ -175,11 +176,11 @@ func (m *Model) Unembed(hidden *mlx.Array) *mlx.Array {
 
 func (m *Model) Tokenizer() *tokenizer.Tokenizer { return m.tok }
 
-func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
+func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
 	if m.Vision == nil {
 		return nil, fmt.Errorf("this model does not support media input")
 	}
-	return m.Vision.PrepareMedia(segments)
+	return m.Vision.PrepareMedia(ctx, segments)
 }
 
 func (m *Model) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
