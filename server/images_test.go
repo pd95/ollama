@@ -928,7 +928,7 @@ func gemma4AudioManifestLayers(t *testing.T) []manifest.Layer {
 	digest := createTestBlob(t, config)
 	layers = append(layers, manifest.Layer{MediaType: "application/vnd.ollama.image.json", Digest: digest, Size: int64(len(config)), Name: "config.json"})
 	for name, data := range map[string][]byte{
-		"processor_config.json": []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`),
+		"processor_config.json": []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_extractor_type":"Gemma4AudioFeatureExtractor","feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`),
 		"tokenizer_config.json": []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`),
 		"tokenizer.json":        []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`),
 	} {
@@ -1324,6 +1324,7 @@ func gemma4AudioConfig(layers int) *gemma4metadata.ConfigFile {
 		TextConfig:   gemma4metadata.TextConfig{HiddenSize: 5, VocabSize: 32},
 		AudioTokenID: 7,
 		AudioConfig: &gemma4metadata.AudioConfig{
+			ModelType:          "gemma4_audio",
 			AttentionChunkSize: 2, AttentionContextLeft: 2,
 			AttentionInvalidLogit: -1e9, AttentionLogitCap: 50,
 			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
