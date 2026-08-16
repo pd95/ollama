@@ -57,6 +57,31 @@ func TestParseReleasedAudioConfig(t *testing.T) {
 	}
 }
 
+func TestParseAudioConfigUsesMetadataPredicate(t *testing.T) {
+	for _, edit := range []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{"hidden bound", `"hidden_size": 1024`, `"hidden_size": 8193`},
+		{"layer bound", `"num_hidden_layers": 12`, `"num_hidden_layers": 129`},
+		{"head bound", `"num_attention_heads": 8`, `"num_attention_heads": 257`},
+		{"output bound", `"output_proj_dims": 1536`, `"output_proj_dims": 16385`},
+		{"context bound", `"attention_context_left": 13`, `"attention_context_left": 4097`},
+		{"float32 overflow", `"gradient_clipping": 10000000000.0`, `"gradient_clipping": 1e39`},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			data := strings.Replace(releasedGemma4AudioConfig, edit.old, edit.new, 1)
+			if data == releasedGemma4AudioConfig {
+				t.Fatal("test edit did not apply")
+			}
+			if _, err := parseAudioConfig([]byte(data)); err == nil {
+				t.Fatal("parseAudioConfig() error = nil")
+			}
+		})
+	}
+}
+
 func TestParseTextConfigRejectsInvalidAudioMarkers(t *testing.T) {
 	valid := `"boi_token_id":1,"image_token_id":2,"eoi_token_id":3,"boa_token_id":4,"audio_token_id":5,"eoa_token_index":6,"text_config":{"vocab_size":7}`
 	if _, err := parseTextConfig([]byte(`{` + valid + `}`)); err != nil {
