@@ -285,7 +285,7 @@ func TestDecodeGemma4WAVExtensible(t *testing.T) {
 	}
 }
 
-func TestDecodeGemma4WAVDownmixResampleAndTruncate(t *testing.T) {
+func TestDecodeGemma4WAVDownmixResampleAndDurationLimit(t *testing.T) {
 	frames := make([][]float64, 8000)
 	for i := range frames {
 		frames[i] = []float64{-0.5, 0.5}
@@ -314,18 +314,14 @@ func TestDecodeGemma4WAVDownmixResampleAndTruncate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(limited) != maxGemma4AudioSamples {
-		t.Fatalf("exact-boundary length = %d, want %d", len(limited), maxGemma4AudioSamples)
+		t.Fatalf("limit length = %d, want %d", len(limited), maxGemma4AudioSamples)
 	}
 	overFrames := make([][]float64, len(limitFrames)+1)
 	copy(overFrames, limitFrames)
 	overFrames[len(limitFrames)] = []float64{0}
 	overData := makeTestWAV(t, 1, 16, 16000, overFrames)
-	truncated, err := decodeGemma4WAV(context.Background(), overData, 16000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(truncated) != maxGemma4AudioSamples {
-		t.Fatalf("boundary+1 truncated length = %d, want %d", len(truncated), maxGemma4AudioSamples)
+	if _, err := decodeGemma4WAV(context.Background(), overData, 16000); err == nil || !strings.Contains(err.Error(), "30 seconds") {
+		t.Fatalf("over-duration error = %v", err)
 	}
 }
 
@@ -398,14 +394,7 @@ func TestGemma4AudioInputFailures(t *testing.T) {
 }
 
 func TestPreprocessGemma4MP3(t *testing.T) {
-	encoded, err := os.ReadFile("../../mlxrunner/media/testdata/bcn_weather_first_10_frames.mp3.base64")
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := testGemma4MP3(t)
 	cfg := defaultAudioProcessorConfig()
 	input, err := preprocessGemma4Audio(context.Background(), data, &cfg)
 	if err != nil {
@@ -414,6 +403,30 @@ func TestPreprocessGemma4MP3(t *testing.T) {
 	if input.SoftTokens == 0 || input.Frames == 0 || len(input.Features) == 0 {
 		t.Fatalf("MP3 input = %+v", input)
 	}
+}
+
+func TestGemma4MP3DurationLimit(t *testing.T) {
+	data := testGemma4MP3(t)
+	cfg := defaultAudioProcessorConfig()
+	if _, err := preprocessGemma4Audio(context.Background(), bytes.Repeat(data, 125), &cfg); err != nil {
+		t.Fatalf("30-second MP3: %v", err)
+	}
+	if _, err := preprocessGemma4Audio(context.Background(), bytes.Repeat(data, 126), &cfg); err == nil || !strings.Contains(err.Error(), "30 seconds") {
+		t.Fatalf("over-duration MP3 error = %v", err)
+	}
+}
+
+func testGemma4MP3(t *testing.T) []byte {
+	t.Helper()
+	encoded, err := os.ReadFile("../../mlxrunner/media/testdata/synthetic_silence.mp3.base64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestGemma4WAVValidationLimits(t *testing.T) {
