@@ -564,6 +564,18 @@ func FromChatRequest(r ChatCompletionRequest) (*api.ChatRequest, error) {
 			}
 			messages = append(messages, api.Message{Role: msg.Role, Content: content, Thinking: msg.Reasoning, ToolCalls: toolCalls, ToolName: toolName, ToolCallID: msg.ToolCallID})
 		case []any:
+			toolCalls, err := FromCompletionToolCall(msg.ToolCalls)
+			if err != nil {
+				return nil, err
+			}
+			converted := api.Message{
+				Role:       msg.Role,
+				Thinking:   msg.Reasoning,
+				ToolCalls:  toolCalls,
+				ToolName:   toolName,
+				ToolCallID: msg.ToolCallID,
+			}
+			var contentBuilder strings.Builder
 			for _, c := range content {
 				data, ok := c.(map[string]any)
 				if !ok {
@@ -575,7 +587,7 @@ func FromChatRequest(r ChatCompletionRequest) (*api.ChatRequest, error) {
 					if !ok {
 						return nil, errors.New("invalid message format")
 					}
-					messages = append(messages, api.Message{Role: msg.Role, Content: text})
+					contentBuilder.WriteString(text)
 				case "image_url":
 					var url string
 					if urlMap, ok := data["image_url"].(map[string]any); ok {
@@ -593,7 +605,8 @@ func FromChatRequest(r ChatCompletionRequest) (*api.ChatRequest, error) {
 						return nil, err
 					}
 
-					messages = append(messages, api.Message{Role: msg.Role, Images: []api.ImageData{img}})
+					contentBuilder.WriteString("[img]")
+					converted.Images = append(converted.Images, img)
 				case "input_audio":
 					audioMap, ok := data["input_audio"].(map[string]any)
 					if !ok {
@@ -607,23 +620,14 @@ func FromChatRequest(r ChatCompletionRequest) (*api.ChatRequest, error) {
 					if err != nil {
 						return nil, fmt.Errorf("invalid input_audio base64 data: %w", err)
 					}
-					messages = append(messages, api.Message{Role: msg.Role, Images: []api.ImageData{audioBytes}})
+					contentBuilder.WriteString("[img]")
+					converted.Images = append(converted.Images, audioBytes)
 				default:
 					return nil, errors.New("invalid message format")
 				}
 			}
-			// since we might have added multiple messages above, if we have tools
-			// calls we'll add them to the last message
-			if len(messages) > 0 && len(msg.ToolCalls) > 0 {
-				toolCalls, err := FromCompletionToolCall(msg.ToolCalls)
-				if err != nil {
-					return nil, err
-				}
-				messages[len(messages)-1].ToolCalls = toolCalls
-				messages[len(messages)-1].ToolName = toolName
-				messages[len(messages)-1].ToolCallID = msg.ToolCallID
-				messages[len(messages)-1].Thinking = msg.Reasoning
-			}
+			converted.Content = contentBuilder.String()
+			messages = append(messages, converted)
 		default:
 			// content is only optional if tool calls are present
 			if msg.ToolCalls == nil {
