@@ -784,6 +784,31 @@ func TestGemma4InstalledAudioCapabilityDescriptorAndPayloadMatrix(t *testing.T) 
 		{name: "missing tokenizer metadata", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
 			return slices.DeleteFunc(layers, func(layer manifest.Layer) bool { return layer.Name == "tokenizer_config.json" })
 		}},
+		{name: "missing tokenizer vocabulary", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return slices.DeleteFunc(layers, func(layer manifest.Layer) bool { return layer.Name == "tokenizer.json" })
+		}},
+		{name: "invalid runtime scalar", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			cfg := gemma4AudioConfig(1)
+			cfg.AudioConfig.ResidualWeight = 0
+			return replaceGemma4AudioConfigLayer(t, layers, cfg)
+		}},
+		{name: "float32 overflow runtime scalar", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			valid, err := json.Marshal(gemma4AudioConfig(1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			overflow := []byte(strings.Replace(string(valid), `"gradient_clipping":10000000000`, `"gradient_clipping":1e39`, 1))
+			if string(overflow) == string(valid) {
+				t.Fatal("failed to construct float32-overflow audio config")
+			}
+			return replaceGemma4ManifestJSON(t, layers, "config.json", overflow)
+		}},
+		{name: "wrong audio token id", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return replaceGemma4ManifestJSON(t, layers, "tokenizer.json", []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":8,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`))
+		}},
+		{name: "vocab-only markers are not singleton encodings", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return replaceGemma4ManifestJSON(t, layers, "tokenizer.json", []byte(`{"model":{"type":"BPE","vocab":{"<|audio>":5,"<|audio|>":7,"<audio|>":6},"merges":[]},"added_tokens":[]}`))
+		}},
 		{name: "near-match internal name", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
 			return replaceGemma4AudioFixtureLayer(t, layers, target, target+".extra", gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{3, 4}}, nil)
 		}},
@@ -892,7 +917,7 @@ func TestGemma4InstalledAudioCapabilityRejectsUnboundedConfig(t *testing.T) {
 func gemma4AudioManifestLayers(t *testing.T) []manifest.Layer {
 	t.Helper()
 	descriptors := testGemma4AudioTensorDescriptors(1)
-	layers := make([]manifest.Layer, 0, len(descriptors)+3)
+	layers := make([]manifest.Layer, 0, len(descriptors)+4)
 	for name, descriptor := range descriptors {
 		layers = append(layers, gemma4AudioFixtureLayer(t, name, name, descriptor, nil))
 	}
@@ -905,6 +930,7 @@ func gemma4AudioManifestLayers(t *testing.T) []manifest.Layer {
 	for name, data := range map[string][]byte{
 		"processor_config.json": []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`),
 		"tokenizer_config.json": []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`),
+		"tokenizer.json":        []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`),
 	} {
 		digest := createTestBlob(t, data)
 		layers = append(layers, manifest.Layer{MediaType: "application/vnd.ollama.image.json", Digest: digest, Size: int64(len(data)), Name: name})
@@ -926,6 +952,20 @@ func replaceGemma4AudioConfigLayer(t *testing.T, layers []manifest.Layer, cfg *g
 		}
 	}
 	t.Fatal("missing audio config fixture layer")
+	return nil
+}
+
+func replaceGemma4ManifestJSON(t *testing.T, layers []manifest.Layer, name string, contents []byte) []manifest.Layer {
+	t.Helper()
+	digest := createTestBlob(t, contents)
+	for i := range layers {
+		if layers[i].Name == name {
+			layers[i].Digest = digest
+			layers[i].Size = int64(len(contents))
+			return layers
+		}
+	}
+	t.Fatalf("manifest config %q not found", name)
 	return nil
 }
 
@@ -1196,8 +1236,10 @@ func gemma4AudioConfig(layers int) *gemma4metadata.ConfigFile {
 		AudioTokenID: 7,
 		AudioConfig: &gemma4metadata.AudioConfig{
 			AttentionChunkSize: 2, AttentionContextLeft: 2,
+			AttentionInvalidLogit: -1e9, AttentionLogitCap: 50,
 			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
 			NumHiddenLayers: layers, OutputProjDims: 3,
+			GradientClipping: 1e10, ResidualWeight: 0.5, RMSNormEps: 1e-6,
 			SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
 		},
 	}
