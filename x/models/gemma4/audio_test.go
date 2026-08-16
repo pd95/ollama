@@ -24,6 +24,7 @@ const releasedGemma4AudioConfig = `{
     "vocab_size": 262144
   },
   "audio_config": {
+	"model_type": "gemma4_audio",
     "attention_chunk_size": 12,
     "attention_context_left": 13,
     "attention_context_right": 0,
@@ -60,6 +61,10 @@ func TestParseReleasedAudioConfig(t *testing.T) {
 	bad := strings.Replace(releasedGemma4AudioConfig, `"num_attention_heads": 8`, `"num_attention_heads": 7`, 1)
 	if _, err := parseAudioConfig([]byte(bad)); err == nil {
 		t.Fatal("non-divisible head count: error = nil")
+	}
+	unknown := strings.Replace(releasedGemma4AudioConfig, `"model_type": "gemma4_audio"`, `"model_type": "future_audio"`, 1)
+	if _, err := parseAudioConfig([]byte(unknown)); err == nil {
+		t.Fatal("unknown audio model type: error = nil")
 	}
 }
 

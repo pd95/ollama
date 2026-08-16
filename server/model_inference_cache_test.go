@@ -175,3 +175,78 @@ func TestInferenceModelCacheGemma4VisionTensorCapabilities(t *testing.T) {
 		t.Fatalf("refreshed capabilities = %v, did not expect vision", third.Capabilities())
 	}
 }
+
+func TestInferenceModelCacheGemma4AudioCapabilities(t *testing.T) {
+	setTestHome(t, t.TempDir())
+
+	cfg := model.ConfigV2{
+		ModelFormat:  "safetensors",
+		Renderer:     gemma4RendererLarge,
+		Capabilities: []string{"completion", "audio"},
+	}
+	createSafetensorsTestModel(t, "gemma4-audio-cache", cfg, gemma4AudioManifestLayers(t))
+
+	cache := newInferenceModelCache()
+	loadCount := 0
+	cache.loadModel = func(name string) (*Model, error) {
+		loadCount++
+		return GetModel(name)
+	}
+
+	first, err := cache.Get("gemma4-audio-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.capabilitiesCached || !slices.Contains(first.Capabilities(), model.CapabilityAudio) || !first.Gemma4AudioReady {
+		t.Fatalf("cold state = capabilities:%v ready:%t, want cached audio", first.Capabilities(), first.Gemma4AudioReady)
+	}
+	if first.Gemma4AudioConfig == nil || len(first.Gemma4AudioTensors) == 0 {
+		t.Fatal("cold model did not retain Gemma 4 audio metadata")
+	}
+	first.Gemma4AudioConfig.AudioConfig.HiddenSize = 0
+	mutatedTensor := false
+	for name, descriptor := range first.Gemma4AudioTensors {
+		if len(descriptor.Shape) == 0 {
+			continue
+		}
+		descriptor.Shape[0] = 0
+		first.Gemma4AudioTensors[name] = descriptor
+		delete(first.Gemma4AudioTensors, name)
+		mutatedTensor = true
+		break
+	}
+	if !mutatedTensor {
+		t.Fatal("cold model did not retain a shaped Gemma 4 audio tensor")
+	}
+
+	second, err := cache.Get("gemma4-audio-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadCount != 1 {
+		t.Fatalf("cache hit load count = %d, want 1", loadCount)
+	}
+	if !slices.Contains(second.Capabilities(), model.CapabilityAudio) || !second.Gemma4AudioReady {
+		t.Fatalf("cached state = capabilities:%v ready:%t, want audio", second.Capabilities(), second.Gemma4AudioReady)
+	}
+	if second.Gemma4AudioConfig.AudioConfig.HiddenSize == 0 || len(second.Gemma4AudioTensors) == 0 {
+		t.Fatal("cached Gemma 4 audio metadata was mutated")
+	}
+	for _, descriptor := range second.Gemma4AudioTensors {
+		if len(descriptor.Shape) > 0 && descriptor.Shape[0] == 0 {
+			t.Fatal("cached Gemma 4 audio tensor shape was mutated")
+		}
+	}
+
+	createSafetensorsTestModel(t, "gemma4-audio-cache", cfg, nil)
+	third, err := cache.Get("gemma4-audio-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadCount != 2 {
+		t.Fatalf("invalidated load count = %d, want 2", loadCount)
+	}
+	if slices.Contains(third.Capabilities(), model.CapabilityAudio) || third.Gemma4AudioReady {
+		t.Fatalf("refreshed state = capabilities:%v ready:%t, did not expect audio", third.Capabilities(), third.Gemma4AudioReady)
+	}
+}
