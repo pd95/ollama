@@ -6,7 +6,6 @@ package gemma4
 // docs/third-party/mlx-vlm.md and cross-checked against Transformers.
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -36,26 +35,27 @@ type AudioConfig struct {
 }
 
 func parseAudioConfig(configData []byte) (*AudioConfig, error) {
-	var wrapped struct {
-		AudioConfig *AudioConfig `json:"audio_config"`
+	cfg, err := gemma4metadata.ParseAudioConfig(configData)
+	if err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(configData, &wrapped); err != nil {
-		return nil, fmt.Errorf("parse Gemma4 audio config: %w", err)
-	}
-	if wrapped.AudioConfig == nil {
+	if cfg == nil {
 		return nil, nil
 	}
-	cfg := wrapped.AudioConfig
-	if cfg.HiddenSize <= 0 || cfg.NumHiddenLayers <= 0 || cfg.NumAttentionHeads <= 0 ||
-		cfg.HiddenSize%cfg.NumAttentionHeads != 0 || cfg.OutputProjDims <= 0 ||
-		cfg.AttentionChunkSize <= 0 || cfg.AttentionContextLeft <= 0 || cfg.AttentionContextRight < 0 ||
-		cfg.ConvKernelSize <= 0 || cfg.ConvKernelSize%2 == 0 || len(cfg.SubsamplingConvChannels) != 2 ||
-		cfg.SubsamplingConvChannels[0] <= 0 || cfg.SubsamplingConvChannels[1] <= 0 ||
-		cfg.RMSNormEps <= 0 || cfg.ResidualWeight <= 0 || cfg.GradientClipping <= 0 ||
-		cfg.AttentionLogitCap <= 0 || cfg.AttentionInvalidLogit >= 0 {
-		return nil, errors.New("invalid Gemma4 audio configuration")
+	channels := make([]int32, len(cfg.SubsamplingConvChannels))
+	for i, channel := range cfg.SubsamplingConvChannels {
+		channels[i] = int32(channel)
 	}
-	return cfg, nil
+	return &AudioConfig{
+		AttentionChunkSize: int32(cfg.AttentionChunkSize), AttentionContextLeft: int32(cfg.AttentionContextLeft),
+		AttentionContextRight: int32(cfg.AttentionContextRight), AttentionInvalidLogit: cfg.AttentionInvalidLogit,
+		AttentionLogitCap: cfg.AttentionLogitCap, ConvKernelSize: int32(cfg.ConvKernelSize),
+		GradientClipping: cfg.GradientClipping, HiddenSize: int32(cfg.HiddenSize),
+		NumAttentionHeads: int32(cfg.NumAttentionHeads), NumHiddenLayers: int32(cfg.NumHiddenLayers),
+		OutputProjDims: int32(cfg.OutputProjDims), ResidualWeight: cfg.ResidualWeight,
+		RMSNormEps: cfg.RMSNormEps, SubsamplingConvChannels: channels,
+		UseClippedLinears: cfg.UseClippedLinears,
+	}, nil
 }
 
 type audioConvBlock struct {
