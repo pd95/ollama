@@ -103,7 +103,8 @@ func ValidateAudioRuntimeMetadata(cfg ConfigFile, processorData, tokenizerConfig
 			f.PaddingSide != "right" {
 			return fmt.Errorf("unsupported Gemma 4 unified audio processor configuration")
 		}
-	} else if processor.AudioSequenceLength != 750 || f.FeatureSize != 128 || f.SamplingRate != 16000 ||
+	} else if f.Type != "Gemma4AudioFeatureExtractor" || processor.AudioSequenceLength != 750 ||
+		f.FeatureSize != 128 || f.SamplingRate != 16000 ||
 		f.FrameLength != 320 || f.HopLength != 160 || f.FFTLength != 512 || f.FFTOverdrive ||
 		f.Dither != 0 || f.InputScaleFactor != 1 || f.MinFrequency != 0 || f.MaxFrequency != 8000 ||
 		f.MelFloor != 1e-3 || f.Preemphasis != 0 || f.PaddingSide != "right" ||
@@ -231,6 +232,9 @@ func validateAudioConfig(cfg ConfigFile) error {
 			return fmt.Errorf("invalid Gemma 4 unified audio dimensions")
 		}
 		return nil
+	}
+	if ac.ModelType != "gemma4_audio" {
+		return fmt.Errorf("unsupported Gemma 4 audio model type %q", ac.ModelType)
 	}
 	if err := validateAudioConfigFields(ac); err != nil {
 		return err
