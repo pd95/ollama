@@ -237,7 +237,7 @@ func validateVisionConfig(cfg *VisionConfig) error {
 	}
 	// This validates vision-only call sites before the enclosing text model is
 	// available. Executable inventory validation supplies the real text width.
-	_, err := gemma4metadata.ProjectVisionArchitecture(metadataConfigFromVision(cfg, 1))
+	_, err := gemma4metadata.ProjectVisionArchitecture(metadataConfigFromVision(cfg, 1, 0, 0, ""))
 	return err
 }
 
@@ -299,7 +299,7 @@ func parseGemma4MediaTokens(data []byte, fallback gemma4MediaTokens) gemma4Media
 	return fallback
 }
 
-func metadataConfigFromVision(cfg *VisionConfig, textHidden int) gemma4metadata.ConfigFile {
+func metadataConfigFromVision(cfg *VisionConfig, textHidden, groupSize, bits int, mode string) gemma4metadata.ConfigFile {
 	if cfg == nil {
 		return gemma4metadata.ConfigFile{}
 	}
@@ -317,10 +317,20 @@ func metadataConfigFromVision(cfg *VisionConfig, textHidden int) gemma4metadata.
 		v.ModelType = "gemma4_unified_vision"
 	}
 	v.RopeParameters.RopeTheta = float64(cfg.RopeParameters.RopeTheta)
-	return gemma4metadata.ConfigFile{TextConfig: gemma4metadata.TextConfig{HiddenSize: textHidden}, VisionConfig: v}
+	return gemma4metadata.ConfigFile{
+		TextConfig:         gemma4metadata.TextConfig{HiddenSize: textHidden},
+		VisionConfig:       v,
+		QuantizationConfig: gemma4metadata.Quantization{Bits: bits, GroupSize: groupSize, Mode: mode},
+	}
 }
 
-func validateGemma4VisionWeights(tensors map[string]*mlx.Array, cfg *VisionConfig, textHidden int, tq map[string]*model.TensorQuantInfo) (bool, error) {
+func validateGemma4VisionWeights(
+	tensors map[string]*mlx.Array,
+	cfg *VisionConfig,
+	textHidden, groupSize, bits int,
+	mode string,
+	tq map[string]*model.TensorQuantInfo,
+) (bool, error) {
 	sentinel := firstNonNil(tensors, "vision_tower.patch_embedder.input_proj.weight", "model.vision_tower.patch_embedder.input_proj.weight")
 	packedSentinel := firstNonNil(tensors, "vision_tower.patch_embedder.input_proj.weight_packed", "model.vision_tower.patch_embedder.input_proj.weight_packed")
 	if cfg != nil && cfg.unified() {
@@ -333,22 +343,8 @@ func validateGemma4VisionWeights(tensors map[string]*mlx.Array, cfg *VisionConfi
 		}
 		return false, nil
 	}
-	descriptors := make(map[string]gemma4metadata.TensorDescriptor, len(tensors))
-	for name, tensor := range tensors {
-		if tensor != nil {
-			shape := make([]int32, tensor.NumDims())
-			for i, d := range tensor.Dims() {
-				shape[i] = int32(d)
-			}
-			d := gemma4metadata.TensorDescriptor{Dtype: tensor.DType().String(), Shape: shape}
-			if q := tq[name]; q != nil {
-				d.QuantType = q.QuantType
-				d.GroupSize = q.GroupSize
-			}
-			descriptors[name] = d
-		}
-	}
-	if err := gemma4metadata.ValidateVisionRuntimeInventory(metadataConfigFromVision(cfg, textHidden), descriptors); err != nil {
+	descriptors := gemma4RuntimeTensorDescriptors(tensors, tq, groupSize, mode)
+	if err := gemma4metadata.ValidateVisionRuntimeInventory(metadataConfigFromVision(cfg, textHidden, groupSize, bits, mode), descriptors); err != nil {
 		return false, err
 	}
 	return true, nil
