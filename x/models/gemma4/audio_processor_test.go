@@ -13,8 +13,9 @@ import (
 
 func TestParseReleasedAudioProcessorConfig(t *testing.T) {
 	data := []byte(`{
-		"audio_seq_length":750,
-		"feature_extractor":{
+			"audio_seq_length":750,
+			"feature_extractor":{
+				"feature_extractor_type":"Gemma4AudioFeatureExtractor",
 			"dither":0.0,"feature_size":128,"fft_length":512,"fft_overdrive":false,
 			"frame_length":320,"hop_length":160,"input_scale_factor":1.0,
 			"max_frequency":8000.0,"mel_floor":0.001,"min_frequency":0.0,
@@ -34,10 +35,15 @@ func TestParseReleasedAudioProcessorConfig(t *testing.T) {
 	if _, err := parseAudioProcessorConfig(bad); err == nil {
 		t.Fatal("1024-point FFT processor: error = nil")
 	}
+	unknown := bytes.Replace(data, []byte(`"Gemma4AudioFeatureExtractor"`), []byte(`"FutureAudioFeatureExtractor"`), 1)
+	if _, err := parseAudioProcessorConfig(unknown); err == nil {
+		t.Fatal("unknown tower processor: error = nil")
+	}
 }
 
 func TestReleasedAudioProcessorRejectsMalformedDimensions(t *testing.T) {
 	base := defaultAudioProcessorConfig()
+	base.FeatureExtractor.Type = "Gemma4AudioFeatureExtractor"
 	tests := []struct {
 		name   string
 		mutate func(*AudioProcessorConfig)
