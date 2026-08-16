@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"strings"
 
 	"github.com/ollama/ollama/llm"
 	mlxmedia "github.com/ollama/ollama/x/mlxrunner/media"
@@ -113,17 +114,21 @@ func preprocessGemma4Audio(ctx context.Context, data []byte, cfg *AudioProcessor
 	}
 	var samples []float32
 	var err error
-	if format, ok := llm.AudioFormat(data); ok && format == "mp3" {
+	format, _ := llm.AudioFormat(data)
+	if format == "mp3" {
 		samples, err = mlxmedia.DecodeMP3(ctx, data, mlxmedia.MP3DecodeOptions{
 			TargetSampleRate: cfg.FeatureExtractor.SamplingRate,
 			MaxInputBytes:    maxGemma4AudioBytes,
 			MaxSamples:       maxGemma4AudioSamples,
-			Overflow:         mlxmedia.AudioOverflowTruncate,
+			Overflow:         mlxmedia.AudioOverflowReject,
 		})
 	} else {
 		samples, err = decodeGemma4WAV(ctx, data, cfg.FeatureExtractor.SamplingRate)
 	}
 	if err != nil {
+		if format == "mp3" && strings.Contains(err.Error(), "exceeds limit of") {
+			return nil, errors.New("Gemma4 audio exceeds the maximum duration of 30 seconds")
+		}
 		return nil, err
 	}
 	if cfg.FeatureExtractor.Type == "Gemma4UnifiedAudioFeatureExtractor" {
@@ -282,7 +287,7 @@ func decodeGemma4WAV(ctx context.Context, data []byte, targetRate int) ([]float3
 	frames := len(pcm) / wantBlockAlign
 	maxSourceFrames := int64(maxGemma4AudioSamples) * int64(sampleRate) / int64(targetRate)
 	if int64(frames) > maxSourceFrames {
-		frames = int(maxSourceFrames)
+		return nil, errors.New("Gemma4 audio exceeds the maximum duration of 30 seconds")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -328,7 +333,7 @@ func decodeGemma4WAV(ctx context.Context, data []byte, targetRate int) ([]float3
 		samples = resampled
 	}
 	if len(samples) > maxGemma4AudioSamples {
-		samples = samples[:maxGemma4AudioSamples]
+		return nil, errors.New("Gemma4 audio exceeds the maximum duration of 30 seconds")
 	}
 	return samples, nil
 }
