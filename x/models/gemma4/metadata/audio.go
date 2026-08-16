@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"slices"
+
+	"github.com/ollama/ollama/x/tokenizer"
 )
 
 const (
@@ -20,16 +22,21 @@ const (
 )
 
 type AudioConfig struct {
-	AttentionChunkSize      int   `json:"attention_chunk_size"`
-	AttentionContextLeft    int   `json:"attention_context_left"`
-	AttentionContextRight   int   `json:"attention_context_right"`
-	ConvKernelSize          int   `json:"conv_kernel_size"`
-	HiddenSize              int   `json:"hidden_size"`
-	NumAttentionHeads       int   `json:"num_attention_heads"`
-	NumHiddenLayers         int   `json:"num_hidden_layers"`
-	OutputProjDims          int   `json:"output_proj_dims"`
-	SubsamplingConvChannels []int `json:"subsampling_conv_channels"`
-	UseClippedLinears       bool  `json:"use_clipped_linears"`
+	AttentionChunkSize      int     `json:"attention_chunk_size"`
+	AttentionContextLeft    int     `json:"attention_context_left"`
+	AttentionContextRight   int     `json:"attention_context_right"`
+	AttentionInvalidLogit   float32 `json:"attention_invalid_logits_value"`
+	AttentionLogitCap       float32 `json:"attention_logit_cap"`
+	ConvKernelSize          int     `json:"conv_kernel_size"`
+	GradientClipping        float32 `json:"gradient_clipping"`
+	HiddenSize              int     `json:"hidden_size"`
+	NumAttentionHeads       int     `json:"num_attention_heads"`
+	NumHiddenLayers         int     `json:"num_hidden_layers"`
+	OutputProjDims          int     `json:"output_proj_dims"`
+	ResidualWeight          float32 `json:"residual_weight"`
+	RMSNormEps              float32 `json:"rms_norm_eps"`
+	SubsamplingConvChannels []int   `json:"subsampling_conv_channels"`
+	UseClippedLinears       bool    `json:"use_clipped_linears"`
 }
 
 type audioProcessorConfig struct {
@@ -56,7 +63,7 @@ type audioProcessorConfig struct {
 // ValidateAudioRuntimeMetadata verifies the processor and tokenizer metadata
 // required by the native Gemma 4 audio path. It deliberately accepts only the
 // released processor contract implemented by the runner.
-func ValidateAudioRuntimeMetadata(cfg ConfigFile, processorData, tokenizerConfigData []byte) error {
+func ValidateAudioRuntimeMetadata(cfg ConfigFile, processorData, tokenizerConfigData, tokenizerData []byte) error {
 	if err := validateAudioConfig(cfg); err != nil {
 		return err
 	}
@@ -91,6 +98,24 @@ func ValidateAudioRuntimeMetadata(cfg ConfigFile, processorData, tokenizerConfig
 	}
 	if tokens.BOA == "" || tokens.Audio == "" || tokens.EOA == "" {
 		return fmt.Errorf("missing Gemma 4 audio tokenizer tokens")
+	}
+	if len(tokenizerData) == 0 {
+		return fmt.Errorf("missing tokenizer.json")
+	}
+	tok, err := tokenizer.LoadFromBytesWithConfig(tokenizerData, &tokenizer.TokenizerConfig{
+		TokenizerConfigJSON: tokenizerConfigData,
+	})
+	if err != nil {
+		return fmt.Errorf("parse tokenizer.json: %w", err)
+	}
+	for _, token := range []string{tokens.BOA, tokens.Audio, tokens.EOA} {
+		ids := tok.Encode(token, false)
+		if len(ids) != 1 || ids[0] < 0 || int(ids[0]) >= cfg.TextConfig.VocabSize {
+			return fmt.Errorf("audio tokenizer token %q is not a valid singleton token", token)
+		}
+		if token == tokens.Audio && int(ids[0]) != cfg.AudioTokenID {
+			return fmt.Errorf("audio tokenizer token id %d, want %d", ids[0], cfg.AudioTokenID)
+		}
 	}
 	return nil
 }
@@ -179,6 +204,8 @@ func validateAudioConfig(cfg ConfigFile) error {
 		ac.AttentionChunkSize <= 0 || ac.AttentionChunkSize > maxAudioContextSize ||
 		ac.AttentionContextLeft <= 0 || ac.AttentionContextLeft > maxAudioContextSize ||
 		ac.AttentionContextRight < 0 || ac.AttentionContextRight > maxAudioContextSize ||
+		ac.AttentionInvalidLogit >= 0 || ac.AttentionLogitCap <= 0 ||
+		ac.GradientClipping <= 0 || ac.ResidualWeight <= 0 || ac.RMSNormEps <= 0 ||
 		len(ac.SubsamplingConvChannels) != 2 ||
 		ac.SubsamplingConvChannels[0] <= 0 || ac.SubsamplingConvChannels[0] > maxAudioConvChannels ||
 		ac.SubsamplingConvChannels[1] <= 0 || ac.SubsamplingConvChannels[1] > maxAudioConvChannels ||
