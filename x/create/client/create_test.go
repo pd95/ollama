@@ -676,7 +676,8 @@ func TestInferSafetensorsCapabilitiesGemma4AudioInventory(t *testing.T) {
 			cfg := gemma4metadata.ConfigFile{
 				Architectures: []string{identity.architecture},
 				ModelType:     identity.modelType,
-				TextConfig:    gemma4metadata.TextConfig{HiddenSize: 5},
+				TextConfig:    gemma4metadata.TextConfig{HiddenSize: 5, VocabSize: 32},
+				AudioTokenID:  7,
 				AudioConfig: &gemma4metadata.AudioConfig{
 					AttentionChunkSize: 2, AttentionContextLeft: 2,
 					ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
@@ -704,6 +705,7 @@ func TestInferSafetensorsCapabilitiesGemma4AudioInventory(t *testing.T) {
 					t.Fatal(err)
 				}
 				writeClientSafetensorDescriptors(t, dir, tensors)
+				writeGemma4AudioRuntimeConfigs(t, dir)
 				got := inferSafetensorsCapabilities(dir, "")
 				if slices.Contains(got, "audio") != wantAudio {
 					t.Fatalf("capabilities = %v, want audio %t", got, wantAudio)
@@ -737,7 +739,8 @@ func TestInferSafetensorsCapabilitiesGemma4AudioInventory(t *testing.T) {
 func TestInferSafetensorsCapabilitiesGemma4AudioRejectsUnboundedConfig(t *testing.T) {
 	base := gemma4metadata.ConfigFile{
 		Architectures: []string{"Gemma4ForConditionalGeneration"}, ModelType: "gemma4",
-		TextConfig: gemma4metadata.TextConfig{HiddenSize: 5},
+		TextConfig:   gemma4metadata.TextConfig{HiddenSize: 5, VocabSize: 32},
+		AudioTokenID: 7,
 		AudioConfig: &gemma4metadata.AudioConfig{
 			AttentionChunkSize: 2, AttentionContextLeft: 2,
 			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
@@ -784,6 +787,19 @@ func TestInferSafetensorsCapabilitiesGemma4AudioRejectsUnboundedConfig(t *testin
 				t.Fatalf("unbounded config capabilities = %v, did not expect audio", got)
 			}
 		})
+	}
+}
+
+func writeGemma4AudioRuntimeConfigs(t *testing.T, dir string) {
+	t.Helper()
+	files := map[string][]byte{
+		"processor_config.json": []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`),
+		"tokenizer_config.json": []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`),
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

@@ -1,11 +1,13 @@
 package gemma4
 
 import (
+	"context"
 	"maps"
 	"strings"
 	"testing"
 
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
+	"github.com/ollama/ollama/x/mlxrunner/model/base"
 	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 )
 
@@ -162,6 +164,46 @@ func TestSupportedGemma4AudioDType(t *testing.T) {
 		if supportedGemma4AudioDType(dtype) {
 			t.Errorf("supportedGemma4AudioDType(%s) = true", dtype)
 		}
+	}
+}
+
+func TestPrepareAudioMedia(t *testing.T) {
+	cfg := defaultAudioProcessorConfig()
+	frames := make([][]float64, 16000)
+	for i := range frames {
+		frames[i] = []float64{0.25}
+	}
+	m := &Model{
+		TextConfig:  &TextConfig{AudioTokenIDValue: 1, BOATokenIDValue: 2, EOATokenIDValue: 3},
+		AudioConfig: &AudioConfig{}, AudioProcessorConfig: &cfg,
+		Audio: &AudioModel{}, EmbedAudio: &MultimodalEmbedder{},
+	}
+	wav := makeTestWAV(t, 1, 16, 16000, frames)
+	prepared, err := m.PrepareMedia(context.Background(), []base.Segment{{Tokens: []int32{9}}, {Kind: "audio", Data: wav}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(prepared.Items))
+	}
+	payload := prepared.Items[0].Opaque.(gemma4MediaPayload)
+	if got := payload.AudioEnd - payload.AudioStart; got != payload.Audio.SoftTokens {
+		t.Fatalf("audio span = %d, want %d", got, payload.Audio.SoftTokens)
+	}
+	if payload.Audio.Features != nil || len(prepared.Items[0].MediaData) == 0 {
+		t.Fatal("audio features must be owned by PreparedItem.MediaData")
+	}
+	ordered, err := m.PrepareMedia(context.Background(), []base.Segment{{Kind: "audio", Data: wav}, {Tokens: []int32{8}}, {Kind: "audio", Data: wav}})
+	if err != nil || len(ordered.Items) != 2 || ordered.Items[0].Range[1] >= ordered.Items[1].Range[0] {
+		t.Fatalf("ordered audio = items %d error %v", len(ordered.Items), err)
+	}
+}
+
+func TestPrepareAudioMediaRejectsMissingWeights(t *testing.T) {
+	cfg := defaultAudioProcessorConfig()
+	m := &Model{TextConfig: &TextConfig{}, AudioConfig: &AudioConfig{}, AudioProcessorConfig: &cfg}
+	if _, err := m.PrepareMedia(context.Background(), []base.Segment{{Kind: "audio", Data: []byte("wav")}}); err == nil || !strings.Contains(err.Error(), "does not support audio") {
+		t.Fatalf("PrepareMedia() error = %v", err)
 	}
 }
 
