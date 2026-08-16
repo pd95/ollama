@@ -642,8 +642,12 @@ func gemma4ModelDirMediaCapabilities(modelDir string) (vision, audio bool) {
 		// descriptor shapes rather than the released tower sentinel alone.
 		tensors[name] = gemma4metadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
 	}
-	return gemma4metadata.ValidateVisionSourceInventory(cfg, tensors) == nil,
+	processorData, processorErr := os.ReadFile(filepath.Join(modelDir, "processor_config.json"))
+	tokenizerConfigData, tokenizerErr := os.ReadFile(filepath.Join(modelDir, "tokenizer_config.json"))
+	audioReady := processorErr == nil && tokenizerErr == nil &&
+		gemma4metadata.ValidateAudioRuntimeMetadata(cfg, processorData, tokenizerConfigData) == nil &&
 		gemma4metadata.ValidateAudioSourceInventory(cfg, tensors) == nil
+	return gemma4metadata.ValidateVisionSourceInventory(cfg, tensors) == nil, audioReady
 }
 
 // readChatTemplate returns the model's chat template, preferring the

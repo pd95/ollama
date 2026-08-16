@@ -609,6 +609,7 @@ func TestModelCapabilities(t *testing.T) {
 				TensorLayerNames:   gemma4AudioTensorNames(1),
 				Gemma4AudioConfig:  gemma4AudioConfig(1),
 				Gemma4AudioTensors: testGemma4AudioTensorDescriptors(1),
+				Gemma4AudioReady:   true,
 				Template:           chatTemplate,
 			},
 			expectedCaps: []model.Capability{model.CapabilityAudio},
@@ -718,6 +719,7 @@ func TestGemma4SafetensorsAudioCapabilityRequiresCompleteInventory(t *testing.T)
 		TensorLayerNames:   gemma4AudioTensorNames(1),
 		Gemma4AudioConfig:  gemma4AudioConfig(1),
 		Gemma4AudioTensors: testGemma4AudioTensorDescriptors(1),
+		Gemma4AudioReady:   true,
 	}
 	if !slices.Contains(complete.Capabilities(), model.CapabilityAudio) {
 		t.Fatal("complete audio inventory did not expose audio")
@@ -775,6 +777,12 @@ func TestGemma4InstalledAudioCapabilityDescriptorAndPayloadMatrix(t *testing.T) 
 		{name: "complete", want: true},
 		{name: "partial", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
 			return slices.DeleteFunc(layers, func(layer manifest.Layer) bool { return layer.Name == target })
+		}},
+		{name: "missing processor metadata", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return slices.DeleteFunc(layers, func(layer manifest.Layer) bool { return layer.Name == "processor_config.json" })
+		}},
+		{name: "missing tokenizer metadata", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
+			return slices.DeleteFunc(layers, func(layer manifest.Layer) bool { return layer.Name == "tokenizer_config.json" })
 		}},
 		{name: "near-match internal name", edit: func(t *testing.T, layers []manifest.Layer) []manifest.Layer {
 			return replaceGemma4AudioFixtureLayer(t, layers, target, target+".extra", gemma4metadata.TensorDescriptor{Dtype: "F32", Shape: []int32{3, 4}}, nil)
@@ -884,7 +892,7 @@ func TestGemma4InstalledAudioCapabilityRejectsUnboundedConfig(t *testing.T) {
 func gemma4AudioManifestLayers(t *testing.T) []manifest.Layer {
 	t.Helper()
 	descriptors := testGemma4AudioTensorDescriptors(1)
-	layers := make([]manifest.Layer, 0, len(descriptors)+1)
+	layers := make([]manifest.Layer, 0, len(descriptors)+3)
 	for name, descriptor := range descriptors {
 		layers = append(layers, gemma4AudioFixtureLayer(t, name, name, descriptor, nil))
 	}
@@ -894,6 +902,13 @@ func gemma4AudioManifestLayers(t *testing.T) []manifest.Layer {
 	}
 	digest := createTestBlob(t, config)
 	layers = append(layers, manifest.Layer{MediaType: "application/vnd.ollama.image.json", Digest: digest, Size: int64(len(config)), Name: "config.json"})
+	for name, data := range map[string][]byte{
+		"processor_config.json": []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`),
+		"tokenizer_config.json": []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`),
+	} {
+		digest := createTestBlob(t, data)
+		layers = append(layers, manifest.Layer{MediaType: "application/vnd.ollama.image.json", Digest: digest, Size: int64(len(data)), Name: name})
+	}
 	return layers
 }
 
@@ -1177,7 +1192,8 @@ func gemma4VisionConfig(layers int) *gemma4metadata.ConfigFile {
 
 func gemma4AudioConfig(layers int) *gemma4metadata.ConfigFile {
 	return &gemma4metadata.ConfigFile{
-		TextConfig: gemma4metadata.TextConfig{HiddenSize: 5},
+		TextConfig:   gemma4metadata.TextConfig{HiddenSize: 5, VocabSize: 32},
+		AudioTokenID: 7,
 		AudioConfig: &gemma4metadata.AudioConfig{
 			AttentionChunkSize: 2, AttentionContextLeft: 2,
 			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
