@@ -246,6 +246,31 @@ func TestVisionInventoryProducerAndNormalizationMatrix(t *testing.T) {
 	if err := ValidateVisionRuntimeInventory(cfg, runtime); err != nil {
 		t.Fatalf("normalized runtime error = %v", err)
 	}
+	for _, tt := range []struct {
+		name      string
+		bits      int32
+		groupSize int32
+	}{
+		{"mxfp4", 4, 32},
+		{"mxfp8", 8, 32},
+	} {
+		t.Run("normalized "+tt.name, func(t *testing.T) {
+			const floatTarget = "model.vision_tower.encoder.layers.0.mlp.down_proj.linear"
+			candidate := cloneDescriptors(dense)
+			candidate[floatTarget+".weight"] = TensorDescriptor{
+				Dtype: "U32", Shape: []int32{16, 32 / (32 / tt.bits)},
+				QuantType: tt.name, GroupSize: int(tt.groupSize),
+			}
+			candidate[floatTarget+".weight.scale"] = TensorDescriptor{Dtype: "U8", Shape: []int32{16, 32 / tt.groupSize}}
+			if err := ValidateVisionInstalledInventory(cfg, candidate); err != nil {
+				t.Fatalf("installed %s error = %v", tt.name, err)
+			}
+			delete(candidate, floatTarget+".weight.scale")
+			if err := ValidateVisionInstalledInventory(cfg, candidate); err == nil {
+				t.Fatalf("incomplete installed %s inventory accepted", tt.name)
+			}
+		})
+	}
 	for _, missing := range []string{target + ".weight.scale"} {
 		partial := cloneDescriptors(normalized)
 		delete(partial, missing)
