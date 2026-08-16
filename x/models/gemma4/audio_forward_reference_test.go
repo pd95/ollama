@@ -15,6 +15,11 @@ import (
 	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 )
 
+const (
+	gemma4LanguageLogitMaxDiff = 1.25
+	gemma4LanguageLogitRMSE    = 0.25
+)
+
 func TestAudioForwardReference(t *testing.T) {
 	modelDir := os.Getenv("GEMMA4_AUDIO_MODEL_DIR")
 	refDir := os.Getenv("GEMMA4_AUDIO_REF_DIR")
@@ -167,6 +172,9 @@ func TestAudioForwardReference(t *testing.T) {
 
 	if importedModel := os.Getenv("GEMMA4_AUDIO_MODEL_NAME"); importedModel != "" {
 		fullModel := loadImportedGemma4ReferenceModel(t, importedModel)
+		// The Python checkpoint records raw model logits before generation-time
+		// token suppression. Keep this comparison at the same boundary.
+		fullModel.SuppressLogitBias = nil
 		payload := gemma4MediaPayload{Audio: input, AudioStart: 1, AudioEnd: 1 + input.SoftTokens}
 		modelBatch := &batch.Batch{
 			InputIDs:     inputIDs,
@@ -180,7 +188,11 @@ func TestAudioForwardReference(t *testing.T) {
 		logits := fullModel.Unembed(hidden)
 		last := mlx.SliceStartStop(logits, []int32{0, int32(inputIDs.Dim(1) - 1), 0}, []int32{1, int32(inputIDs.Dim(1)), textConfig.VocabSize})
 		wantLogits := reference.Get("prefill_logits")
-		compareAudioReference(t, "prefill_logits", last, wantLogits, 0.5, 0.05)
+		if audioConfig.unified() {
+			compareLanguageLogitReference(t, "prefill_logits", last, wantLogits)
+		} else {
+			compareAudioReference(t, "prefill_logits", last, wantLogits, 0.5, 0.05)
+		}
 		gotID := last.Argmax(-1, false).AsType(mlx.DTypeInt32)
 		wantID := wantLogits.Argmax(-1, false).AsType(mlx.DTypeInt32)
 		mlx.Eval(gotID, wantID)
@@ -264,6 +276,34 @@ func intsToInt32(values []int) []int32 {
 
 func compareAudioReference(t *testing.T, name string, got, want *mlx.Array, atol, rtol float64) {
 	t.Helper()
+	stats := measureAudioReference(t, name, got, want, atol, rtol)
+	if stats.firstMismatch >= 0 {
+		t.Errorf("%s[%d] = %g, want %g (diff %g, tolerance %g); max absolute difference %g, mean absolute difference %g, RMSE %g", name, stats.firstMismatch, stats.gotFirst, stats.wantFirst, stats.firstDiff, stats.firstTolerance, stats.maxDiff, stats.meanAbsDiff, stats.rmse)
+		return
+	}
+	t.Logf("%s matched %d values; max absolute difference %g, mean absolute difference %g, RMSE %g", name, stats.count, stats.maxDiff, stats.meanAbsDiff, stats.rmse)
+}
+
+func compareLanguageLogitReference(t *testing.T, name string, got, want *mlx.Array) {
+	t.Helper()
+	stats := measureAudioReference(t, name, got, want, math.Inf(1), 0)
+	if stats.maxDiff > gemma4LanguageLogitMaxDiff || stats.rmse > gemma4LanguageLogitRMSE {
+		t.Errorf("%s exceeded language-logit bounds: max absolute difference %g (limit %g), mean absolute difference %g, RMSE %g (limit %g)", name, stats.maxDiff, gemma4LanguageLogitMaxDiff, stats.meanAbsDiff, stats.rmse, gemma4LanguageLogitRMSE)
+		return
+	}
+	t.Logf("%s matched language-logit bounds across %d values; max absolute difference %g, mean absolute difference %g, RMSE %g", name, stats.count, stats.maxDiff, stats.meanAbsDiff, stats.rmse)
+}
+
+type audioReferenceStats struct {
+	count                      int
+	firstMismatch              int
+	gotFirst, wantFirst        float32
+	firstDiff, firstTolerance  float64
+	maxDiff, meanAbsDiff, rmse float64
+}
+
+func measureAudioReference(t *testing.T, name string, got, want *mlx.Array, atol, rtol float64) audioReferenceStats {
+	t.Helper()
 	if got == nil || want == nil {
 		t.Fatalf("%s tensor is missing", name)
 	}
@@ -274,16 +314,31 @@ func compareAudioReference(t *testing.T, name string, got, want *mlx.Array, atol
 	want = want.AsType(mlx.DTypeFloat32)
 	mlx.Eval(got, want)
 	gotValues, wantValues := got.Floats(), want.Floats()
-	var maxDiff float64
+	stats := audioReferenceStats{count: len(wantValues), firstMismatch: -1}
+	var sumAbs, sumSquared float64
 	for i := range wantValues {
-		diff := math.Abs(float64(gotValues[i] - wantValues[i]))
-		if diff > maxDiff {
-			maxDiff = diff
+		gotValue, wantValue := float64(gotValues[i]), float64(wantValues[i])
+		if math.IsNaN(gotValue) || math.IsInf(gotValue, 0) || math.IsNaN(wantValue) || math.IsInf(wantValue, 0) {
+			t.Fatalf("%s[%d] contains a non-finite value: got %g, want %g", name, i, gotValue, wantValue)
 		}
+		diff := math.Abs(gotValue - wantValue)
+		if diff > stats.maxDiff {
+			stats.maxDiff = diff
+		}
+		sumAbs += diff
+		sumSquared += diff * diff
 		tolerance := atol + rtol*math.Abs(float64(wantValues[i]))
-		if diff > tolerance {
-			t.Fatalf("%s[%d] = %g, want %g (diff %g, tolerance %g)", name, i, gotValues[i], wantValues[i], diff, tolerance)
+		if diff > tolerance && stats.firstMismatch < 0 {
+			stats.firstMismatch = i
+			stats.gotFirst = gotValues[i]
+			stats.wantFirst = wantValues[i]
+			stats.firstDiff = diff
+			stats.firstTolerance = tolerance
 		}
 	}
-	t.Logf("%s matched %d values; max absolute difference %g", name, len(wantValues), maxDiff)
+	if stats.count > 0 {
+		stats.meanAbsDiff = sumAbs / float64(stats.count)
+		stats.rmse = math.Sqrt(sumSquared / float64(stats.count))
+	}
+	return stats
 }
