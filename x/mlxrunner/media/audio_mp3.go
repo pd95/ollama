@@ -87,17 +87,17 @@ func DecodeMP3(ctx context.Context, data []byte, opts MP3DecodeOptions) ([]float
 			return nil, errors.New("failed while decoding MP3 audio")
 		}
 		count := int(read)
+		for _, sample := range chunk[:count] {
+			if math.IsNaN(float64(sample)) || math.IsInf(float64(sample), 0) {
+				return nil, errors.New("MP3 contains a non-finite sample")
+			}
+		}
 		if count > remaining {
 			if opts.Overflow == AudioOverflowTruncate {
 				samples = append(samples, chunk[:remaining]...)
 				return validateDecodedMP3(samples)
 			}
 			return nil, fmt.Errorf("MP3 audio exceeds limit of %d samples", opts.MaxSamples)
-		}
-		for _, sample := range chunk[:count] {
-			if math.IsNaN(float64(sample)) || math.IsInf(float64(sample), 0) {
-				return nil, errors.New("MP3 contains a non-finite sample")
-			}
 		}
 		samples = append(samples, chunk[:count]...)
 		if count < want {
