@@ -11,6 +11,7 @@ package audio
 import "C"
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -21,6 +22,13 @@ import (
 // maxSamples is a test hook; zero applies maxAudioSeconds after the decoder
 // reports the source rate.
 func decodeMP3(data []byte, maxInputBytes, maxSamples int) ([]float32, int, error) {
+	return decodeMP3Context(context.Background(), data, maxInputBytes, maxSamples)
+}
+
+func decodeMP3Context(ctx context.Context, data []byte, maxInputBytes, maxSamples int) ([]float32, int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	if maxInputBytes <= 0 || maxSamples < 0 {
 		return nil, 0, errors.New("invalid MP3 decode limits")
 	}
@@ -54,6 +62,9 @@ func decodeMP3(data []byte, maxInputBytes, maxSamples int) ([]float32, int, erro
 	chunk := make([]float32, chunkFrames)
 	samples := make([]float32, 0, min(maxSamples, chunkFrames))
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		want := chunkFrames
 		remaining := maxSamples - len(samples)
 		if remaining < want {

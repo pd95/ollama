@@ -119,7 +119,7 @@ func TestPrepareAudioMediaRejections(t *testing.T) {
 }
 
 func TestPrepareMP3AudioMedia(t *testing.T) {
-	encoded, err := os.ReadFile("../../mlxrunner/model/audio/testdata/bcn_weather_first_10_frames.mp3.base64")
+	encoded, err := os.ReadFile("../../mlxrunner/model/audio/testdata/synthetic_silence.mp3.base64")
 	if err != nil {
 		t.Fatal(err)
 	}
