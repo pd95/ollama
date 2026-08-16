@@ -267,6 +267,19 @@ func GetTensorQuantization(name string, shape []int32, quantize string) string {
 	if !stackedExpert && !ShouldQuantize(name, "") {
 		return ""
 	}
+	// Vision namespaces remain excluded by the generic policy. Architecture-
+	// specific policies may explicitly admit their known linear weights before
+	// calling the eligibility helper below.
+	if isVision(name) {
+		return ""
+	}
+	return getEligibleTensorQuantization(name, shape, quantize)
+}
+
+// getEligibleTensorQuantization chooses the quantization for a weight after an
+// architecture policy has established that its namespace is eligible.
+func getEligibleTensorQuantization(name string, shape []int32, quantize string) string {
+	stackedExpert := isStackedExpertWeight(name)
 
 	// Quantize standard linear weights (2D). Also allow stacked expert weights (3D),
 	// e.g. qwen switch_mlp / experts combined tensors.
@@ -297,11 +310,6 @@ func GetTensorQuantization(name string, shape []int32, quantize string) string {
 		if e := eightBit(quantNorm); isAligned(shape, e) {
 			return e
 		}
-		return ""
-	}
-
-	// Vision components are too quantization-sensitive; keep source precision.
-	if isVision(name) {
 		return ""
 	}
 

@@ -518,6 +518,7 @@ func testGemma4Root(t *testing.T, configData, tokenizerData []byte, extra map[st
 
 func tinyAudioConfig() *AudioConfig {
 	return &AudioConfig{
+		ModelType:          "gemma4_audio",
 		AttentionChunkSize: 2, AttentionContextLeft: 2, AttentionContextRight: 0,
 		AttentionInvalidLogit: -1e9, AttentionLogitCap: 50, ConvKernelSize: 3,
 		GradientClipping: 1e4, HiddenSize: 4, NumAttentionHeads: 2,

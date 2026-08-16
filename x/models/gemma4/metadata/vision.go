@@ -347,6 +347,14 @@ func ValidateVisionRuntimeInventory(cfg ConfigFile, tensors map[string]TensorDes
 	return validateInventory(cfg, tensors, runtimeMode)
 }
 
+// ValidateRuntimeLinearDescriptor validates one materialized linear against
+// the same normalized runtime contract used by the complete media inventory
+// validators. Loaders use this only for checks that require concrete arrays;
+// readiness and completeness remain owned by the full inventory validators.
+func ValidateRuntimeLinearDescriptor(cfg ConfigFile, tensors map[string]TensorDescriptor, path string, logical []int32) error {
+	return requireLinearDescriptor(tensors, path, logical, runtimeMode, cfg)
+}
+
 type inventoryMode int
 
 const (
@@ -678,24 +686,62 @@ func validateNormalizedQuant(t map[string]TensorDescriptor, base string, weight 
 		return fmt.Errorf("missing or invalid normalized scale %s", scaleName)
 	}
 	if strings.EqualFold(scale.Dtype, "U8") {
-		if !strings.EqualFold(weight.Dtype, "U32") || !packedWeightShape(weight.Shape, logical, 8) || !packedScaleShape(scale, logical, 16) {
-			return fmt.Errorf("invalid normalized NVFP4 descriptors for %s", base)
+		contractWeight := weight
+		if contractWeight.QuantType == "" {
+			quantization := sourceQuant(cfg)
+			contractWeight.QuantType = quantization.Mode
+			if contractWeight.GroupSize == 0 {
+				contractWeight.GroupSize = quantization.GroupSize
+			}
+		}
+		bits, groupSize, quantType, ok := normalizedFloatQuantContract(contractWeight)
+		if weight.QuantType == "" {
+			quantization := sourceQuant(cfg)
+			if quantization.Bits != 0 && quantization.Bits != bits {
+				ok = false
+			}
+			if quantization.GroupSize != 0 && quantization.GroupSize != groupSize {
+				ok = false
+			}
+			if quantization.Bits != 0 && quantization.GroupSize != 0 && quantization.Mode == "" {
+				ok = false
+			}
+			if quantization.Mode != "" && quantization.Mode != quantType {
+				ok = false
+			}
+		}
+		if !ok || !strings.EqualFold(weight.Dtype, "U32") ||
+			!packedWeightShape(weight.Shape, logical, int32(32/bits)) ||
+			!packedScaleShape(scale, logical, int32(groupSize)) {
+			return fmt.Errorf("invalid normalized floating-point quantization descriptors for %s", base)
 		}
 		if global, present := t[base+".weight.global_scale"]; present && (!isScalar(global.Shape) || !strings.EqualFold(global.Dtype, "F32")) {
 			return fmt.Errorf("invalid normalized global scale for %s", base)
 		}
 		if _, present := t[biasName]; present {
-			return fmt.Errorf("unexpected affine bias for normalized NVFP4 %s", base)
+			return fmt.Errorf("unexpected affine bias for normalized %s %s", quantType, base)
 		}
 		return nil
 	}
 	bits, groupSize, ok := inferAffineContract(weight, scale, logical)
-	q := sourceQuant(cfg)
-	if q.Bits > 0 && q.Bits != bits {
-		ok = false
-	}
-	if q.GroupSize > 0 && q.GroupSize != groupSize {
-		ok = false
+	if weight.QuantType != "" {
+		switch strings.ToLower(weight.QuantType) {
+		case "int4":
+			ok = ok && bits == 4
+		case "int8":
+			ok = ok && bits == 8
+		case "affine":
+		default:
+			ok = false
+		}
+	} else {
+		q := sourceQuant(cfg)
+		if q.Bits > 0 && q.Bits != bits {
+			ok = false
+		}
+		if q.GroupSize > 0 && q.GroupSize != groupSize {
+			ok = false
+		}
 	}
 	if weight.GroupSize > 0 && weight.GroupSize != groupSize {
 		ok = false
@@ -703,13 +749,38 @@ func validateNormalizedQuant(t map[string]TensorDescriptor, base string, weight 
 	if !ok || !isFloat(scale.Dtype) || !strings.EqualFold(weight.Dtype, "U32") {
 		return fmt.Errorf("invalid normalized affine descriptors for %s", base)
 	}
-	if bias, present := t[biasName]; present && (!isFloat(bias.Dtype) || !slices.Equal(bias.Shape, scale.Shape)) {
-		return fmt.Errorf("invalid normalized affine bias for %s", base)
+	if bias, present := t[biasName]; !present || !isFloat(bias.Dtype) || !slices.Equal(bias.Shape, scale.Shape) {
+		return fmt.Errorf("missing or invalid normalized affine bias %s", biasName)
 	}
 	if _, present := t[base+".weight.global_scale"]; present {
 		return fmt.Errorf("unexpected global scale for normalized affine %s", base)
 	}
 	return nil
+}
+
+func normalizedFloatQuantContract(weight TensorDescriptor) (bits, groupSize int, quantType string, ok bool) {
+	quantType = strings.ToLower(weight.QuantType)
+	switch quantType {
+	case "":
+		// Preserve the accepted normalized-NVFP4 representation, which
+		// predates explicit per-tensor quantization metadata.
+		return 4, 16, "nvfp4", weight.GroupSize == 0 || weight.GroupSize == 16
+	case "nvfp4":
+		groupSize = 16
+		bits = 4
+	case "mxfp4":
+		groupSize = 32
+		bits = 4
+	case "mxfp8":
+		groupSize = 32
+		bits = 8
+	default:
+		return 0, 0, quantType, false
+	}
+	if weight.GroupSize != 0 && weight.GroupSize != groupSize {
+		return 0, 0, quantType, false
+	}
+	return bits, groupSize, quantType, true
 }
 
 func inferAffineContract(weight, scale TensorDescriptor, logical []int32) (bits, groupSize int, ok bool) {
