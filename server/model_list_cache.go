@@ -412,10 +412,10 @@ func buildModelListSummary(name model.Name, mf *manifest.Manifest) (modelListSum
 }
 
 func filterUnsupportedModelListCapabilities(capabilities []model.Capability, cfg model.ConfigV2) []model.Capability {
-	if cfg.ModelFormat == "safetensors" && isGemma4Renderer(cfg.Renderer) &&
+	if isGemma4SafetensorsConfig(cfg) &&
 		(cfg.RemoteHost != "" || cfg.RemoteModel != "") {
 		capabilities = slices.DeleteFunc(capabilities, func(c model.Capability) bool {
-			return c == model.CapabilityAudio
+			return c == model.CapabilityVision || c == model.CapabilityAudio
 		})
 	}
 	if isNemotron3NanoSafetensorsConfig(cfg) {

@@ -204,6 +204,8 @@ func TestInferenceModelCacheGemma4AudioCapabilities(t *testing.T) {
 		t.Fatal("cold model did not retain Gemma 4 audio metadata")
 	}
 	first.Gemma4AudioConfig.AudioConfig.HiddenSize = 0
+	first.Gemma4AudioConfig.Architectures[0] = "mutated"
+	first.Gemma4AudioConfig.AudioConfig.SubsamplingConvChannels[0] = 0
 	mutatedTensor := false
 	for name, descriptor := range first.Gemma4AudioTensors {
 		if len(descriptor.Shape) == 0 {
@@ -229,7 +231,10 @@ func TestInferenceModelCacheGemma4AudioCapabilities(t *testing.T) {
 	if !slices.Contains(second.Capabilities(), model.CapabilityAudio) || !second.Gemma4AudioReady {
 		t.Fatalf("cached state = capabilities:%v ready:%t, want audio", second.Capabilities(), second.Gemma4AudioReady)
 	}
-	if second.Gemma4AudioConfig.AudioConfig.HiddenSize == 0 || len(second.Gemma4AudioTensors) == 0 {
+	if second.Gemma4AudioConfig.AudioConfig.HiddenSize == 0 ||
+		second.Gemma4AudioConfig.Architectures[0] == "mutated" ||
+		second.Gemma4AudioConfig.AudioConfig.SubsamplingConvChannels[0] == 0 ||
+		len(second.Gemma4AudioTensors) == 0 {
 		t.Fatal("cached Gemma 4 audio metadata was mutated")
 	}
 	for _, descriptor := range second.Gemma4AudioTensors {
