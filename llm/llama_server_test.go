@@ -834,6 +834,11 @@ func TestLlamaServerCompletionContextShiftAvoidsOneTokenHeadroomRegression(t *te
 
 func TestLlamaServerCompletionWithMediaUsesRunnerMarker(t *testing.T) {
 	var capturedReq llamaServerCompletionRequest
+	webpData := testLlamaServerWebP(t)
+	converted, mime, err := normalizeLlamaServerImageData(webpData)
+	if err != nil || mime != "image/png" {
+		t.Fatalf("normalize WebP = %q, %v", mime, err)
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
@@ -867,10 +872,10 @@ func TestLlamaServerCompletionWithMediaUsesRunnerMarker(t *testing.T) {
 	}
 
 	opts := api.DefaultOptions()
-	err := runner.Completion(t.Context(), CompletionRequest{
+	err = runner.Completion(t.Context(), CompletionRequest{
 		Prompt:  "look [img-7] now",
 		Options: &opts,
-		Media:   []MediaData{NewMediaData(7, []byte("media-bytes"))},
+		Media:   []MediaData{NewMediaData(7, webpData)},
 	}, func(cr CompletionResponse) {})
 	if err != nil {
 		t.Fatalf("Completion error: %v", err)
@@ -890,7 +895,7 @@ func TestLlamaServerCompletionWithMediaUsesRunnerMarker(t *testing.T) {
 	if len(data) != 1 {
 		t.Fatalf("multimodal_data len = %d, want 1", len(data))
 	}
-	if got, want := data[0], base64.StdEncoding.EncodeToString([]byte("media-bytes")); got != want {
+	if got, want := data[0], base64.StdEncoding.EncodeToString(converted); got != want {
 		t.Fatalf("multimodal_data[0] = %q, want %q", got, want)
 	}
 }
@@ -3682,10 +3687,7 @@ func TestLlamaServerChatMessageConvertsMediaParts(t *testing.T) {
 }
 
 func TestLlamaServerChatMessageConvertsWebPToPNG(t *testing.T) {
-	webpData, err := base64.StdEncoding.DecodeString("UklGRrIBAABXRUJQVlA4TKUBAAAvSsAYAA8w//M///MfeJAkbXvaSG7m8Q3GfYSBJekwQztm/IcZlgwnmWImn2BK7aFmBtnVir6q//8VOkFE/xm4baTIu8c48ArEo6+B3zFKYln3pqClSCKX0begFTAXFOLXHSyF8cCNcZEG4OywuA4KVVfJCiArU7GAgJI8+lJP/OKMT/fBAjevg1cYB7YVkFuWga2lyPi5I0HFy5YTpWIHg0RZpkniRVW9odHAKOwosWuOGdxIyn2OvaCDvhg/we6TwadPBPbqBV58MsLmMJ8yZnOWk8SRz4N+QoyPL+MnamzMvcE1rHNEr91F9GKZPVUcS9w7PhhH36suB9qPeYb/oLk6cuTiJ0wOK3m5h1cKjW6EVZCYMK7dxcKCBdgP9HkKr9gkAO2P8GKZGWVdIAatQa+1IDpt6qyorVwdy01xdW8Jkfk6xjEXmVQQ+HQdFr6OKhIN34dXWq0+0qr6EJSCeeVLH9+gvGTLyqM65PQ44ihzlTXxQKjKbAvshXgir7Lil9w4L2bvMycmjQcqXaMCO6BlY28i+FOLzbfI1vEqxAhotocAAA==")
-	if err != nil {
-		t.Fatal(err)
-	}
+	webpData := testLlamaServerWebP(t)
 	msg, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, webpData)}})
 	if err != nil {
 		t.Fatal(err)
@@ -3728,6 +3730,41 @@ func TestLlamaServerChatMessageConvertsWebPToPNG(t *testing.T) {
 	if _, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, bad)}}); err == nil || !strings.Contains(err.Error(), "WebP") {
 		t.Fatalf("malformed WebP error = %v", err)
 	}
+}
+
+func TestNormalizeLlamaServerWebPRejectsLimits(t *testing.T) {
+	data := testLlamaServerWebP(t)
+	if len(data) < 25 || string(data[12:16]) != "VP8L" {
+		t.Fatalf("unexpected WebP fixture header")
+	}
+	const width, height = 4096, 4096
+	bits := uint32(width-1) | uint32(height-1)<<14
+	data[21] = byte(bits)
+	data[22] = byte(bits >> 8)
+	data[23] = byte(bits >> 16)
+	data[24] = byte(bits >> 24)
+	if _, _, err := normalizeLlamaServerImageData(data); err == nil || !strings.Contains(err.Error(), "dimensions") {
+		t.Fatalf("oversized WebP error = %v", err)
+	}
+	if _, err := addLlamaServerMediaBytes(maxLlamaServerMediaRequestBytes, 1); err == nil || !strings.Contains(err.Error(), "cumulative") {
+		t.Fatalf("cumulative media error = %v", err)
+	}
+	if got, err := addLlamaServerMediaBytes(maxLlamaServerMediaRequestBytes-1, 1); err != nil || got != maxLlamaServerMediaRequestBytes {
+		t.Fatalf("exact cumulative limit = %d, %v", got, err)
+	}
+	w := limitedBytesBuffer{max: 1}
+	if _, err := w.Write([]byte{1, 2}); err == nil || !strings.Contains(err.Error(), "PNG") {
+		t.Fatalf("PNG output limit error = %v", err)
+	}
+}
+
+func testLlamaServerWebP(t *testing.T) []byte {
+	t.Helper()
+	data, err := base64.StdEncoding.DecodeString("UklGRrIBAABXRUJQVlA4TKUBAAAvSsAYAA8w//M///MfeJAkbXvaSG7m8Q3GfYSBJekwQztm/IcZlgwnmWImn2BK7aFmBtnVir6q//8VOkFE/xm4baTIu8c48ArEo6+B3zFKYln3pqClSCKX0begFTAXFOLXHSyF8cCNcZEG4OywuA4KVVfJCiArU7GAgJI8+lJP/OKMT/fBAjevg1cYB7YVkFuWga2lyPi5I0HFy5YTpWIHg0RZpkniRVW9odHAKOwosWuOGdxIyn2OvaCDvhg/we6TwadPBPbqBV58MsLmMJ8yZnOWk8SRz4N+QoyPL+MnamzMvcE1rHNEr91F9GKZPVUcS9w7PhhH36suB9qPeYb/oLk6cuTiJ0wOK3m5h1cKjW6EVZCYMK7dxcKCBdgP9HkKr9gkAO2P8GKZGWVdIAatQa+1IDpt6qyorVwdy01xdW8Jkfk6xjEXmVQQ+HQdFr6OKhIN34dXWq0+0qr6EJSCeeVLH9+gvGTLyqM65PQ44ihzlTXxQKjKbAvshXgir7Lil9w4L2bvMycmjQcqXaMCO6BlY28i+FOLzbfI1vEqxAhotocAAA==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestFindLlamaServer(t *testing.T) {
