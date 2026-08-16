@@ -1,22 +1,22 @@
 package metadata
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
 )
 
-const gemma4AudioFeatureSize = 128
-
 const (
-	maxAudioHiddenSize   = 8_192
-	maxAudioLayers       = 128
-	maxAudioHeads        = 256
-	maxAudioOutputDims   = 16_384
-	maxAudioConvChannels = 4_096
-	maxAudioKernelSize   = 255
-	maxAudioContextSize  = 4_096
-	maxTextHiddenSize    = 65_536
+	gemma4AudioFeatureSize = 128
+	maxAudioHiddenSize     = 8192
+	maxAudioLayers         = 128
+	maxAudioHeads          = 256
+	maxAudioOutputDims     = 16384
+	maxAudioConvChannels   = 4096
+	maxAudioKernelSize     = 255
+	maxAudioContextSize    = 4096
+	maxTextHiddenSize      = 65536
 )
 
 type AudioConfig struct {
@@ -30,6 +30,69 @@ type AudioConfig struct {
 	OutputProjDims          int   `json:"output_proj_dims"`
 	SubsamplingConvChannels []int `json:"subsampling_conv_channels"`
 	UseClippedLinears       bool  `json:"use_clipped_linears"`
+}
+
+type audioProcessorConfig struct {
+	AudioSequenceLength int `json:"audio_seq_length"`
+	FeatureExtractor    struct {
+		Dither           float64   `json:"dither"`
+		FeatureSize      int       `json:"feature_size"`
+		FFTLength        int       `json:"fft_length"`
+		FFTOverdrive     bool      `json:"fft_overdrive"`
+		FrameLength      int       `json:"frame_length"`
+		HopLength        int       `json:"hop_length"`
+		InputScaleFactor float64   `json:"input_scale_factor"`
+		MaxFrequency     float64   `json:"max_frequency"`
+		MelFloor         float64   `json:"mel_floor"`
+		MinFrequency     float64   `json:"min_frequency"`
+		PaddingSide      string    `json:"padding_side"`
+		PerBinMean       []float64 `json:"per_bin_mean"`
+		PerBinStddev     []float64 `json:"per_bin_stddev"`
+		Preemphasis      float64   `json:"preemphasis"`
+		SamplingRate     int       `json:"sampling_rate"`
+	} `json:"feature_extractor"`
+}
+
+// ValidateAudioRuntimeMetadata verifies the processor and tokenizer metadata
+// required by the native Gemma 4 audio path. It deliberately accepts only the
+// released processor contract implemented by the runner.
+func ValidateAudioRuntimeMetadata(cfg ConfigFile, processorData, tokenizerConfigData []byte) error {
+	if err := validateAudioConfig(cfg); err != nil {
+		return err
+	}
+	var processor audioProcessorConfig
+	if len(processorData) == 0 {
+		return fmt.Errorf("missing processor_config.json")
+	}
+	if err := json.Unmarshal(processorData, &processor); err != nil {
+		return fmt.Errorf("parse processor_config.json: %w", err)
+	}
+	f := processor.FeatureExtractor
+	if processor.AudioSequenceLength != 750 || f.FeatureSize != 128 || f.SamplingRate != 16000 ||
+		f.FrameLength != 320 || f.HopLength != 160 || f.FFTLength != 512 || f.FFTOverdrive ||
+		f.Dither != 0 || f.InputScaleFactor != 1 || f.MinFrequency != 0 || f.MaxFrequency != 8000 ||
+		f.MelFloor != 1e-3 || f.Preemphasis != 0 || f.PaddingSide != "right" ||
+		len(f.PerBinMean) != 0 || len(f.PerBinStddev) != 0 {
+		return fmt.Errorf("unsupported Gemma 4 audio processor configuration")
+	}
+	if cfg.AudioTokenID <= 0 || cfg.TextConfig.VocabSize <= cfg.AudioTokenID {
+		return fmt.Errorf("invalid Gemma 4 audio token id %d", cfg.AudioTokenID)
+	}
+	if len(tokenizerConfigData) == 0 {
+		return fmt.Errorf("missing tokenizer_config.json")
+	}
+	var tokens struct {
+		BOA   string `json:"boa_token"`
+		Audio string `json:"audio_token"`
+		EOA   string `json:"eoa_token"`
+	}
+	if err := json.Unmarshal(tokenizerConfigData, &tokens); err != nil {
+		return fmt.Errorf("parse tokenizer_config.json: %w", err)
+	}
+	if tokens.BOA == "" || tokens.Audio == "" || tokens.EOA == "" {
+		return fmt.Errorf("missing Gemma 4 audio tokenizer tokens")
+	}
+	return nil
 }
 
 // ValidateAudioTensors verifies the normalized tensor names required by the
