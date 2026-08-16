@@ -336,6 +336,29 @@ func TestGemma4AudioInputFailures(t *testing.T) {
 	}
 }
 
+func TestGemma4WAVValidationLimits(t *testing.T) {
+	if _, err := decodeGemma4WAV(context.Background(), make([]byte, maxGemma4AudioBytes+1), 16000); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("oversized WAV error = %v", err)
+	}
+	tooManyChannels := makeTestWAV(t, 1, 16, 16000, [][]float64{make([]float64, maxGemma4AudioChannels+1)})
+	if _, err := decodeGemma4WAV(context.Background(), tooManyChannels, 16000); err == nil || !strings.Contains(err.Error(), "channel count") {
+		t.Fatalf("channel-limit error = %v", err)
+	}
+	badRate := makeTestWAV(t, 1, 16, minGemma4AudioSampleRate-1, [][]float64{{0}})
+	if _, err := decodeGemma4WAV(context.Background(), badRate, 16000); err == nil || !strings.Contains(err.Error(), "sample rate") {
+		t.Fatalf("sample-rate error = %v", err)
+	}
+	badAlignment := makeTestWAV(t, 1, 16, 16000, [][]float64{{0}})
+	binary.LittleEndian.PutUint16(badAlignment[32:34], 1)
+	if _, err := decodeGemma4WAV(context.Background(), badAlignment, 16000); err == nil || !strings.Contains(err.Error(), "block alignment") {
+		t.Fatalf("block-alignment error = %v", err)
+	}
+	nonFinite := makeTestWAV(t, 3, 32, 16000, [][]float64{{math.NaN()}})
+	if _, err := decodeGemma4WAV(context.Background(), nonFinite, 16000); err == nil || !strings.Contains(err.Error(), "non-finite") {
+		t.Fatalf("non-finite error = %v", err)
+	}
+}
+
 func TestGemma4AudioCancellationBeforeAllocations(t *testing.T) {
 	cfg := defaultAudioProcessorConfig()
 	frames := make([][]float64, 400)

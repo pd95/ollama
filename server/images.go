@@ -89,6 +89,7 @@ type Model struct {
 	Gemma4VisionTensors map[string]gemma4metadata.TensorDescriptor `json:"-"`
 	Gemma4AudioConfig   *gemma4metadata.ConfigFile                 `json:"-"`
 	Gemma4AudioTensors  map[string]gemma4metadata.TensorDescriptor `json:"-"`
+	Gemma4AudioReady    bool                                       `json:"-"`
 	System              string
 	License             []string
 	Digest              string
@@ -514,6 +515,7 @@ func suppressAudioCapability(m *Model, arch string) bool {
 			return true
 		}
 		return m.Gemma4AudioConfig == nil ||
+			!m.Gemma4AudioReady ||
 			gemma4metadata.ValidateAudioInstalledInventory(*m.Gemma4AudioConfig, m.Gemma4AudioTensors) != nil
 	}
 	if m.Config.ModelFormat == "safetensors" && m.Config.Renderer == "glimmer" {
@@ -560,6 +562,13 @@ func hasGemma4VisionTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifes
 func hasGemma4AudioTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifest.Layer) bool {
 	tensors, err := gemma4AudioTensorDescriptors(layers)
 	return err == nil && gemma4metadata.ValidateAudioInstalledInventory(cfg, tensors) == nil
+}
+
+func hasGemma4AudioRuntimeMetadata(cfg gemma4metadata.ConfigFile, mf *manifest.Manifest) bool {
+	var processorData, tokenizerConfigData json.RawMessage
+	return mf.ReadConfigJSON("processor_config.json", &processorData) == nil &&
+		mf.ReadConfigJSON("tokenizer_config.json", &tokenizerConfigData) == nil &&
+		gemma4metadata.ValidateAudioRuntimeMetadata(cfg, processorData, tokenizerConfigData) == nil
 }
 
 func gemma4AudioTensorDescriptors(layers []manifest.Layer) (map[string]gemma4metadata.TensorDescriptor, error) {
@@ -999,6 +1008,7 @@ func GetModel(name string) (*Model, error) {
 		if err := mf.ReadConfigJSON("config.json", &cfg); err == nil {
 			m.Gemma4VisionConfig = &cfg
 			m.Gemma4AudioConfig = &cfg
+			m.Gemma4AudioReady = hasGemma4AudioRuntimeMetadata(cfg, mf)
 			if tensors, err := gemma4VisionTensorDescriptors(mf.Layers); err == nil {
 				m.Gemma4VisionTensors = tensors
 			}
