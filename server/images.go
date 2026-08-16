@@ -509,8 +509,11 @@ func suppressVisionCapability(m *Model) bool {
 }
 
 func suppressGemma4SafetensorsVisionCapability(m *Model) bool {
-	if m == nil || !isLocalGemma4SafetensorsConfig(m.Config) {
+	if m == nil || !isGemma4SafetensorsConfig(m.Config) {
 		return false
+	}
+	if !isLocalGemma4SafetensorsConfig(m.Config) {
+		return true
 	}
 
 	return m.Gemma4VisionConfig == nil || gemma4metadata.ValidateVisionInstalledInventory(*m.Gemma4VisionConfig, m.Gemma4VisionTensors) != nil
@@ -555,10 +558,13 @@ func isNemotron3NanoSafetensorsConfig(cfg model.ConfigV2) bool {
 }
 
 func isLocalGemma4SafetensorsConfig(cfg model.ConfigV2) bool {
-	return cfg.ModelFormat == "safetensors" &&
-		isGemma4Renderer(cfg.Renderer) &&
+	return isGemma4SafetensorsConfig(cfg) &&
 		cfg.RemoteHost == "" &&
 		cfg.RemoteModel == ""
+}
+
+func isGemma4SafetensorsConfig(cfg model.ConfigV2) bool {
+	return cfg.ModelFormat == "safetensors" && isGemma4Renderer(cfg.Renderer)
 }
 
 func hasGemma4VisionTensorLayers(cfg gemma4metadata.ConfigFile, layers []manifest.Layer) bool {
@@ -618,7 +624,12 @@ func gemma4AudioTensorDescriptors(layers []manifest.Layer) (map[string]gemma4met
 				return nil, fmt.Errorf("Gemma4 audio tensor inventory exceeds descriptor work limit %d", maxGemma4VisionDescriptorWork)
 			}
 			descriptorWork += work
-			tensors[name] = gemma4metadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
+			descriptor, err := gemma4TensorDescriptor(tensor, ext.metadata)
+			if err != nil {
+				ext.Close()
+				return nil, err
+			}
+			tensors[name] = descriptor
 		}
 		if err := ext.Close(); err != nil {
 			return nil, err
@@ -634,7 +645,9 @@ func gemma4VisionTensorDescriptors(layers []manifest.Layer) (map[string]gemma4me
 		if layer.MediaType != manifest.MediaTypeImageTensor {
 			continue
 		}
-		if !strings.Contains(layer.Name, "vision_tower.") && !strings.Contains(layer.Name, "embed_vision.") {
+		if !strings.Contains(layer.Name, "vision_tower.") &&
+			!strings.Contains(layer.Name, "vision_embedder.") &&
+			!strings.Contains(layer.Name, "embed_vision.") {
 			continue
 		}
 		filename, err := manifest.BlobsPath(layer.Digest)
@@ -666,7 +679,12 @@ func gemma4VisionTensorDescriptors(layers []manifest.Layer) (map[string]gemma4me
 				return nil, fmt.Errorf("Gemma4 vision tensor inventory exceeds descriptor work limit %d", maxGemma4VisionDescriptorWork)
 			}
 			descriptorWork += work
-			tensors[name] = gemma4metadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
+			descriptor, err := gemma4TensorDescriptor(tensor, ext.metadata)
+			if err != nil {
+				ext.Close()
+				return nil, err
+			}
+			tensors[name] = descriptor
 		}
 		if err := ext.Close(); err != nil {
 			return nil, err
@@ -675,7 +693,12 @@ func gemma4VisionTensorDescriptors(layers []manifest.Layer) (map[string]gemma4me
 	return tensors, nil
 }
 
-func openGemma4TensorLayer(filename string) (extractor *safetensors.TensorExtractor, err error) {
+type gemma4TensorLayer struct {
+	*safetensors.TensorExtractor
+	metadata map[string]string
+}
+
+func openGemma4TensorLayer(filename string) (layer *gemma4TensorLayer, err error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -708,16 +731,72 @@ func openGemma4TensorLayer(filename string) (extractor *safetensors.TensorExtrac
 		f.Close()
 		return nil, err
 	}
+	metadata, err := gemma4SafetensorsMetadata(header)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
 	if err := f.Close(); err != nil {
 		return nil, err
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			extractor = nil
+			layer = nil
 			err = fmt.Errorf("invalid safetensors header: %v", recovered)
 		}
 	}()
-	return safetensors.OpenForExtraction(filename)
+	extractor, err := safetensors.OpenForExtraction(filename)
+	if err != nil {
+		return nil, err
+	}
+	return &gemma4TensorLayer{TensorExtractor: extractor, metadata: metadata}, nil
+}
+
+func gemma4SafetensorsMetadata(header []byte) (map[string]string, error) {
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(header, &entries); err != nil {
+		return nil, fmt.Errorf("parse safetensors header: %w", err)
+	}
+	raw, ok := entries["__metadata__"]
+	if !ok {
+		return nil, nil
+	}
+	var metadata map[string]string
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return nil, fmt.Errorf("parse safetensors metadata: %w", err)
+	}
+	return metadata, nil
+}
+
+func gemma4TensorDescriptor(tensor *safetensors.TensorData, metadata map[string]string) (gemma4metadata.TensorDescriptor, error) {
+	descriptor := gemma4metadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
+	if !strings.EqualFold(tensor.Dtype, "U32") {
+		return descriptor, nil
+	}
+
+	quantType, quantSpecific := metadata[tensor.Name+".quant_type"]
+	groupValue, groupSpecific := metadata[tensor.Name+".group_size"]
+	if quantSpecific != groupSpecific {
+		return gemma4metadata.TensorDescriptor{}, fmt.Errorf("incomplete quantization metadata for %s", tensor.Name)
+	}
+	if !quantSpecific {
+		quantType, quantSpecific = metadata["quant_type"]
+		groupValue, groupSpecific = metadata["group_size"]
+		if quantSpecific != groupSpecific {
+			return gemma4metadata.TensorDescriptor{}, fmt.Errorf("incomplete quantization metadata for %s", tensor.Name)
+		}
+	}
+	if !quantSpecific {
+		return descriptor, nil
+	}
+
+	groupSize, err := strconv.ParseInt(groupValue, 10, 32)
+	if err != nil || groupSize <= 0 {
+		return gemma4metadata.TensorDescriptor{}, fmt.Errorf("invalid quantization group_size %q for %s", groupValue, tensor.Name)
+	}
+	descriptor.QuantType = strings.ToLower(quantType)
+	descriptor.GroupSize = int(groupSize)
+	return descriptor, nil
 }
 
 type gemma4SafetensorInfo struct {

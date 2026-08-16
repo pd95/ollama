@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -614,6 +615,24 @@ func TestModelCapabilities(t *testing.T) {
 			},
 			expectedCaps: []model.Capability{model.CapabilityAudio},
 		},
+		{
+			name: "remote gemma4 safetensors suppresses local media",
+			model: Model{
+				Config: model.ConfigV2{
+					ModelFormat:  "safetensors",
+					Renderer:     gemma4RendererLarge,
+					RemoteHost:   "https://example.invalid",
+					Capabilities: []string{"vision", "audio"},
+				},
+				Gemma4VisionConfig:  gemma4VisionConfig(2),
+				Gemma4VisionTensors: testGemma4VisionTensorDescriptors(2),
+				Gemma4AudioConfig:   gemma4AudioConfig(1),
+				Gemma4AudioTensors:  testGemma4AudioTensorDescriptors(1),
+				Gemma4AudioReady:    true,
+				Template:            chatTemplate,
+			},
+			expectedCaps: nil,
+		},
 	}
 
 	// compare two slices of model.Capability regardless of order
@@ -710,6 +729,34 @@ func TestGemma4SafetensorsVisionCapabilityRequiresTensorLayers(t *testing.T) {
 	}
 }
 
+func TestGemma4SafetensorsVisionCapabilityReadsInstalledQuantMetadata(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	const projection = "model.embed_vision.embedding_projection"
+	descriptors := testGemma4VisionTensorDescriptorsForGeometry(1, 32, 64, 32, 2, 32, 32)
+	descriptors[projection+".weight"] = gemma4metadata.TensorDescriptor{
+		Dtype: "U32", Shape: []int32{32, 8}, QuantType: "mxfp8", GroupSize: 32,
+	}
+	descriptors[projection+".weight.scale"] = gemma4metadata.TensorDescriptor{Dtype: "U8", Shape: []int32{32, 1}}
+	config := []byte(`{"text_config":{"hidden_size":32},"vision_config":{"hidden_size":32,"intermediate_size":64,"num_hidden_layers":1,"num_attention_heads":1,"num_key_value_heads":1,"head_dim":32,"default_output_length":1,"patch_size":2,"position_embedding_size":32,"pooling_kernel_size":1}}`)
+	layers := gemma4VisionManifestLayersFromDescriptors(t, descriptors, config)
+
+	createSafetensorsTestModel(t, "gemma4-quantized-vision", model.ConfigV2{
+		ModelFormat: "safetensors", Renderer: gemma4RendererLarge,
+		Capabilities: []string{"completion", "vision"},
+	}, layers)
+	m, err := GetModel("gemma4-quantized-vision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(m.Capabilities(), model.CapabilityVision) {
+		t.Fatalf("quantized capabilities = %v, want vision", m.Capabilities())
+	}
+	got := m.Gemma4VisionTensors[projection+".weight"]
+	if got.QuantType != "mxfp8" || got.GroupSize != 32 {
+		t.Fatalf("installed quantization descriptor = %+v, want mxfp8/group32", got)
+	}
+}
+
 func TestGemma4SafetensorsAudioCapabilityRequiresCompleteInventory(t *testing.T) {
 	complete := Model{
 		Config: model.ConfigV2{
@@ -755,15 +802,15 @@ func TestGemma4SafetensorsAudioCapabilityRequiresCompleteInventory(t *testing.T)
 
 	remoteCfg := complete.Config
 	remoteCfg.RemoteHost = "https://example.invalid"
-	remoteCaps := filterUnsupportedModelListCapabilities([]model.Capability{model.CapabilityCompletion, model.CapabilityAudio}, remoteCfg)
-	if slices.Contains(remoteCaps, model.CapabilityAudio) {
-		t.Fatal("remote Gemma 4 list capability exposed unsupported local audio")
+	remoteCaps := filterUnsupportedModelListCapabilities([]model.Capability{model.CapabilityCompletion, model.CapabilityVision, model.CapabilityAudio}, remoteCfg)
+	if slices.Contains(remoteCaps, model.CapabilityVision) || slices.Contains(remoteCaps, model.CapabilityAudio) {
+		t.Fatal("remote Gemma 4 list capability exposed unsupported local media")
 	}
 	otherCfg := remoteCfg
 	otherCfg.Renderer = "other"
-	otherCaps := filterUnsupportedModelListCapabilities([]model.Capability{model.CapabilityCompletion, model.CapabilityAudio}, otherCfg)
-	if !slices.Contains(otherCaps, model.CapabilityAudio) {
-		t.Fatal("remote non-Gemma audio capability was suppressed")
+	otherCaps := filterUnsupportedModelListCapabilities([]model.Capability{model.CapabilityCompletion, model.CapabilityVision, model.CapabilityAudio}, otherCfg)
+	if !slices.Contains(otherCaps, model.CapabilityVision) || !slices.Contains(otherCaps, model.CapabilityAudio) {
+		t.Fatal("remote non-Gemma media capability was suppressed")
 	}
 }
 
@@ -1038,9 +1085,9 @@ func gemma4AudioFixtureLayer(t *testing.T, manifestName, internalName string, de
 		if err != nil {
 			t.Fatal(err)
 		}
-		built, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader([]*safetensors.TensorData{
+		built, err := io.ReadAll(safetensors.BuildPackedSafetensorsReaderWithMetadata([]*safetensors.TensorData{
 			safetensors.NewTensorDataFromBytes(internalName, descriptor.Dtype, descriptor.Shape, make([]byte, int(size))),
-		}))
+		}, gemma4DescriptorMetadata(descriptor)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1178,9 +1225,44 @@ func TestGemma4UnifiedAudioCapabilityRequiresProjection(t *testing.T) {
 
 func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
 	t.Helper()
+	config := []byte(`{"text_config":{"hidden_size":6},"vision_config":{"hidden_size":4,"intermediate_size":8,"num_hidden_layers":2,"num_attention_heads":1,"num_key_value_heads":1,"head_dim":4,"default_output_length":1,"patch_size":2,"position_embedding_size":16,"pooling_kernel_size":1}}`)
+	layers := gemma4VisionManifestLayersFromDescriptors(t, testGemma4VisionTensorDescriptors(2), config)
+	descriptors, err := gemma4VisionTensorDescriptors(layers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gemma4metadata.ValidateVisionInstalledInventory(*gemma4VisionConfig(2), descriptors); err != nil {
+		t.Fatalf("validate Gemma4 descriptor fixture: %v", err)
+	}
+	return layers
+}
 
-	layers := make([]manifest.Layer, 0, len(gemma4VisionTensorNames(2))+1)
-	for name, descriptor := range testGemma4VisionTensorDescriptors(2) {
+func gemma4UnifiedVisionManifestLayers(t *testing.T, complete bool) []manifest.Layer {
+	t.Helper()
+	descriptors := map[string]gemma4metadata.TensorDescriptor{
+		"model.vision_embedder.patch_ln1.weight":         {Dtype: "F32", Shape: []int32{12}},
+		"model.vision_embedder.patch_ln1.bias":           {Dtype: "F32", Shape: []int32{12}},
+		"model.vision_embedder.patch_dense.weight":       {Dtype: "F32", Shape: []int32{3, 12}},
+		"model.vision_embedder.patch_dense.bias":         {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.patch_ln2.weight":         {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.patch_ln2.bias":           {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.pos_embedding":            {Dtype: "F32", Shape: []int32{4, 2, 3}},
+		"model.vision_embedder.pos_norm.weight":          {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.pos_norm.bias":            {Dtype: "F32", Shape: []int32{3}},
+		"model.embed_vision.embedding_projection.weight": {Dtype: "F32", Shape: []int32{5, 3}},
+	}
+	if !complete {
+		delete(descriptors, "model.vision_embedder.pos_norm.bias")
+	}
+	config := []byte(`{"architectures":["Gemma4UnifiedForConditionalGeneration"],"model_type":"gemma4_unified","text_config":{"hidden_size":5},"vision_config":{"model_type":"gemma4_unified_vision","mm_embed_dim":3,"mm_posemb_size":4,"model_patch_size":2,"num_soft_tokens":2,"patch_size":1,"pooling_kernel_size":2}}`)
+	return gemma4VisionManifestLayersFromDescriptors(t, descriptors, config)
+}
+
+func gemma4VisionManifestLayersFromDescriptors(t *testing.T, descriptors map[string]gemma4metadata.TensorDescriptor, config []byte) []manifest.Layer {
+	t.Helper()
+
+	layers := make([]manifest.Layer, 0, len(descriptors)+1)
+	for name, descriptor := range descriptors {
 		shape := make([]int64, len(descriptor.Shape))
 		for i, dim := range descriptor.Shape {
 			shape[i] = int64(dim)
@@ -1189,9 +1271,9 @@ func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
 		if err != nil {
 			t.Fatal(err)
 		}
-		data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReader([]*safetensors.TensorData{
+		data, err := io.ReadAll(safetensors.BuildPackedSafetensorsReaderWithMetadata([]*safetensors.TensorData{
 			safetensors.NewTensorDataFromBytes(name, descriptor.Dtype, descriptor.Shape, make([]byte, int(payloadSize))),
-		}))
+		}, gemma4DescriptorMetadata(descriptor)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1203,7 +1285,6 @@ func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
 			Name:      name,
 		})
 	}
-	config := []byte(`{"text_config":{"hidden_size":6},"vision_config":{"hidden_size":4,"intermediate_size":8,"num_hidden_layers":2,"num_attention_heads":1,"num_key_value_heads":1,"head_dim":4,"default_output_length":1,"patch_size":2,"position_embedding_size":16,"pooling_kernel_size":1}}`)
 	configDigest := createTestBlob(t, config)
 	layers = append(layers, manifest.Layer{
 		MediaType: "application/vnd.ollama.image.json",
@@ -1211,12 +1292,22 @@ func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
 		Size:      int64(len(config)),
 		Name:      "config.json",
 	})
-	if descriptors, err := gemma4VisionTensorDescriptors(layers); err != nil {
+	if got, err := gemma4VisionTensorDescriptors(layers); err != nil {
 		t.Fatalf("read Gemma4 descriptor fixture: %v", err)
-	} else if err := gemma4metadata.ValidateVisionInstalledInventory(*gemma4VisionConfig(2), descriptors); err != nil {
-		t.Fatalf("validate Gemma4 descriptor fixture: %v", err)
+	} else if len(got) != len(descriptors) {
+		t.Fatalf("hydrated descriptor count = %d, want %d", len(got), len(descriptors))
 	}
 	return layers
+}
+
+func gemma4DescriptorMetadata(descriptor gemma4metadata.TensorDescriptor) map[string]string {
+	if descriptor.QuantType == "" || descriptor.GroupSize <= 0 {
+		return nil
+	}
+	return map[string]string{
+		"quant_type": descriptor.QuantType,
+		"group_size": strconv.Itoa(descriptor.GroupSize),
+	}
 }
 
 func TestOpenGemma4TensorLayerRejectsUnsafeHeaders(t *testing.T) {
@@ -1321,8 +1412,10 @@ func gemma4VisionConfig(layers int) *gemma4metadata.ConfigFile {
 
 func gemma4AudioConfig(layers int) *gemma4metadata.ConfigFile {
 	return &gemma4metadata.ConfigFile{
-		TextConfig:   gemma4metadata.TextConfig{HiddenSize: 5, VocabSize: 32},
-		AudioTokenID: 7,
+		Architectures: []string{"Gemma4ForConditionalGeneration"},
+		ModelType:     "gemma4",
+		TextConfig:    gemma4metadata.TextConfig{HiddenSize: 5, VocabSize: 32},
+		AudioTokenID:  7,
 		AudioConfig: &gemma4metadata.AudioConfig{
 			ModelType:          "gemma4_audio",
 			AttentionChunkSize: 2, AttentionContextLeft: 2,
