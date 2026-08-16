@@ -930,6 +930,20 @@ func TestLlamaServerCompletionWithMediaUsesRunnerMarker(t *testing.T) {
 	if got, want := data[0], base64.StdEncoding.EncodeToString(converted); got != want {
 		t.Fatalf("multimodal_data[0] = %q, want %q", got, want)
 	}
+
+	overLimitWebP := append(append([]byte(nil), webpData...), make([]byte, 22<<20-len(webpData))...)
+	err = runner.Completion(t.Context(), CompletionRequest{
+		Prompt:  "look [img-0] [img-1] [img-2] now",
+		Options: &opts,
+		Media: []MediaData{
+			NewMediaData(0, overLimitWebP),
+			NewMediaData(1, overLimitWebP),
+			NewMediaData(2, overLimitWebP),
+		},
+	}, func(CompletionResponse) {})
+	if err == nil || !strings.Contains(err.Error(), "cumulative") {
+		t.Fatalf("completion cross-media raw limit error = %v", err)
+	}
 }
 
 func TestLlamaServerCompletionLengthStop(t *testing.T) {
@@ -3642,7 +3656,7 @@ func TestLlamaServerChatMessageConvertsToolCalls(t *testing.T) {
 	args := api.NewToolCallFunctionArguments()
 	args.Set("command", "ls")
 
-	msg, err := llamaServerChatMessage(Message{
+	msg, _, err := llamaServerChatMessage(Message{
 		Role: "assistant",
 		ToolCalls: []api.ToolCall{{
 			ID: "call_1",
@@ -3678,7 +3692,7 @@ func TestLlamaServerChatMessageConvertsMediaParts(t *testing.T) {
 	wav := []byte("RIFF\x00\x00\x00\x00WAVE")
 	mp3 := []byte("ID3\x04\x00\x00")
 
-	msg, err := llamaServerChatMessage(Message{
+	msg, _, err := llamaServerChatMessage(Message{
 		Role:    "user",
 		Content: "describe these",
 		Media:   []MediaData{NewMediaData(0, png), NewMediaData(1, webp), NewMediaData(2, wav), NewMediaData(3, mp3)},
@@ -3718,9 +3732,26 @@ func TestLlamaServerChatMessageConvertsMediaParts(t *testing.T) {
 	}
 }
 
+func TestLlamaServerChatRequestRejectsCumulativeMediaAcrossMessages(t *testing.T) {
+	data := make(api.ImageData, 22<<20)
+	copy(data, "ID3")
+	opts := api.DefaultOptions()
+	_, err := (&llamaServerRunner{}).llamaServerChatRequest(ChatRequest{
+		Options: &opts,
+		Messages: []api.Message{
+			{Role: "user", Images: []api.ImageData{data}},
+			{Role: "user", Images: []api.ImageData{data}},
+			{Role: "user", Images: []api.ImageData{data}},
+		},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "cumulative") {
+		t.Fatalf("cross-message media limit error = %v", err)
+	}
+}
+
 func TestLlamaServerChatMessageConvertsWebPToPNG(t *testing.T) {
 	webpData := testLlamaServerWebP(t)
-	msg, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, webpData)}})
+	msg, _, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, webpData)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3759,7 +3790,7 @@ func TestLlamaServerChatMessageConvertsWebPToPNG(t *testing.T) {
 	}
 
 	bad := append([]byte(nil), webpData[:20]...)
-	if _, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, bad)}}); err == nil || !strings.Contains(err.Error(), "WebP") {
+	if _, _, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, bad)}}); err == nil || !strings.Contains(err.Error(), "WebP") {
 		t.Fatalf("malformed WebP error = %v", err)
 	}
 }
