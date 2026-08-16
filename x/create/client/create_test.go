@@ -680,8 +680,10 @@ func TestInferSafetensorsCapabilitiesGemma4AudioInventory(t *testing.T) {
 				AudioTokenID:  7,
 				AudioConfig: &gemma4metadata.AudioConfig{
 					AttentionChunkSize: 2, AttentionContextLeft: 2,
+					AttentionInvalidLogit: -1e9, AttentionLogitCap: 50,
 					ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
 					NumHiddenLayers: 1, OutputProjDims: 3,
+					GradientClipping: 1e10, ResidualWeight: 0.5, RMSNormEps: 1e-6,
 					SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
 				},
 			}
@@ -732,6 +734,21 @@ func TestInferSafetensorsCapabilitiesGemma4AudioInventory(t *testing.T) {
 				delete(near, name)
 				check(t, near, false)
 			})
+			t.Run("vocab-only markers are not singleton encodings", func(t *testing.T) {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "config.json"), configJSON, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				writeClientSafetensorDescriptors(t, dir, valid)
+				writeGemma4AudioRuntimeConfigs(t, dir)
+				vocabOnly := []byte(`{"model":{"type":"BPE","vocab":{"<|audio>":5,"<|audio|>":7,"<audio|>":6},"merges":[]},"added_tokens":[]}`)
+				if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), vocabOnly, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if got := inferSafetensorsCapabilities(dir, ""); slices.Contains(got, "audio") {
+					t.Fatalf("vocab-only marker capabilities = %v, did not expect audio", got)
+				}
+			})
 		})
 	}
 }
@@ -743,8 +760,10 @@ func TestInferSafetensorsCapabilitiesGemma4AudioRejectsUnboundedConfig(t *testin
 		AudioTokenID: 7,
 		AudioConfig: &gemma4metadata.AudioConfig{
 			AttentionChunkSize: 2, AttentionContextLeft: 2,
+			AttentionInvalidLogit: -1e9, AttentionLogitCap: 50,
 			ConvKernelSize: 3, HiddenSize: 4, NumAttentionHeads: 2,
 			NumHiddenLayers: 1, OutputProjDims: 3,
+			GradientClipping: 1e10, ResidualWeight: 0.5, RMSNormEps: 1e-6,
 			SubsamplingConvChannels: []int{2, 2}, UseClippedLinears: true,
 		},
 	}
@@ -788,6 +807,26 @@ func TestInferSafetensorsCapabilitiesGemma4AudioRejectsUnboundedConfig(t *testin
 			}
 		})
 	}
+
+	t.Run("float32 overflow", func(t *testing.T) {
+		validConfig, err := json.Marshal(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		overflow := []byte(strings.Replace(string(validConfig), `"gradient_clipping":10000000000`, `"gradient_clipping":1e39`, 1))
+		if string(overflow) == string(validConfig) {
+			t.Fatal("failed to construct float32-overflow audio config")
+		}
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), overflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeClientSafetensorDescriptors(t, dir, valid)
+		writeGemma4AudioRuntimeConfigs(t, dir)
+		if got := inferSafetensorsCapabilities(dir, ""); slices.Contains(got, "audio") {
+			t.Fatalf("float32-overflow capabilities = %v, did not expect audio", got)
+		}
+	})
 }
 
 func writeGemma4AudioRuntimeConfigs(t *testing.T, dir string) {
@@ -795,6 +834,7 @@ func writeGemma4AudioRuntimeConfigs(t *testing.T, dir string) {
 	files := map[string][]byte{
 		"processor_config.json": []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`),
 		"tokenizer_config.json": []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`),
+		"tokenizer.json":        []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`),
 	}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {

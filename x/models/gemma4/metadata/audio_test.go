@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"encoding/json"
 	"maps"
 	"slices"
 	"strings"
@@ -13,8 +14,10 @@ func releasedAudioConfig(layers int) ConfigFile {
 		AudioTokenID: 258881,
 		AudioConfig: &AudioConfig{
 			AttentionChunkSize: 12, AttentionContextLeft: 13,
+			AttentionInvalidLogit: -1e9, AttentionLogitCap: 50,
 			ConvKernelSize: 5, HiddenSize: 1024, NumAttentionHeads: 8,
 			NumHiddenLayers: layers, OutputProjDims: 1536,
+			GradientClipping: 1e10, ResidualWeight: 0.5, RMSNormEps: 1e-6,
 			SubsamplingConvChannels: []int{128, 32}, UseClippedLinears: true,
 		},
 	}
@@ -23,27 +26,33 @@ func releasedAudioConfig(layers int) ConfigFile {
 func TestValidateAudioRuntimeMetadata(t *testing.T) {
 	processor := []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`)
 	tokens := []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`)
+	tokenizerData := []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":258881,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`)
 	cfg := releasedAudioConfig(12)
-	if err := ValidateAudioRuntimeMetadata(cfg, processor, tokens); err != nil {
+	if err := ValidateAudioRuntimeMetadata(cfg, processor, tokens, tokenizerData); err != nil {
 		t.Fatalf("ValidateAudioRuntimeMetadata() error = %v", err)
 	}
 	for _, tt := range []struct {
-		name              string
-		processor, tokens []byte
-		edit              func(*ConfigFile)
+		name      string
+		processor []byte
+		tokens    []byte
+		tokenizer []byte
+		edit      func(*ConfigFile)
 	}{
-		{"missing processor", nil, tokens, nil},
-		{"unsupported processor", []byte(`{"audio_seq_length":749}`), tokens, nil},
-		{"missing tokens", processor, nil, nil},
-		{"incomplete tokens", processor, []byte(`{"audio_token":"<|audio|>"}`), nil},
-		{"invalid token id", processor, tokens, func(cfg *ConfigFile) { cfg.AudioTokenID = cfg.TextConfig.VocabSize }},
+		{"missing processor", nil, tokens, tokenizerData, nil},
+		{"unsupported processor", []byte(`{"audio_seq_length":749}`), tokens, tokenizerData, nil},
+		{"missing tokens", processor, nil, tokenizerData, nil},
+		{"incomplete tokens", processor, []byte(`{"audio_token":"<|audio|>"}`), tokenizerData, nil},
+		{"missing tokenizer", processor, tokens, nil, nil},
+		{"wrong tokenizer id", processor, tokens, []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`), nil},
+		{"vocab membership is not singleton encoding", processor, tokens, []byte(`{"model":{"type":"BPE","vocab":{"<|audio>":0,"<|audio|>":1,"<audio|>":2},"merges":[]},"added_tokens":[]}`), func(cfg *ConfigFile) { cfg.AudioTokenID = 1; cfg.TextConfig.VocabSize = 3 }},
+		{"invalid token id", processor, tokens, tokenizerData, func(cfg *ConfigFile) { cfg.AudioTokenID = cfg.TextConfig.VocabSize }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			candidate := releasedAudioConfig(12)
 			if tt.edit != nil {
 				tt.edit(&candidate)
 			}
-			if err := ValidateAudioRuntimeMetadata(candidate, tt.processor, tt.tokens); err == nil {
+			if err := ValidateAudioRuntimeMetadata(candidate, tt.processor, tt.tokens, tt.tokenizer); err == nil {
 				t.Fatal("ValidateAudioRuntimeMetadata() error = nil")
 			}
 		})
@@ -132,6 +141,8 @@ func TestValidateAudioConfig(t *testing.T) {
 		{"heads", func(cfg *ConfigFile) { cfg.AudioConfig.NumAttentionHeads = 7 }},
 		{"conv channels", func(cfg *ConfigFile) { cfg.AudioConfig.SubsamplingConvChannels = []int{128} }},
 		{"even kernel", func(cfg *ConfigFile) { cfg.AudioConfig.ConvKernelSize = 4 }},
+		{"invalid logit cap", func(cfg *ConfigFile) { cfg.AudioConfig.AttentionLogitCap = 0 }},
+		{"invalid residual", func(cfg *ConfigFile) { cfg.AudioConfig.ResidualWeight = 0 }},
 		{"text hidden", func(cfg *ConfigFile) { cfg.TextConfig.HiddenSize = 0 }},
 		{"hidden overflow", func(cfg *ConfigFile) { cfg.AudioConfig.HiddenSize = 1 << 30; cfg.AudioConfig.NumAttentionHeads = 1 }},
 		{"impractical layers", func(cfg *ConfigFile) { cfg.AudioConfig.NumHiddenLayers = maxAudioLayers + 1 }},
@@ -152,6 +163,11 @@ func TestValidateAudioConfig(t *testing.T) {
 				t.Fatal("ValidateAudioTensors() error = nil")
 			}
 		})
+	}
+
+	var overflow ConfigFile
+	if err := json.Unmarshal([]byte(`{"audio_config":{"gradient_clipping":1e39}}`), &overflow); err == nil {
+		t.Fatal("float32 overflow: json.Unmarshal() error = nil")
 	}
 }
 
