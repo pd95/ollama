@@ -147,3 +147,19 @@ func TestExtractFileDataWAV(t *testing.T) {
 	assert.Len(t, imgs, 1)
 	assert.Equal(t, "before  after", cleaned)
 }
+
+func TestExtractFileDataMP3(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"sample.mp3", "upper.MP3"} {
+		fp := filepath.Join(dir, name)
+		data := make([]byte, 600)
+		copy(data, []byte{0xff, 0xfb, 0xd4, 0xc4})
+		if err := os.WriteFile(fp, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cleaned, media, err := extractFileData("before " + fp + " after")
+		assert.NoError(t, err)
+		assert.Len(t, media, 1)
+		assert.Equal(t, "before  after", cleaned)
+	}
+}
