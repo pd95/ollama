@@ -23,6 +23,38 @@ func releasedAudioConfig(layers int) ConfigFile {
 	}
 }
 
+func TestParseAudioConfigEquivalence(t *testing.T) {
+	valid, err := json.Marshal(releasedAudioConfig(12))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name string
+		data []byte
+		ok   bool
+	}{
+		{"released", valid, true},
+		{"missing", []byte(`{"model_type":"gemma4"}`), true},
+		{"malformed", []byte(`{"audio_config":`), false},
+		{"partial", []byte(`{"audio_config":{"hidden_size":1024}}`), false},
+		{"near match", []byte(`{"audio_config_extra":{"hidden_size":1024}}`), true},
+		{"bounded width", []byte(strings.Replace(string(valid), `"hidden_size":1024`, `"hidden_size":1073741824`, 1)), false},
+		{"float32 overflow", []byte(strings.Replace(string(valid), `"gradient_clipping":10000000000`, `"gradient_clipping":1e39`, 1)), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseAudioConfig(tt.data)
+			if (err == nil) != tt.ok {
+				t.Fatalf("ParseAudioConfig() = (%+v, %v), ok = %v", cfg, err, tt.ok)
+			}
+			if tt.name == "missing" || tt.name == "near match" {
+				if cfg != nil {
+					t.Fatalf("ParseAudioConfig() = %+v, want nil", cfg)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateAudioRuntimeMetadata(t *testing.T) {
 	processor := []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`)
 	tokens := []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`)

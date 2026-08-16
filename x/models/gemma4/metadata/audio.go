@@ -39,6 +39,23 @@ type AudioConfig struct {
 	UseClippedLinears       bool    `json:"use_clipped_linears"`
 }
 
+// ParseAudioConfig parses and validates the released Gemma 4 audio
+// configuration. A model without audio_config is not an error and returns nil,
+// allowing text-only Gemma 4 models to use the same parser.
+func ParseAudioConfig(configData []byte) (*AudioConfig, error) {
+	var cfg ConfigFile
+	if err := json.Unmarshal(configData, &cfg); err != nil {
+		return nil, fmt.Errorf("parse Gemma 4 audio config: %w", err)
+	}
+	if cfg.AudioConfig == nil {
+		return nil, nil
+	}
+	if err := validateAudioConfigFields(cfg.AudioConfig); err != nil {
+		return nil, err
+	}
+	return cfg.AudioConfig, nil
+}
+
 type audioProcessorConfig struct {
 	AudioSequenceLength int `json:"audio_seq_length"`
 	FeatureExtractor    struct {
@@ -196,6 +213,16 @@ func validateAudioConfig(cfg ConfigFile) error {
 	if ac == nil {
 		return fmt.Errorf("missing audio_config")
 	}
+	if err := validateAudioConfigFields(ac); err != nil {
+		return err
+	}
+	if cfg.TextConfig.HiddenSize <= 0 || cfg.TextConfig.HiddenSize > maxTextHiddenSize {
+		return fmt.Errorf("invalid Gemma 4 audio dimensions")
+	}
+	return nil
+}
+
+func validateAudioConfigFields(ac *AudioConfig) error {
 	if ac.HiddenSize <= 0 || ac.HiddenSize > maxAudioHiddenSize ||
 		ac.NumHiddenLayers <= 0 || ac.NumHiddenLayers > maxAudioLayers ||
 		ac.NumAttentionHeads <= 0 || ac.NumAttentionHeads > maxAudioHeads || ac.HiddenSize%ac.NumAttentionHeads != 0 ||
@@ -208,8 +235,7 @@ func validateAudioConfig(cfg ConfigFile) error {
 		ac.GradientClipping <= 0 || ac.ResidualWeight <= 0 || ac.RMSNormEps <= 0 ||
 		len(ac.SubsamplingConvChannels) != 2 ||
 		ac.SubsamplingConvChannels[0] <= 0 || ac.SubsamplingConvChannels[0] > maxAudioConvChannels ||
-		ac.SubsamplingConvChannels[1] <= 0 || ac.SubsamplingConvChannels[1] > maxAudioConvChannels ||
-		cfg.TextConfig.HiddenSize <= 0 || cfg.TextConfig.HiddenSize > maxTextHiddenSize {
+		ac.SubsamplingConvChannels[1] <= 0 || ac.SubsamplingConvChannels[1] > maxAudioConvChannels {
 		return fmt.Errorf("invalid Gemma 4 audio dimensions")
 	}
 	return nil
