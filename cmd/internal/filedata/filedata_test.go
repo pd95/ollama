@@ -37,10 +37,10 @@ func TestExtractNames(t *testing.T) {
 	input := ` some preamble
  ./relative\ path/one.png inbetween1 ./not a valid two.jpg inbetween2 ./1.svg
 /unescaped space /three.jpeg inbetween3 /valid\ path/dir/four.png "./quoted with spaces/five.JPG
-/unescaped space /six.webp inbetween6 /valid\ path/dir/seven.WEBP`
+/unescaped space /six.webp inbetween6 /valid\ path/dir/seven.WEBP ./audio/sample.mp3`
 	res := ExtractNames(input)
-	if len(res) != 7 {
-		t.Fatalf("len = %d, want 7", len(res))
+	if len(res) != 8 {
+		t.Fatalf("len = %d, want 8", len(res))
 	}
 	assertContains(t, res[0], "one.png")
 	assertContains(t, res[1], "two.jpg")
@@ -49,6 +49,7 @@ func TestExtractNames(t *testing.T) {
 	assertContains(t, res[4], "five.JPG")
 	assertContains(t, res[5], "six.webp")
 	assertContains(t, res[6], "seven.WEBP")
+	assertContains(t, res[7], "sample.mp3")
 	assertNotContains(t, res[4], "\"")
 	for _, r := range res {
 		assertNotContains(t, r, "inbetween1")
@@ -196,6 +197,26 @@ func TestExtractWAV(t *testing.T) {
 	}
 	if cleaned != "before  after" {
 		t.Fatalf("cleaned = %q, want %q", cleaned, "before  after")
+	}
+}
+
+func TestExtractMP3(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "sample.mp3")
+	data := make([]byte, 600)
+	copy(data, []byte{0xff, 0xfb, 0x90, 0x64})
+	if err := os.WriteFile(fp, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleaned, files, err := ExtractWithFiles("before " + fp + " after")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || Kind(files[0].Path) != "audio" {
+		t.Fatalf("files = %#v, want one audio file", files)
+	}
+	if cleaned != "before  after" {
+		t.Fatalf("cleaned = %q", cleaned)
 	}
 }
 
