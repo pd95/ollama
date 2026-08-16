@@ -70,6 +70,8 @@ type TextConfig struct {
 	AudioTokenIDValue      int32                  `json:"-"`
 	BOITokenIDValue        int32                  `json:"-"`
 	EOITokenIDValue        int32                  `json:"-"`
+	BOATokenIDValue        int32                  `json:"-"`
+	EOATokenIDValue        int32                  `json:"-"`
 	VisionSoftTokens       int32                  `json:"-"`
 
 	// Quantization parameters.
@@ -386,6 +388,8 @@ type Model struct {
 	Vision        *VisionModel
 	UnifiedVision *UnifiedVisionEmbedder
 	EmbedVision   *MultimodalEmbedder
+	Audio         *AudioModel
+	EmbedAudio    *MultimodalEmbedder
 
 	// PLE model-level components (nil if no PLE).
 	EmbedTokensPerLayer nn.EmbeddingLayer
@@ -398,7 +402,9 @@ type Model struct {
 
 	tok *tokenizer.Tokenizer
 	*TextConfig
-	VisionConfig *VisionConfig
+	VisionConfig         *VisionConfig
+	AudioConfig          *AudioConfig
+	AudioProcessorConfig *AudioProcessorConfig
 
 	SuppressLogitBias *mlx.Array
 	weightPrefix      string
@@ -426,6 +432,8 @@ func parseTextConfig(configData []byte) (TextConfig, error) {
 		AudioTokenID             int32 `json:"audio_token_id"`
 		BOITokenID               int32 `json:"boi_token_id"`
 		EOITokenID               int32 `json:"eoi_token_id"`
+		BOATokenID               int32 `json:"boa_token_id"`
+		EOATokenID               int32 `json:"eoa_token_index"`
 		VisionSoftTokensPerImage int32 `json:"vision_soft_tokens_per_image"`
 	}
 	if err := json.Unmarshal(configData, &top); err != nil {
@@ -437,6 +445,8 @@ func parseTextConfig(configData []byte) (TextConfig, error) {
 	cfg.AudioTokenIDValue = top.AudioTokenID
 	cfg.BOITokenIDValue = top.BOITokenID
 	cfg.EOITokenIDValue = top.EOITokenID
+	cfg.BOATokenIDValue = top.BOATokenID
+	cfg.EOATokenIDValue = top.EOATokenID
 	cfg.VisionSoftTokens = top.VisionSoftTokensPerImage
 
 	// Apply defaults.
@@ -476,10 +486,16 @@ func parseTextConfig(configData []byte) (TextConfig, error) {
 	if cfg.EOITokenIDValue == 0 {
 		cfg.EOITokenIDValue = 258882
 	}
+	if cfg.BOATokenIDValue == 0 {
+		cfg.BOATokenIDValue = 256000
+	}
+	if cfg.EOATokenIDValue == 0 {
+		cfg.EOATokenIDValue = 258883
+	}
 	if cfg.VisionSoftTokens == 0 {
 		cfg.VisionSoftTokens = 280
 	}
-	if err := validateGemma4ImageTokenConfig(&cfg); err != nil {
+	if err := validateGemma4MediaTokenConfig(&cfg); err != nil {
 		return TextConfig{}, err
 	}
 
@@ -562,7 +578,7 @@ func parseTextConfig(configData []byte) (TextConfig, error) {
 	return cfg, nil
 }
 
-func validateGemma4ImageTokenConfig(cfg *TextConfig) error {
+func validateGemma4MediaTokenConfig(cfg *TextConfig) error {
 	if cfg.VisionSoftTokens <= 0 || cfg.VisionSoftTokens > maxGemma4VisionSoftTokens {
 		return fmt.Errorf("invalid Gemma4 vision soft-token count %d", cfg.VisionSoftTokens)
 	}
@@ -573,10 +589,13 @@ func validateGemma4ImageTokenConfig(cfg *TextConfig) error {
 		{"boi_token_id", cfg.BOITokenIDValue},
 		{"image_token_id", cfg.ImageTokenIDValue},
 		{"eoi_token_id", cfg.EOITokenIDValue},
+		{"boa_token_id", cfg.BOATokenIDValue},
+		{"audio_token_id", cfg.AudioTokenIDValue},
+		{"eoa_token_index", cfg.EOATokenIDValue},
 	}
 	seen := make(map[int32]string, len(tokens))
 	for _, token := range tokens {
-		if token.id < 0 || token.id >= cfg.VocabSize {
+		if token.id <= 0 || token.id >= cfg.VocabSize {
 			return fmt.Errorf("invalid Gemma4 %s %d for vocab size %d", token.name, token.id, cfg.VocabSize)
 		}
 		if other, ok := seen[token.id]; ok {
@@ -688,6 +707,19 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	audioConfig, err := parseAudioConfig(configData)
+	if err != nil {
+		return nil, err
+	}
+	var audioProcessorConfig *AudioProcessorConfig
+	if audioConfig != nil {
+		if processorData, readErr := root.Manifest.ReadConfig("processor_config.json"); readErr == nil {
+			audioProcessorConfig, err = parseAudioProcessorConfig(processorData)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	if qt := root.QuantType(); qt != "" {
 		cfg.QuantGroupSize, cfg.QuantBits, cfg.QuantMode = model.QuantizationParams(qt)
@@ -722,12 +754,14 @@ func newModel(root *model.Root) (base.Model, error) {
 	}
 
 	m := &Model{
-		Layers:            make([]*DecoderLayer, cfg.NumHiddenLayers),
-		TextConfig:        &cfg,
-		VisionConfig:      visionConfig,
-		tok:               tok,
-		mediaTokens:       mediaTokens,
-		SuppressLogitBias: makeSuppressLogitBias(suppressTokens, cfg.VocabSize),
+		Layers:               make([]*DecoderLayer, cfg.NumHiddenLayers),
+		TextConfig:           &cfg,
+		VisionConfig:         visionConfig,
+		AudioConfig:          audioConfig,
+		AudioProcessorConfig: audioProcessorConfig,
+		tok:                  tok,
+		mediaTokens:          mediaTokens,
+		SuppressLogitBias:    makeSuppressLogitBias(suppressTokens, cfg.VocabSize),
 	}
 
 	for i := range m.Layers {
@@ -800,6 +834,18 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			return err
 		}
 		m.EmbedVision = embedVision
+	}
+	if m.AudioConfig != nil && m.AudioProcessorConfig != nil && hasCompleteGemma4AudioWeights(tensors, m.AudioConfig, m.HiddenSize) {
+		audio, err := loadAudioModel(tensors, m.AudioConfig, m.HiddenSize, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+		if err != nil {
+			return err
+		}
+		embedAudio, err := loadMultimodalEmbedder(tensors, "embed_audio", m.AudioConfig.RMSNormEps, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+		if err != nil {
+			return err
+		}
+		m.Audio = audio
+		m.EmbedAudio = embedAudio
 	}
 
 	// PLE model-level weights.

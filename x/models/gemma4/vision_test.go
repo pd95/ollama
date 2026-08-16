@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ollama/ollama/x/mlxrunner/batch"
+	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
 )
 
@@ -362,7 +363,7 @@ func TestPrepareMediaPreservesOrderedImageItems(t *testing.T) {
 			t.Fatalf("item %d payload = start %d end %d pixels %d", i, payload.ImageStart, payload.ImageEnd, len(payload.Image.Pixels))
 		}
 		media := batch.MediaItem{Pos: item.Range[0], Opaque: item.Opaque}
-		start, end := gemma4ImageRun(media)
+		start, end := gemma4MediaRun(media)
 		if start != item.Range[0]+1 || end != item.Range[1]-1 {
 			t.Fatalf("item %d scatter/PLE run = [%d,%d), want current image span [%d,%d)", i, start, end, item.Range[0]+1, item.Range[1]-1)
 		}
@@ -609,5 +610,116 @@ func TestPrepareMediaCancellationDuringProductionStages(t *testing.T) {
 				t.Fatalf("PrepareMedia() = (%v, %v), want (nil, context.Canceled)", got.prepared, got.err)
 			}
 		})
+	}
+}
+
+func TestPrepareMediaAudioUsesFeatureData(t *testing.T) {
+	frames := make([][]float64, 1600)
+	for i := range frames {
+		frames[i] = []float64{0.1 * math.Sin(2*math.Pi*440*float64(i)/16000)}
+	}
+	processor := defaultAudioProcessorConfig()
+	m := &Model{
+		TextConfig: &TextConfig{
+			AudioTokenIDValue: 20, BOATokenIDValue: 21, EOATokenIDValue: 22,
+		},
+		AudioConfig:          &AudioConfig{},
+		AudioProcessorConfig: &processor,
+		Audio:                &AudioModel{},
+		EmbedAudio:           &MultimodalEmbedder{},
+	}
+	got, err := m.PrepareMedia(context.Background(), []base.Segment{
+		{Tokens: []int32{1}},
+		{Kind: "audio", Data: makeTestWAV(t, 1, 16, 16000, frames)},
+		{Tokens: []int32{2}},
+	})
+	if err != nil {
+		t.Fatalf("PrepareMedia() error = %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("audio item count = %d, want 1", len(got.Items))
+	}
+	item := got.Items[0]
+	payload := item.Opaque.(gemma4MediaPayload)
+	if payload.Audio == nil || payload.Audio.Features != nil || item.Dims[2] != 128 {
+		t.Fatalf("audio payload/dims = %#v/%v", payload.Audio, item.Dims)
+	}
+	wantRange := [2]int{1, len(got.Tokens) - 1}
+	if item.Range != wantRange || got.Tokens[1] != 21 || got.Tokens[len(got.Tokens)-2] != 22 {
+		t.Fatalf("audio range/tokens = %v/%v", item.Range, got.Tokens)
+	}
+	if got.Tokens[payload.AudioStart+item.Range[0]] != 20 {
+		t.Fatalf("audio feature token missing: %v", got.Tokens)
+	}
+	firstTokens := slices.Clone(got.Tokens)
+	firstFeatures := slices.Clone(item.MediaData)
+	firstMask := slices.Clone(payload.Audio.FeatureMask)
+
+	secondFrames := make([][]float64, 3200)
+	for i := range secondFrames {
+		secondFrames[i] = []float64{0.1 * math.Sin(2*math.Pi*880*float64(i)/16000)}
+	}
+	second, err := m.PrepareMedia(context.Background(), []base.Segment{
+		{Tokens: []int32{3, 4}},
+		{Kind: "audio", Data: makeTestWAV(t, 1, 16, 16000, secondFrames)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Items) != 1 || len(second.Items[0].MediaData) == len(item.MediaData) {
+		t.Fatalf("second audio items/features = %d/%d, first features %d", len(second.Items), len(second.Items[0].MediaData), len(item.MediaData))
+	}
+	secondPayload := second.Items[0].Opaque.(gemma4MediaPayload)
+	if secondPayload.Audio == nil || secondPayload.Audio.Features != nil {
+		t.Fatalf("second audio payload = %#v", secondPayload.Audio)
+	}
+	if &second.Items[0].MediaData[0] == &item.MediaData[0] || &secondPayload.Audio.FeatureMask[0] == &payload.Audio.FeatureMask[0] {
+		t.Fatal("sequential audio prepares reused feature or mask storage")
+	}
+	second.Tokens[0] = 99
+	second.Items[0].MediaData[0] = 99
+	secondPayload.Audio.FeatureMask[0] = !secondPayload.Audio.FeatureMask[0]
+	if !slices.Equal(got.Tokens, firstTokens) || !slices.Equal(item.MediaData, firstFeatures) || !slices.Equal(payload.Audio.FeatureMask, firstMask) {
+		t.Fatal("mutating the later audio request changed the earlier request")
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if prepared, err := m.PrepareMedia(canceled, []base.Segment{{Kind: "audio", Data: makeTestWAV(t, 1, 16, 16000, frames)}}); !errors.Is(err, context.Canceled) || prepared != nil {
+		t.Fatalf("canceled audio prepare = (%v, %v), want (nil, context.Canceled)", prepared, err)
+	}
+}
+
+func TestScatterMediaAudioSpanAndDType(t *testing.T) {
+	useMLXTestThread(t)
+
+	m := &Model{TextConfig: &TextConfig{HiddenSize: 2}}
+	payload := gemma4MediaPayload{Audio: &gemma4AudioInput{}, AudioStart: 1, AudioEnd: 3}
+	features := mlx.FromValues([]float32{1, 2, 3, 4}, 2, 2)
+	hidden := mlx.Zeros(mlx.DTypeBFloat16, 1, 5, 2)
+	got := m.scatterMedia(hidden, &batch.Batch{
+		SeqOffsets:   []int32{0},
+		SeqQueryLens: []int32{5},
+		Media:        []batch.MediaItem{{Pos: 1, Features: features, Opaque: payload}},
+	})
+	if got.DType() != mlx.DTypeBFloat16 || !slices.Equal(got.Dims(), []int{1, 5, 2}) {
+		t.Fatalf("scattered dtype/shape = %s/%v, want bfloat16/[1 5 2]", got.DType(), got.Dims())
+	}
+	gotFloat := got.AsType(mlx.DTypeFloat32)
+	mlx.Eval(gotFloat)
+	if values := gotFloat.Floats(); !equalFloat32s(values, []float32{0, 0, 0, 0, 1, 2, 3, 4, 0, 0}) {
+		t.Fatalf("scattered values = %v", values)
+	}
+
+	partialHidden := mlx.Zeros(mlx.DTypeFloat16, 1, 2, 2)
+	partial := m.scatterMedia(partialHidden, &batch.Batch{
+		SeqOffsets:   []int32{3},
+		SeqQueryLens: []int32{2},
+		Media:        []batch.MediaItem{{Pos: 1, Features: features, Opaque: payload}},
+	})
+	partialFloat := partial.AsType(mlx.DTypeFloat32)
+	mlx.Eval(partialFloat)
+	if partial.DType() != mlx.DTypeFloat16 || !equalFloat32s(partialFloat.Floats(), []float32{3, 4, 0, 0}) {
+		t.Fatalf("partial scattered dtype/values = %s/%v", partial.DType(), partialFloat.Floats())
 	}
 }
