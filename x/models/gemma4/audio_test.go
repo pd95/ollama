@@ -1,6 +1,8 @@
 package gemma4
 
 import (
+	"encoding/base64"
+	"os"
 	"strings"
 	"testing"
 
@@ -100,7 +102,7 @@ func TestPrepareAudioMediaRejections(t *testing.T) {
 	m := newAudioTestModel()
 
 	_, err := m.PrepareMedia([]base.Segment{{Kind: "audio", Data: []byte("ID3\x04\x00junk")}})
-	if err == nil || !strings.Contains(err.Error(), "unrecognized audio format") {
+	if err == nil || !strings.Contains(err.Error(), "failed to decode MP3 audio") {
 		t.Fatalf("mp3 error = %v", err)
 	}
 
@@ -113,6 +115,25 @@ func TestPrepareAudioMediaRejections(t *testing.T) {
 	_, err = noAudio.PrepareMedia([]base.Segment{{Kind: "audio", Data: wavPCM16(16000)}})
 	if err == nil || !strings.Contains(err.Error(), "does not support audio input") {
 		t.Fatalf("no-audio error = %v", err)
+	}
+}
+
+func TestPrepareMP3AudioMedia(t *testing.T) {
+	encoded, err := os.ReadFile("../../mlxrunner/model/audio/testdata/bcn_weather_first_10_frames.mp3.base64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := newAudioTestModel().PrepareMedia([]base.Segment{{Kind: "audio", Data: data}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Items) == 0 || len(prepared.Tokens) == 0 {
+		t.Fatalf("MP3 input = %+v", prepared)
 	}
 }
 
