@@ -56,6 +56,7 @@ type gemma4AudioInput struct {
 func defaultAudioProcessorConfig() AudioProcessorConfig {
 	var cfg AudioProcessorConfig
 	cfg.AudioSequenceLength = 750
+	cfg.FeatureExtractor.Type = "Gemma4AudioFeatureExtractor"
 	cfg.FeatureExtractor.FeatureSize = 128
 	cfg.FeatureExtractor.FFTLength = 512
 	cfg.FeatureExtractor.FrameLength = 320
@@ -93,7 +94,8 @@ func validateReleasedAudioProcessorConfig(cfg *AudioProcessorConfig) error {
 		}
 		return nil
 	}
-	if cfg.AudioSequenceLength != 750 || f.FeatureSize != 128 || f.SamplingRate != 16000 ||
+	if f.Type != "Gemma4AudioFeatureExtractor" || cfg.AudioSequenceLength != 750 ||
+		f.FeatureSize != 128 || f.SamplingRate != 16000 ||
 		f.FrameLength != 320 || f.HopLength != 160 || f.FFTLength != 512 || f.FFTOverdrive ||
 		f.Dither != 0 || f.InputScaleFactor != 1 || f.MinFrequency != 0 || f.MaxFrequency != 8000 ||
 		f.MelFloor != 1e-3 || f.Preemphasis != 0 || f.PaddingSide != "right" ||

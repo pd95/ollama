@@ -13,6 +13,7 @@ func releasedAudioConfig(layers int) ConfigFile {
 		TextConfig:   TextConfig{HiddenSize: 2560, VocabSize: 262144},
 		AudioTokenID: 258881,
 		AudioConfig: &AudioConfig{
+			ModelType:          "gemma4_audio",
 			AttentionChunkSize: 12, AttentionContextLeft: 13,
 			AttentionInvalidLogit: -1e9, AttentionLogitCap: 50,
 			ConvKernelSize: 5, HiddenSize: 1024, NumAttentionHeads: 8,
@@ -69,7 +70,7 @@ func TestParseAudioConfigEquivalence(t *testing.T) {
 }
 
 func TestValidateAudioRuntimeMetadata(t *testing.T) {
-	processor := []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`)
+	processor := []byte(`{"audio_seq_length":750,"feature_extractor":{"feature_extractor_type":"Gemma4AudioFeatureExtractor","feature_size":128,"fft_length":512,"frame_length":320,"hop_length":160,"input_scale_factor":1,"max_frequency":8000,"mel_floor":0.001,"padding_side":"right","sampling_rate":16000}}`)
 	tokens := []byte(`{"boa_token":"<|audio>","audio_token":"<|audio|>","eoa_token":"<audio|>"}`)
 	tokenizerData := []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":258881,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`)
 	cfg := releasedAudioConfig(12)
@@ -85,12 +86,14 @@ func TestValidateAudioRuntimeMetadata(t *testing.T) {
 	}{
 		{"missing processor", nil, tokens, tokenizerData, nil},
 		{"unsupported processor", []byte(`{"audio_seq_length":749}`), tokens, tokenizerData, nil},
+		{"unknown extractor type", []byte(strings.Replace(string(processor), "Gemma4AudioFeatureExtractor", "FutureAudioFeatureExtractor", 1)), tokens, tokenizerData, nil},
 		{"missing tokens", processor, nil, tokenizerData, nil},
 		{"incomplete tokens", processor, []byte(`{"audio_token":"<|audio|>"}`), tokenizerData, nil},
 		{"missing tokenizer", processor, tokens, nil, nil},
 		{"wrong tokenizer id", processor, tokens, []byte(`{"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[{"id":5,"content":"<|audio>","special":true},{"id":7,"content":"<|audio|>","special":true},{"id":6,"content":"<audio|>","special":true}]}`), nil},
 		{"vocab membership is not singleton encoding", processor, tokens, []byte(`{"model":{"type":"BPE","vocab":{"<|audio>":0,"<|audio|>":1,"<audio|>":2},"merges":[]},"added_tokens":[]}`), func(cfg *ConfigFile) { cfg.AudioTokenID = 1; cfg.TextConfig.VocabSize = 3 }},
 		{"invalid token id", processor, tokens, tokenizerData, func(cfg *ConfigFile) { cfg.AudioTokenID = cfg.TextConfig.VocabSize }},
+		{"unknown model type", processor, tokens, tokenizerData, func(cfg *ConfigFile) { cfg.AudioConfig.ModelType = "future_audio" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			candidate := releasedAudioConfig(12)

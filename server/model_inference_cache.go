@@ -9,6 +9,7 @@ import (
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/manifest"
 	"github.com/ollama/ollama/types/model"
+	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -106,12 +107,48 @@ func cloneInferenceModel(src *Model) *Model {
 	dst.AdapterPaths = slices.Clone(src.AdapterPaths)
 	dst.ProjectorPaths = slices.Clone(src.ProjectorPaths)
 	dst.TensorLayerNames = slices.Clone(src.TensorLayerNames)
+	dst.Gemma4VisionConfig = cloneGemma4MetadataConfig(src.Gemma4VisionConfig)
+	dst.Gemma4VisionTensors = cloneGemma4TensorDescriptors(src.Gemma4VisionTensors)
+	dst.Gemma4AudioConfig = cloneGemma4MetadataConfig(src.Gemma4AudioConfig)
+	dst.Gemma4AudioTensors = cloneGemma4TensorDescriptors(src.Gemma4AudioTensors)
 	dst.License = slices.Clone(src.License)
 	dst.Options = maps.Clone(src.Options)
 	dst.Messages = slices.Clone(src.Messages)
 	dst.capabilities = slices.Clone(src.capabilities)
 
 	return &dst
+}
+
+func cloneGemma4MetadataConfig(src *gemma4metadata.ConfigFile) *gemma4metadata.ConfigFile {
+	if src == nil {
+		return nil
+	}
+
+	dst := *src
+	dst.Architectures = slices.Clone(src.Architectures)
+	if src.VisionConfig != nil {
+		vision := *src.VisionConfig
+		dst.VisionConfig = &vision
+	}
+	if src.AudioConfig != nil {
+		audio := *src.AudioConfig
+		audio.SubsamplingConvChannels = slices.Clone(src.AudioConfig.SubsamplingConvChannels)
+		dst.AudioConfig = &audio
+	}
+	return &dst
+}
+
+func cloneGemma4TensorDescriptors(src map[string]gemma4metadata.TensorDescriptor) map[string]gemma4metadata.TensorDescriptor {
+	if src == nil {
+		return nil
+	}
+
+	dst := make(map[string]gemma4metadata.TensorDescriptor, len(src))
+	for name, descriptor := range src {
+		descriptor.Shape = slices.Clone(descriptor.Shape)
+		dst[name] = descriptor
+	}
+	return dst
 }
 
 func (s *Server) getModel(name string) (*Model, error) {
