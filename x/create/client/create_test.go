@@ -662,6 +662,34 @@ func TestInferSafetensorsCapabilitiesGemma4UnifiedVision(t *testing.T) {
 	check(t, wrong, false)
 }
 
+func TestInferSafetensorsCapabilitiesGemma4Unified12B(t *testing.T) {
+	const configJSON = `{
+		"architectures":["Gemma4UnifiedForConditionalGeneration"],"model_type":"gemma4_unified",
+		"text_config":{"hidden_size":3840},
+		"vision_config":{"model_type":"gemma4_unified_vision","mm_embed_dim":3840,"mm_posemb_size":1120,"model_patch_size":48,"num_soft_tokens":280,"output_proj_dims":3840,"patch_size":16,"pooling_kernel_size":3,"rms_norm_eps":1e-6}
+	}`
+	tensors := map[string]gemma4metadata.TensorDescriptor{
+		"model.vision_embedder.patch_ln1.weight":         {Dtype: "BF16", Shape: []int32{6912}},
+		"model.vision_embedder.patch_ln1.bias":           {Dtype: "BF16", Shape: []int32{6912}},
+		"model.vision_embedder.patch_dense.weight":       {Dtype: "BF16", Shape: []int32{3840, 6912}},
+		"model.vision_embedder.patch_dense.bias":         {Dtype: "BF16", Shape: []int32{3840}},
+		"model.vision_embedder.patch_ln2.weight":         {Dtype: "BF16", Shape: []int32{3840}},
+		"model.vision_embedder.patch_ln2.bias":           {Dtype: "BF16", Shape: []int32{3840}},
+		"model.vision_embedder.pos_embedding":            {Dtype: "BF16", Shape: []int32{1120, 2, 3840}},
+		"model.vision_embedder.pos_norm.weight":          {Dtype: "BF16", Shape: []int32{3840}},
+		"model.vision_embedder.pos_norm.bias":            {Dtype: "BF16", Shape: []int32{3840}},
+		"model.embed_vision.embedding_projection.weight": {Dtype: "BF16", Shape: []int32{3840, 3840}},
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeClientSafetensorDescriptors(t, dir, tensors)
+	if got := inferSafetensorsCapabilities(dir, ""); !slices.Contains(got, "vision") {
+		t.Fatalf("frozen unified-12B capabilities = %v, want vision", got)
+	}
+}
+
 func TestInferSafetensorsCapabilitiesGemma4AudioInventory(t *testing.T) {
 	identities := []struct {
 		name         string

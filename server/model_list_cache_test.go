@@ -178,6 +178,44 @@ func TestModelListSummaryGemma4SafetensorsVisionRequiresTensorLayers(t *testing.
 	}
 }
 
+func TestModelListSummaryGemma4UnifiedVisionRequiresTensorLayers(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	cfg := model.ConfigV2{
+		ModelFormat:  "safetensors",
+		Renderer:     gemma4RendererLarge,
+		Capabilities: []string{"completion", "vision", "audio", "tools", "thinking"},
+	}
+	for _, tt := range []struct {
+		name       string
+		layers     []manifest.Layer
+		wantVision bool
+	}{
+		{"complete", gemma4UnifiedVisionManifestLayers(t, true), true},
+		{"partial", gemma4UnifiedVisionManifestLayers(t, false), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			modelName := "list-gemma4-unified-vision-" + tt.name
+			createSafetensorsTestModel(t, modelName, cfg, tt.layers)
+			mf, err := manifest.ParseNamedManifest(model.ParseName(modelName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			summary, err := buildModelListSummary(model.ParseName(modelName), mf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(summary.Capabilities, model.CapabilityVision); got != tt.wantVision {
+				t.Fatalf("vision capability = %v, want %v (%v)", got, tt.wantVision, summary.Capabilities)
+			}
+			for _, capability := range []model.Capability{model.CapabilityCompletion, model.CapabilityTools, model.CapabilityThinking} {
+				if !slices.Contains(summary.Capabilities, capability) {
+					t.Fatalf("capabilities = %v, want preserved %s", summary.Capabilities, capability)
+				}
+			}
+		})
+	}
+}
+
 func TestModelListSummaryGemma4AudioRequiresRuntimeMetadataAndTensors(t *testing.T) {
 	setTestHome(t, t.TempDir())
 	cfg := model.ConfigV2{ModelFormat: "safetensors", Renderer: gemma4RendererSmall, Capabilities: []string{"completion", "audio"}}

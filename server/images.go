@@ -634,7 +634,9 @@ func gemma4VisionTensorDescriptors(layers []manifest.Layer) (map[string]gemma4me
 		if layer.MediaType != manifest.MediaTypeImageTensor {
 			continue
 		}
-		if !strings.Contains(layer.Name, "vision_tower.") && !strings.Contains(layer.Name, "embed_vision.") {
+		if !strings.Contains(layer.Name, "vision_tower.") &&
+			!strings.Contains(layer.Name, "vision_embedder.") &&
+			!strings.Contains(layer.Name, "embed_vision.") {
 			continue
 		}
 		filename, err := manifest.BlobsPath(layer.Digest)

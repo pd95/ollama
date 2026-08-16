@@ -1191,9 +1191,44 @@ func TestGemma4UnifiedAudioCapabilityRequiresProjection(t *testing.T) {
 
 func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
 	t.Helper()
+	config := []byte(`{"text_config":{"hidden_size":6},"vision_config":{"hidden_size":4,"intermediate_size":8,"num_hidden_layers":2,"num_attention_heads":1,"num_key_value_heads":1,"head_dim":4,"default_output_length":1,"patch_size":2,"position_embedding_size":16,"pooling_kernel_size":1}}`)
+	layers := gemma4VisionManifestLayersFromDescriptors(t, testGemma4VisionTensorDescriptors(2), config)
+	descriptors, err := gemma4VisionTensorDescriptors(layers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gemma4metadata.ValidateVisionInstalledInventory(*gemma4VisionConfig(2), descriptors); err != nil {
+		t.Fatalf("validate Gemma4 descriptor fixture: %v", err)
+	}
+	return layers
+}
 
-	layers := make([]manifest.Layer, 0, len(gemma4VisionTensorNames(2))+1)
-	for name, descriptor := range testGemma4VisionTensorDescriptors(2) {
+func gemma4UnifiedVisionManifestLayers(t *testing.T, complete bool) []manifest.Layer {
+	t.Helper()
+	descriptors := map[string]gemma4metadata.TensorDescriptor{
+		"model.vision_embedder.patch_ln1.weight":         {Dtype: "F32", Shape: []int32{12}},
+		"model.vision_embedder.patch_ln1.bias":           {Dtype: "F32", Shape: []int32{12}},
+		"model.vision_embedder.patch_dense.weight":       {Dtype: "F32", Shape: []int32{3, 12}},
+		"model.vision_embedder.patch_dense.bias":         {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.patch_ln2.weight":         {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.patch_ln2.bias":           {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.pos_embedding":            {Dtype: "F32", Shape: []int32{4, 2, 3}},
+		"model.vision_embedder.pos_norm.weight":          {Dtype: "F32", Shape: []int32{3}},
+		"model.vision_embedder.pos_norm.bias":            {Dtype: "F32", Shape: []int32{3}},
+		"model.embed_vision.embedding_projection.weight": {Dtype: "F32", Shape: []int32{5, 3}},
+	}
+	if !complete {
+		delete(descriptors, "model.vision_embedder.pos_norm.bias")
+	}
+	config := []byte(`{"architectures":["Gemma4UnifiedForConditionalGeneration"],"model_type":"gemma4_unified","text_config":{"hidden_size":5},"vision_config":{"model_type":"gemma4_unified_vision","mm_embed_dim":3,"mm_posemb_size":4,"model_patch_size":2,"num_soft_tokens":2,"patch_size":1,"pooling_kernel_size":2}}`)
+	return gemma4VisionManifestLayersFromDescriptors(t, descriptors, config)
+}
+
+func gemma4VisionManifestLayersFromDescriptors(t *testing.T, descriptors map[string]gemma4metadata.TensorDescriptor, config []byte) []manifest.Layer {
+	t.Helper()
+
+	layers := make([]manifest.Layer, 0, len(descriptors)+1)
+	for name, descriptor := range descriptors {
 		shape := make([]int64, len(descriptor.Shape))
 		for i, dim := range descriptor.Shape {
 			shape[i] = int64(dim)
@@ -1216,7 +1251,6 @@ func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
 			Name:      name,
 		})
 	}
-	config := []byte(`{"text_config":{"hidden_size":6},"vision_config":{"hidden_size":4,"intermediate_size":8,"num_hidden_layers":2,"num_attention_heads":1,"num_key_value_heads":1,"head_dim":4,"default_output_length":1,"patch_size":2,"position_embedding_size":16,"pooling_kernel_size":1}}`)
 	configDigest := createTestBlob(t, config)
 	layers = append(layers, manifest.Layer{
 		MediaType: "application/vnd.ollama.image.json",
@@ -1224,10 +1258,10 @@ func gemma4VisionManifestLayers(t *testing.T) []manifest.Layer {
 		Size:      int64(len(config)),
 		Name:      "config.json",
 	})
-	if descriptors, err := gemma4VisionTensorDescriptors(layers); err != nil {
+	if got, err := gemma4VisionTensorDescriptors(layers); err != nil {
 		t.Fatalf("read Gemma4 descriptor fixture: %v", err)
-	} else if err := gemma4metadata.ValidateVisionInstalledInventory(*gemma4VisionConfig(2), descriptors); err != nil {
-		t.Fatalf("validate Gemma4 descriptor fixture: %v", err)
+	} else if len(got) != len(descriptors) {
+		t.Fatalf("hydrated descriptor count = %d, want %d", len(got), len(descriptors))
 	}
 	return layers
 }
