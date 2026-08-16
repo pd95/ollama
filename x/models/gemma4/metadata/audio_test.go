@@ -154,6 +154,71 @@ func TestValidateReleasedAudioInventory(t *testing.T) {
 	}
 }
 
+func TestValidateAudioNormalizedQuantizedInventory(t *testing.T) {
+	cfg := releasedAudioConfig(1)
+	dense := completeAudioInventory(cfg)
+	if err := ValidateAudioInstalledInventory(cfg, dense); err != nil {
+		t.Fatalf("dense installed inventory: %v", err)
+	}
+	if err := ValidateAudioRuntimeInventory(cfg, dense); err != nil {
+		t.Fatalf("dense runtime inventory: %v", err)
+	}
+
+	const base = "model.audio_tower.layers.0.self_attn.q_proj.linear"
+	logical := dense[base+".weight"].Shape
+	for _, tt := range []struct {
+		name      string
+		bits      int32
+		groupSize int32
+	}{
+		{"mxfp4", 4, 32},
+		{"mxfp8", 8, 32},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			installed := maps.Clone(dense)
+			installed[base+".weight"] = TensorDescriptor{
+				Dtype: "U32", Shape: []int32{logical[0], logical[1] / (32 / tt.bits)},
+				QuantType: tt.name, GroupSize: int(tt.groupSize),
+			}
+			installed[base+".weight.scale"] = TensorDescriptor{Dtype: "U8", Shape: []int32{logical[0], logical[1] / tt.groupSize}}
+			if err := ValidateAudioInstalledInventory(cfg, installed); err != nil {
+				t.Fatalf("installed inventory: %v", err)
+			}
+
+			runtime := maps.Clone(installed)
+			delete(runtime, base+".weight.scale")
+			runtime[base+".weight_scale"] = TensorDescriptor{Dtype: "U8", Shape: []int32{logical[0], logical[1] / tt.groupSize}}
+			if err := ValidateAudioRuntimeInventory(cfg, runtime); err != nil {
+				t.Fatalf("runtime inventory: %v", err)
+			}
+
+			delete(runtime, base+".weight_scale")
+			if err := ValidateAudioRuntimeInventory(cfg, runtime); err == nil {
+				t.Fatal("incomplete quantized runtime inventory accepted")
+			}
+		})
+	}
+
+	missing := maps.Clone(dense)
+	names := sortedAudioShapeNames(mustRequiredAudioShapes(t, cfg))
+	delete(missing, names[0])
+	delete(missing, names[1])
+	for range 3 {
+		if err := ValidateAudioRuntimeInventory(cfg, missing); err == nil || !strings.Contains(err.Error(), names[0]) {
+			t.Fatalf("deterministic first missing tensor error = %v, want %s", err, names[0])
+		}
+	}
+}
+
+func mustRequiredAudioShapes(t *testing.T, cfg ConfigFile) map[string][]int32 {
+	t.Helper()
+	shapes, err := requiredAudioShapes(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return shapes
+}
+
 func TestValidateAudioTensorsExactNormalizedNames(t *testing.T) {
 	cfg := releasedAudioConfig(1)
 	shapes, err := RequiredAudioTensorShapes(cfg)
@@ -209,6 +274,29 @@ func TestValidateReleasedUnifiedAudioInventory(t *testing.T) {
 	bad["model.embed_audio.embedding_projection.weight"] = TensorDescriptor{Dtype: "BF16", Shape: []int32{3840, 639}}
 	if err := ValidateAudioSourceInventory(cfg, bad); err == nil {
 		t.Fatal("bad unified projection shape: error = nil")
+	}
+
+	quantized := maps.Clone(tensors)
+	quantized["model.embed_audio.embedding_projection.weight"] = TensorDescriptor{
+		Dtype: "U32", Shape: []int32{3840, 160}, QuantType: "mxfp8", GroupSize: 32,
+	}
+	quantized["model.embed_audio.embedding_projection.weight.scale"] = TensorDescriptor{
+		Dtype: "U8", Shape: []int32{3840, 20},
+	}
+	if err := ValidateAudioInstalledInventory(cfg, quantized); err != nil {
+		t.Fatalf("quantized unified installed inventory: %v", err)
+	}
+	runtime := maps.Clone(quantized)
+	delete(runtime, "model.embed_audio.embedding_projection.weight.scale")
+	runtime["model.embed_audio.embedding_projection.weight_scale"] = TensorDescriptor{
+		Dtype: "U8", Shape: []int32{3840, 20},
+	}
+	if err := ValidateAudioRuntimeInventory(cfg, runtime); err != nil {
+		t.Fatalf("quantized unified runtime inventory: %v", err)
+	}
+	delete(runtime, "model.embed_audio.embedding_projection.weight_scale")
+	if err := ValidateAudioRuntimeInventory(cfg, runtime); err == nil {
+		t.Fatal("incomplete quantized unified runtime inventory accepted")
 	}
 }
 

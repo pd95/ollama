@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
+	"strings"
 
 	"github.com/ollama/ollama/x/tokenizer"
 )
@@ -163,7 +165,7 @@ func ValidateAudioTensors(cfg ConfigFile, names []string) error {
 	for _, name := range names {
 		present[name] = struct{}{}
 	}
-	for name := range shapes {
+	for _, name := range sortedAudioShapeNames(shapes) {
 		if _, ok := present[name]; !ok {
 			return fmt.Errorf("missing %s", name)
 		}
@@ -181,7 +183,8 @@ func ValidateAudioSourceInventory(cfg ConfigFile, tensors map[string]TensorDescr
 	if err != nil {
 		return err
 	}
-	for name, shape := range shapes {
+	for _, name := range sortedAudioShapeNames(shapes) {
+		shape := shapes[name]
 		desc, ok := tensors[name]
 		if !ok {
 			return fmt.Errorf("missing %s", name)
@@ -196,11 +199,56 @@ func ValidateAudioSourceInventory(cfg ConfigFile, tensors map[string]TensorDescr
 	return nil
 }
 
-// ValidateAudioInstalledInventory validates the normalized descriptors stored
-// in installed tensor layers. Installed audio remains source precision at this
-// row, so its descriptor contract is identical to the released source form.
+// ValidateAudioInstalledInventory validates normalized descriptors stored in
+// installed tensor layers, including dense and quantized linear weights.
 func ValidateAudioInstalledInventory(cfg ConfigFile, tensors map[string]TensorDescriptor) error {
-	return ValidateAudioSourceInventory(cfg, tensors)
+	return validateAudioNormalizedInventory(cfg, tensors, installedMode)
+}
+
+// ValidateAudioRuntimeInventory validates the materialized runtime descriptor
+// inventory. It is the authoritative completeness/readiness gate used before
+// the MLX audio loader consumes arrays.
+func ValidateAudioRuntimeInventory(cfg ConfigFile, tensors map[string]TensorDescriptor) error {
+	return validateAudioNormalizedInventory(cfg, tensors, runtimeMode)
+}
+
+func validateAudioNormalizedInventory(cfg ConfigFile, tensors map[string]TensorDescriptor, mode inventoryMode) error {
+	if err := validateAudioConfig(cfg); err != nil {
+		return err
+	}
+	shapes, err := requiredAudioShapes(cfg)
+	if err != nil {
+		return err
+	}
+	for _, name := range sortedAudioShapeNames(shapes) {
+		shape := shapes[name]
+		desc, ok := tensors[name]
+		if !ok {
+			return fmt.Errorf("missing %s", name)
+		}
+		if len(shape) == 2 && strings.HasSuffix(name, ".weight") && (!isFloat(desc.Dtype) || hasProducerCompanion(tensors, strings.TrimSuffix(name, ".weight"))) {
+			if err := requireLinearDescriptor(tensors, strings.TrimSuffix(name, ".weight"), shape, mode, cfg); err != nil {
+				return err
+			}
+			continue
+		}
+		if !slices.Equal(desc.Shape, shape) {
+			return fmt.Errorf("%s shape %v, want %v", name, desc.Shape, shape)
+		}
+		if !isFloat(desc.Dtype) {
+			return fmt.Errorf("%s dtype %s is not floating point", name, desc.Dtype)
+		}
+	}
+	return nil
+}
+
+func sortedAudioShapeNames(shapes map[string][]int32) []string {
+	names := make([]string, 0, len(shapes))
+	for name := range shapes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // RequiredAudioTensorShapes returns a copy of the normalized released audio

@@ -109,17 +109,36 @@ type AudioModel struct {
 	Config       *AudioConfig
 }
 
-func hasCompleteGemma4AudioWeights(tensors map[string]*mlx.Array, cfg *AudioConfig, textHidden int32) bool {
+func validateGemma4AudioReadiness(
+	tensors map[string]*mlx.Array,
+	cfg *AudioConfig,
+	textHidden int32,
+	groupSize, bits int,
+	mode string,
+	tq map[string]*model.TensorQuantInfo,
+) (bool, error) {
 	if cfg == nil {
-		return false
+		return false, nil
 	}
-	names := make([]string, 0, len(tensors))
-	for name, tensor := range tensors {
-		if tensor != nil {
-			names = append(names, name)
+	sentinel := tensors["model.audio_tower.subsample_conv_projection.layer0.conv.weight"]
+	packedSentinel := tensors["model.audio_tower.subsample_conv_projection.layer0.conv.weight_packed"]
+	if cfg.unified() {
+		sentinel = tensors["model.embed_audio.embedding_projection.weight"]
+		packedSentinel = tensors["model.embed_audio.embedding_projection.weight_packed"]
+	}
+	if sentinel == nil {
+		if packedSentinel != nil {
+			return false, fmt.Errorf("runtime contains source-only Gemma4 audio packed sentinel")
 		}
+		return false, nil
 	}
-	return gemma4metadata.ValidateAudioTensors(audioMetadataConfig(cfg, textHidden), names) == nil
+	metadataCfg := audioMetadataConfig(cfg, textHidden)
+	metadataCfg.QuantizationConfig = gemma4metadata.Quantization{Bits: bits, GroupSize: groupSize, Mode: mode}
+	descriptors := gemma4RuntimeTensorDescriptors(tensors, tq, groupSize, mode)
+	if err := gemma4metadata.ValidateAudioRuntimeInventory(metadataCfg, descriptors); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func audioMetadataConfig(cfg *AudioConfig, textHidden int32) gemma4metadata.ConfigFile {
@@ -145,27 +164,8 @@ func audioMetadataConfig(cfg *AudioConfig, textHidden int32) gemma4metadata.Conf
 }
 
 func validateGemma4AudioWeights(tensors map[string]*mlx.Array, cfg *AudioConfig, textHidden int32) error {
-	required, err := gemma4metadata.RequiredAudioTensorShapes(audioMetadataConfig(cfg, textHidden))
-	if err != nil {
-		return err
-	}
-	for name, shape := range required {
-		tensor := tensors[name]
-		if tensor == nil {
-			return fmt.Errorf("missing Gemma4 audio tensor %s", name)
-		}
-		want := make([]int, len(shape))
-		for i, dim := range shape {
-			want[i] = int(dim)
-		}
-		if !equalIntShape(tensor.Dims(), want) {
-			return fmt.Errorf("Gemma4 audio tensor %s shape %v, want %v", name, tensor.Dims(), want)
-		}
-		if !supportedGemma4AudioDType(tensor.DType()) {
-			return fmt.Errorf("Gemma4 audio tensor %s has unsupported dtype %s", name, tensor.DType())
-		}
-	}
-	return nil
+	_, err := validateGemma4AudioReadiness(tensors, cfg, textHidden, 0, 0, "", nil)
+	return err
 }
 
 func supportedGemma4AudioDType(dtype mlx.DType) bool {
@@ -190,8 +190,12 @@ func equalIntShape(a, b []int) bool {
 }
 
 func loadAudioModel(tensors map[string]*mlx.Array, cfg *AudioConfig, textHidden int32, groupSize, bits int, mode string, tq map[string]*model.TensorQuantInfo) (*AudioModel, error) {
-	if err := validateGemma4AudioWeights(tensors, cfg, textHidden); err != nil {
+	ready, err := validateGemma4AudioReadiness(tensors, cfg, textHidden, groupSize, bits, mode, tq)
+	if err != nil {
 		return nil, err
+	}
+	if !ready {
+		return nil, errors.New("missing Gemma4 audio tensors")
 	}
 	const prefix = "model.audio_tower."
 	linears := model.NewLinearFactory(tensors, groupSize, bits, mode, tq)
@@ -295,7 +299,7 @@ func loadAudioModel(tensors map[string]*mlx.Array, cfg *AudioConfig, textHidden 
 			FeedForward1: ff1, FeedForward2: ff2,
 			Attention: &audioAttention{
 				Q: q, K: k, V: v, Output: attnOut, RelativeK: relativeK,
-				RelativeKDType: tensors[path+"self_attn.relative_k_proj.weight"].DType(),
+				RelativeKDType: gemma4LinearComputeDType(tensors, path+"self_attn.relative_k_proj"),
 				PerDimScale:    perDimScale, Config: cfg,
 			},
 			LightConv:        &audioLightConv{PreNorm: convPre, ConvNorm: convNorm, Start: convStart, End: convEnd, DepthwiseWeight: depthwise, Config: cfg},
