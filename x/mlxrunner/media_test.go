@@ -146,7 +146,10 @@ func TestBatchMediaStagedLifecycle(t *testing.T) {
 		cuts:                &cuts,
 	}}
 	m := r.openMedia(Request{Tokens: make([]int32, 4), MediaItems: []mediaItem{{pos: 1, length: 2, item: prepared}}})
+	live := mlx.FromValues([]int32{1, 2}, 1, 2)
+	mlx.Pin(live)
 	items := m.batchMedia(0, 3)
+	mlx.Unpin(live)
 	if items[0].Features == nil || stagedCalls != 1 || encodeCalls != 0 || cuts != 1 {
 		t.Fatalf("staged lifecycle = features %v, staged %d, lazy %d, cuts %d", items[0].Features != nil, stagedCalls, encodeCalls, cuts)
 	}
@@ -155,6 +158,9 @@ func TestBatchMediaStagedLifecycle(t *testing.T) {
 	mlx.Eval(items[0].Features)
 	if got := items[0].Features.Dims(); !slices.Equal(got, []int{2, 4}) {
 		t.Fatalf("features after staged sweep = %v, want [2 4]", got)
+	}
+	if got := live.Dims(); !slices.Equal(got, []int{1, 2}) {
+		t.Fatalf("live request state after staged sweep = %v, want [1 2]", got)
 	}
 	m.release(3)
 	if m.manifest[0].Features != nil {
