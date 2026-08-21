@@ -26,6 +26,7 @@ import (
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
 	imagemanifest "github.com/ollama/ollama/x/imagegen/manifest"
+	apertusmetadata "github.com/ollama/ollama/x/models/apertus/metadata"
 	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/quant"
 )
@@ -334,7 +335,6 @@ func readConfigV2(m *imagemanifest.ModelManifest) (*model.ConfigV2, error) {
 
 func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 	capabilities := []string{"completion"}
-
 	caps := detectCapabilities(modelDir)
 	if caps.vision {
 		capabilities = append(capabilities, "vision")
@@ -358,6 +358,28 @@ func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 	}
 
 	return capabilities
+}
+
+func detectApertus1p5MediaCapabilities(modelDir string) modelCapabilities {
+	inv, err := create.ReadInventory(modelDir)
+	if err != nil {
+		return modelCapabilities{}
+	}
+	return apertus1p5MediaCapabilities(inv)
+}
+
+func apertus1p5MediaCapabilities(inv create.Inventory) modelCapabilities {
+	cfg, err := apertusmetadata.ParseConfig(inv.RawConfig)
+	if err != nil {
+		return modelCapabilities{}
+	}
+	descriptors := make(map[string]apertusmetadata.TensorDescriptor, len(inv.Tensors))
+	for name, tensor := range inv.Tensors {
+		descriptors[name] = apertusmetadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
+	}
+	vision := apertusmetadata.ValidateVisionInventory(cfg, descriptors) == nil
+	audio := apertusmetadata.ValidateAudioInventory(cfg, descriptors) == nil
+	return modelCapabilities{vision: vision, audio: audio}
 }
 
 // newLayerCreator returns a LayerCreator callback for creating config/JSON layers.
@@ -565,6 +587,9 @@ func detectCapabilities(modelDir string) modelCapabilities {
 	audio := cfg.AudioConfig != nil || cfg.SoundConfig != nil
 	if isGemma4ModelConfig(cfg.Architectures, cfg.ModelType) {
 		vision, audio = gemma4ModelDirMediaCapabilities(modelDir)
+	} else if isApertus1p5ModelConfig(cfg.Architectures, cfg.ModelType) {
+		media := detectApertus1p5MediaCapabilities(modelDir)
+		vision, audio = media.vision, media.audio
 	}
 
 	return modelCapabilities{
@@ -573,6 +598,16 @@ func detectCapabilities(modelDir string) modelCapabilities {
 		thinking: chatTemplateHasThinkingSupport(readChatTemplate(modelDir)) ||
 			alwaysSupportsThinking(cfg.Architectures, cfg.ModelType),
 	}
+}
+
+func isApertus1p5ModelConfig(architectures []string, modelType string) bool {
+	for _, value := range append(architectures, modelType) {
+		value = strings.ToLower(value)
+		if strings.Contains(value, "apertus1p5") || strings.Contains(value, "apertus-1.5") || strings.Contains(value, "apertus_1_5") {
+			return true
+		}
+	}
+	return false
 }
 
 // isApertus1p0ModelDir recognizes the original text-only Apertus release.
