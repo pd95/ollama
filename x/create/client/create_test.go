@@ -1643,6 +1643,21 @@ func TestGetParserName(t *testing.T) {
 			want:       "nemotron-3-nano",
 		},
 		{
+			name:       "apertus model",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       "apertus",
+		},
+		{
+			name:       "apertus 1.5 model",
+			configJSON: `{"architectures": ["Apertus1p5ForConditionalGeneration"], "model_type": "apertus_1_5"}`,
+			want:       "apertus",
+		},
+		{
+			name:       "apertus nested llm config",
+			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"apertus"}}`,
+			want:       "apertus",
+		},
+		{
 			name:       "no config",
 			configJSON: `{}`,
 			want:       "",
@@ -1736,6 +1751,26 @@ func TestGetRendererName(t *testing.T) {
 			name:       "nemotron nested llm config",
 			configJSON: `{"model_type": "nemotron_h_omni", "llm_config": {"model_type": "nemotron_h"}}`,
 			want:       "nemotron-3-nano",
+		},
+		{
+			name:       "apertus model",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       "apertus",
+		},
+		{
+			name:       "apertus 1.5 model",
+			configJSON: `{"architectures": ["Apertus1p5ForConditionalGeneration"], "model_type": "apertus_1_5"}`,
+			want:       "apertus1p5",
+		},
+		{
+			name:       "apertus 1.5 nested llm config",
+			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"apertus-1.5"}}`,
+			want:       "apertus1p5",
+		},
+		{
+			name:       "apertus nested llm config",
+			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"apertus"}}`,
+			want:       "apertus",
 		},
 	}
 
