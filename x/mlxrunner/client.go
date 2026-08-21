@@ -278,7 +278,7 @@ func (c *Client) HasExited() bool {
 }
 
 // Load checks whether the model fits in GPU memory and starts the subprocess.
-func (c *Client) Load(ctx context.Context, _ ml.SystemInfo, gpus []ml.DeviceInfo, requireFull bool) ([]ml.DeviceID, error) {
+func (c *Client) Load(ctx context.Context, systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, requireFull bool) ([]ml.DeviceID, error) {
 	if len(gpus) > 0 {
 		modelSize := c.memory.Load()
 		// We currently only use the first GPU with MLX
@@ -321,7 +321,20 @@ func (c *Client) Load(ctx context.Context, _ ml.SystemInfo, gpus []ml.DeviceInfo
 	}
 
 	// Spawn subprocess: ollama runner --mlx-engine --model <name> --port <port>
-	cmd := exec.Command(exe, "runner", "--mlx-engine", "--model", c.modelName, "--port", strconv.Itoa(port))
+	args := []string{"runner", "--mlx-engine", "--model", c.modelName, "--port", strconv.Itoa(port)}
+	mediaLimit := automaticMediaMemoryLimit(systemInfo, gpus)
+	if configured := envconfig.MLXMediaMemoryLimit(); configured > 0 {
+		var ignored bool
+		mediaLimit, ignored = lowerMediaMemoryLimit(mediaLimit, configured)
+		if ignored {
+			slog.Warn("ignoring MLX media memory limit above automatic safe limit",
+				"configured", format.HumanBytes2(configured), "automatic", format.HumanBytes2(mediaLimit))
+		}
+	}
+	if mediaLimit > 0 {
+		args = append(args, "--media-memory-limit", strconv.FormatUint(mediaLimit, 10))
+	}
+	cmd := exec.Command(exe, args...)
 	cmd.Env = os.Environ()
 
 	// Set library path environment variable for MLX libraries
@@ -400,6 +413,31 @@ func (c *Client) Load(ctx context.Context, _ ml.SystemInfo, gpus []ml.DeviceInfo
 	}()
 
 	return nil, nil
+}
+
+func lowerMediaMemoryLimit(automatic, configured uint64) (uint64, bool) {
+	if configured == 0 {
+		return automatic, false
+	}
+	if automatic == 0 || configured < automatic {
+		return configured, false
+	}
+	return automatic, configured > automatic
+}
+
+func automaticMediaMemoryLimit(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo) uint64 {
+	capacity := systemInfo.TotalMemory
+	if len(gpus) > 0 && !strings.EqualFold(gpus[0].Library, "Metal") && gpus[0].TotalMemory > 0 {
+		capacity = gpus[0].TotalMemory
+	}
+	if capacity == 0 {
+		return 0
+	}
+	reserve := max(uint64(4*format.GibiByte), capacity/4)
+	if reserve >= capacity {
+		return 0
+	}
+	return capacity - reserve
 }
 
 // ModelPath implements llm.LlamaServer.
