@@ -1,6 +1,13 @@
 package create
 
-import "strings"
+import (
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/ollama/ollama/x/quant"
+)
 
 // prequantPattern describes how one producer packs an already-quantized weight
 // and its scale companions into safetensors files, and how to fuse them into
@@ -73,13 +80,20 @@ var prequantPatterns = []prequantPattern{
 // and any remaining tensors (norms, embeddings) pass through at source
 // precision.
 func planPrequantized(inv Inventory, policy quantizePolicy) ([]BlobSpec, error) {
+	if err := validateMLXPrequantCompanions(inv, policy); err != nil {
+		return nil, err
+	}
+
 	fused := make(map[string]BlobSpec)
 	consumed := make(map[string]bool)
 	for _, name := range sortedTensorNames(inv) {
 		if !tensorIncluded(policy, name) {
 			continue
 		}
-		spec, sources, ok := matchPrequant(name, inv)
+		spec, sources, ok, err := matchPrequant(name, inv)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			continue
 		}
@@ -107,11 +121,40 @@ func planPrequantized(inv Inventory, policy quantizePolicy) ([]BlobSpec, error) 
 	return specs, nil
 }
 
+func validateMLXPrequantCompanions(inv Inventory, policy quantizePolicy) error {
+	for _, name := range sortedTensorNames(inv) {
+		if !tensorIncluded(policy, name) {
+			continue
+		}
+		if base, ok := strings.CutSuffix(name, ".scales"); ok {
+			if !inv.Has(base + ".weight") {
+				return fmt.Errorf("MLX quantization scale %s is missing weight companion %s", name, base+".weight")
+			}
+			continue
+		}
+		if !strings.HasSuffix(name, ".weight") || !strings.EqualFold(inv.Tensors[name].Dtype, "U32") {
+			continue
+		}
+		metadata, explicit, err := inv.Config.TensorQuantMetadata(name)
+		if err != nil {
+			return err
+		}
+		if !explicit {
+			continue
+		}
+		_, _, mode := quant.Params(metadata["quant_type"])
+		if mode == "affine" && !inv.Has(strings.TrimSuffix(name, ".weight")+".scales") {
+			return fmt.Errorf("MLX affine tensor %s is missing required scale companion %s", name, strings.TrimSuffix(name, ".weight")+".scales")
+		}
+	}
+	return nil
+}
+
 // matchPrequant returns the fused blob for a weight tensor if it matches a
 // prequantized producer, along with the source names it consumes. It returns
 // ok=false when name is not a prequantized weight (a companion or a plain
 // tensor).
-func matchPrequant(name string, inv Inventory) (BlobSpec, []string, bool) {
+func matchPrequant(name string, inv Inventory) (BlobSpec, []string, bool, error) {
 	for _, p := range prequantPatterns {
 		base, ok := strings.CutSuffix(name, p.weightSuffix)
 		if !ok {
@@ -168,18 +211,45 @@ func matchPrequant(name string, inv Inventory) (BlobSpec, []string, bool) {
 			}
 		}
 
-		return BlobSpec{Name: outWeight, Tensors: tensors, Metadata: prequantMetadata(inv, p)}, consumed, true
+		metadata, err := prequantMetadata(inv, p, outWeight, weight, scale)
+		if err != nil {
+			return BlobSpec{}, nil, false, err
+		}
+		if p.name == "mlx" {
+			if err := validateMLXAffineLayout(inv, base, weight, scale, metadata); err != nil {
+				return BlobSpec{}, nil, false, err
+			}
+		}
+
+		return BlobSpec{Name: outWeight, Tensors: tensors, Metadata: metadata}, consumed, true, nil
 	}
-	return BlobSpec{}, nil, false
+	return BlobSpec{}, nil, false, nil
 }
 
 // prequantMetadata builds the fused blob's metadata: the source config's quant
 // metadata, with the pattern's quant_type override and group_size default
 // applied. Returns nil when there is nothing to record.
-func prequantMetadata(inv Inventory, p prequantPattern) map[string]string {
+func prequantMetadata(inv Inventory, p prequantPattern, weightName string, weight, scale SourceTensor) (map[string]string, error) {
 	md := make(map[string]string)
-	for k, v := range inv.Config.QuantMetadata() {
-		md[k] = v
+	if p.name == "mlx" {
+		resolved, explicit, err := inv.Config.TensorQuantMetadata(weightName)
+		if err != nil {
+			return nil, err
+		}
+		if explicit {
+			for k, v := range resolved {
+				md[k] = v
+			}
+		} else if quantType, groupSize, ok := inferLegacyMLXAffine(weight, scale); ok {
+			md["quant_type"] = quantType
+			md["group_size"] = strconv.Itoa(groupSize)
+		} else {
+			return nil, fmt.Errorf("MLX quantized tensor %s requires explicit quantization metadata; its packed layout is not an unambiguous legacy int4/int8 layout", weightName)
+		}
+	} else {
+		for k, v := range inv.Config.QuantMetadata() {
+			md[k] = v
+		}
 	}
 	if p.forceQuantType != "" {
 		md["quant_type"] = p.forceQuantType
@@ -190,7 +260,81 @@ func prequantMetadata(inv Inventory, p prequantPattern) map[string]string {
 		}
 	}
 	if len(md) == 0 {
+		return nil, nil
+	}
+	return md, nil
+}
+
+func inferLegacyMLXAffine(weight, scale SourceTensor) (string, int, bool) {
+	if !strings.EqualFold(weight.Dtype, "U32") || len(weight.Shape) < 2 || len(weight.Shape) != len(scale.Shape) {
+		return "", 0, false
+	}
+	if !slices.Equal(weight.Shape[:len(weight.Shape)-1], scale.Shape[:len(scale.Shape)-1]) {
+		return "", 0, false
+	}
+	packed := int64(weight.Shape[len(weight.Shape)-1])
+	scaleCols := int64(scale.Shape[len(scale.Shape)-1])
+	if packed <= 0 || scaleCols <= 0 {
+		return "", 0, false
+	}
+	if packed%scaleCols == 0 {
+		switch packed / scaleCols {
+		case 4:
+			return "int4", 32, true
+		case 16:
+			return "int8", 64, true
+		}
+	}
+	return "", 0, false
+}
+
+func validateMLXAffineLayout(inv Inventory, base string, weight, scale SourceTensor, metadata map[string]string) error {
+	quantType := metadata["quant_type"]
+	groupSize, err := strconv.Atoi(metadata["group_size"])
+	if err != nil {
+		return fmt.Errorf("MLX quantized tensor %s has invalid group_size %q", weight.Name, metadata["group_size"])
+	}
+	_, bits, mode := quant.Params(quantType)
+	if !quant.Importable(quantType) {
+		return fmt.Errorf("MLX quantized tensor %s has unsupported quantization %q", weight.Name, quantType)
+	}
+	// This strict companion/layout validation is specific to MLX affine
+	// weights. Existing MLX mxfp/nvfp checkpoints use the same .scales naming
+	// pattern but intentionally have no affine bias companion.
+	if mode != "affine" {
 		return nil
 	}
-	return md
+	switch groupSize {
+	case 32, 64, 128:
+	default:
+		return fmt.Errorf("MLX quantized tensor %s has unsupported affine group_size %d", weight.Name, groupSize)
+	}
+	if !strings.EqualFold(weight.Dtype, "U32") {
+		return fmt.Errorf("MLX quantized tensor %s dtype = %q, want U32", weight.Name, weight.Dtype)
+	}
+	biasName := base + ".biases"
+	bias, ok := inv.Tensors[biasName]
+	if !ok {
+		return fmt.Errorf("MLX affine tensor %s is missing required bias companion %s", weight.Name, biasName)
+	}
+	if len(weight.Shape) < 2 || len(scale.Shape) != len(weight.Shape) || len(bias.Shape) != len(scale.Shape) {
+		return fmt.Errorf("MLX affine tensor %s has incompatible companion ranks: weight=%v scales=%v biases=%v", weight.Name, weight.Shape, scale.Shape, bias.Shape)
+	}
+	last := len(weight.Shape) - 1
+	if !slices.Equal(weight.Shape[:last], scale.Shape[:last]) || !slices.Equal(scale.Shape, bias.Shape) {
+		return fmt.Errorf("MLX affine tensor %s has incompatible companion shapes: weight=%v scales=%v biases=%v", weight.Name, weight.Shape, scale.Shape, bias.Shape)
+	}
+	packedColumns := int64(weight.Shape[last])
+	if packedColumns <= 0 || packedColumns > (1<<63-1)/32 {
+		return fmt.Errorf("MLX affine tensor %s has invalid packed column count %d", weight.Name, packedColumns)
+	}
+	expanded := packedColumns * 32
+	if expanded%int64(bits) != 0 {
+		return fmt.Errorf("MLX affine tensor %s packed columns %d do not expand exactly at %d bits", weight.Name, packedColumns, bits)
+	}
+	logicalColumns := expanded / int64(bits)
+	if logicalColumns%int64(groupSize) != 0 || int64(scale.Shape[last]) != logicalColumns/int64(groupSize) {
+		return fmt.Errorf("MLX affine tensor %s layout conflicts with quantization metadata: packed=%d bits=%d group_size=%d scales=%v", weight.Name, packedColumns, bits, groupSize, scale.Shape)
+	}
+	return nil
 }

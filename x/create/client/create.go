@@ -149,10 +149,10 @@ func CreateModel(opts CreateOptions, p *progress.Progress) error {
 	if opts.DraftQuantize != "" && !hasDraft {
 		return fmt.Errorf("--draft-quantize requires a DRAFT model")
 	}
-	if opts.Quantize != "" && quant.Canonical(opts.Quantize) == "" {
+	if opts.Quantize != "" && !quant.Creatable(opts.Quantize) {
 		return fmt.Errorf("unsupported --quantize %q: supported types are int4, int8, nvfp4, mxfp4, mxfp8", opts.Quantize)
 	}
-	if opts.DraftQuantize != "" && quant.Canonical(opts.DraftQuantize) == "" {
+	if opts.DraftQuantize != "" && !quant.Creatable(opts.DraftQuantize) {
 		return fmt.Errorf("unsupported --draft-quantize %q: supported types are int4, int8, nvfp4, mxfp4, mxfp8", opts.DraftQuantize)
 	}
 
