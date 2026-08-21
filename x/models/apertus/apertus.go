@@ -91,15 +91,24 @@ type Config struct {
 
 // Model is an Apertus text model.
 type Model struct {
-	EmbedTokens nn.EmbeddingLayer
-	Layers      []*Layer
-	Norm        *nn.RMSNorm
-	LMHead      nn.LinearLayer
-	Vision      *VisionTokenizer
-	Audio       *AudioTokenizer
+	EmbedTokens      nn.EmbeddingLayer
+	Layers           []*Layer
+	Norm             *nn.RMSNorm
+	LMHead           nn.LinearLayer
+	Vision           *VisionTokenizer
+	Audio            *AudioTokenizer
+	mediaMemoryLimit uint64
+	mediaResident    uint64
 
 	tok *tokenizer.Tokenizer
 	*Config
+}
+
+// ConfigureMediaMemory receives the runner's stable per-process media budget
+// after model weights have been materialized.
+func (m *Model) ConfigureMediaMemory(limit, resident uint64) {
+	m.mediaMemoryLimit = limit
+	m.mediaResident = resident
 }
 
 type Layer struct {

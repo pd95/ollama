@@ -108,6 +108,12 @@ func SetWiredLimit(limit int) (int, error) {
 	return int(previous), nil
 }
 
+func MemoryLimit() int {
+	var limit C.size_t
+	C.mlx_get_memory_limit(&limit)
+	return int(limit)
+}
+
 type Memory struct{}
 
 func (Memory) LogValue() slog.Value {
