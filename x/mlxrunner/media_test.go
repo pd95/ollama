@@ -67,6 +67,20 @@ type encodeCountingModel struct {
 	calls *int
 }
 
+type stagedCountingModel struct {
+	encodeCountingModel
+	stagedCalls *int
+	cuts        *int
+}
+
+func (m stagedCountingModel) EncodeMediaStaged(item *base.PreparedItem, data *mlx.Array, materialize base.MediaMaterializer) *mlx.Array {
+	*m.stagedCalls++
+	intermediate := mlx.AddScalar(data, 1)
+	materialize(intermediate)
+	*m.cuts++
+	return mlx.Zeros(mlx.DTypeFloat32, item.Range[1]-item.Range[0], 4)
+}
+
 func (m encodeCountingModel) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
 	*m.calls++
 	return mlx.Zeros(mlx.DTypeFloat32, item.Range[1]-item.Range[0], 4)
@@ -119,6 +133,33 @@ func TestBatchMediaLifecycle(t *testing.T) {
 			t.Fatal("openMedia returned non-nil for a text-only request")
 		}
 	})
+}
+
+func TestBatchMediaStagedLifecycle(t *testing.T) {
+	skipIfNoMLX(t)
+
+	encodeCalls, stagedCalls, cuts := 0, 0, 0
+	prepared := &base.PreparedItem{Range: [2]int{1, 3}, MediaData: []float32{1, 2}, Dims: []int{2}}
+	r := &Runner{Model: stagedCountingModel{
+		encodeCountingModel: encodeCountingModel{calls: &encodeCalls},
+		stagedCalls:         &stagedCalls,
+		cuts:                &cuts,
+	}}
+	m := r.openMedia(Request{Tokens: make([]int32, 4), MediaItems: []mediaItem{{pos: 1, length: 2, item: prepared}}})
+	items := m.batchMedia(0, 3)
+	if items[0].Features == nil || stagedCalls != 1 || encodeCalls != 0 || cuts != 1 {
+		t.Fatalf("staged lifecycle = features %v, staged %d, lazy %d, cuts %d", items[0].Features != nil, stagedCalls, encodeCalls, cuts)
+	}
+	// The staged cut sweeps its input graph; the final pinned feature array
+	// must remain valid until the expansion is released.
+	mlx.Eval(items[0].Features)
+	if got := items[0].Features.Dims(); !slices.Equal(got, []int{2, 4}) {
+		t.Fatalf("features after staged sweep = %v, want [2 4]", got)
+	}
+	m.release(3)
+	if m.manifest[0].Features != nil {
+		t.Fatal("staged features remained pinned past the expansion")
+	}
 }
 
 // Two prompts that differ only in their image diverge at the expansion's
