@@ -41,19 +41,24 @@ type Request struct {
 }
 
 type Runner struct {
-	Model         base.Model
-	Tokenizer     *tokenizer.Tokenizer
-	Requests      chan Request
-	Sampler       *sample.Sampler
-	cache         *prefixCache
-	contextLength int
-	mlxThread     *mlxthread.Thread
+	Model            base.Model
+	Tokenizer        *tokenizer.Tokenizer
+	Requests         chan Request
+	Sampler          *sample.Sampler
+	cache            *prefixCache
+	contextLength    int
+	mlxThread        *mlxthread.Thread
+	mediaMemoryLimit uint64
 	// grammarEngine is the structured-output subsystem; nil when the grammar
 	// library or vocabulary failed to load.
 	grammarEngine *grammarEngine
 	// spec is the speculative-decoding subsystem. Nil when the model ships no
 	// draft head.
 	spec *speculation
+}
+
+type mediaMemoryConfigurer interface {
+	ConfigureMediaMemory(limit, resident uint64)
 }
 
 func (r *Runner) Load(modelName string) error {
@@ -119,6 +124,16 @@ func (r *Runner) Load(modelName string) error {
 	mlx.Sweep()
 	mlx.Eval(collected...)
 	configureWiredMemory()
+
+	if configurer, ok := m.(mediaMemoryConfigurer); ok {
+		limit := r.mediaMemoryLimit
+		if limit == 0 {
+			// Direct runner launches do not carry scheduler discovery. MLX's
+			// allocator limit is still a useful conservative fallback.
+			limit = uint64(mlx.MemoryLimit()) * 3 / 4
+		}
+		configurer.ConfigureMediaMemory(limit, uint64(mlx.ActiveMemory()+mlx.CacheMemory()))
+	}
 
 	r.Model = m
 	r.Tokenizer = m.Tokenizer()
