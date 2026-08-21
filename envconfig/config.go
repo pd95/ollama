@@ -302,6 +302,10 @@ func Uint64(key string, defaultValue uint64) func() uint64 {
 // Set aside VRAM per GPU
 var GpuOverhead = Uint64("OLLAMA_GPU_OVERHEAD", 0)
 
+// MLXMediaMemoryLimit optionally lowers the automatically selected peak-memory
+// budget for MLX media processing. A value of zero uses the automatic budget.
+var MLXMediaMemoryLimit = Uint64("OLLAMA_MLX_MEDIA_MEMORY_LIMIT", 0)
+
 type EnvVar struct {
 	Name        string
 	Value       any
@@ -342,6 +346,7 @@ func AsMap() map[string]EnvVar {
 		"HTTPS_PROXY": {"HTTPS_PROXY", String("HTTPS_PROXY")(), "HTTPS proxy"},
 		"NO_PROXY":    {"NO_PROXY", String("NO_PROXY")(), "No proxy"},
 	}
+	ret["OLLAMA_MLX_MEDIA_MEMORY_LIMIT"] = EnvVar{"OLLAMA_MLX_MEDIA_MEMORY_LIMIT", MLXMediaMemoryLimit(), "Lower the automatic MLX media peak-memory budget (bytes)"}
 
 	if runtime.GOOS != "windows" {
 		// Windows environment variables are case-insensitive so there's no need to duplicate them
