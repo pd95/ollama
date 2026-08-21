@@ -1,6 +1,7 @@
 package create
 
 import (
+	"encoding/json"
 	"math"
 	"strconv"
 	"testing"
@@ -178,5 +179,83 @@ func apertus1p5Inventory() Inventory {
 	return Inventory{
 		Config:  sourceModelConfig{Architectures: []string{"Apertus1p5ForConditionalGeneration"}},
 		Tensors: tensors,
+	}
+}
+
+func TestApertusTiedEmbeddingImportFiltersLMHead(t *testing.T) {
+	policy, err := newApertusImportTransform(json.RawMessage(`{"tie_word_embeddings":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tensorIncluded(policy, "lm_head.weight") {
+		t.Fatal("tied Apertus import retained redundant lm_head.weight")
+	}
+	if !tensorIncluded(policy, "model.embed_tokens.weight") {
+		t.Fatal("tied Apertus import filtered model.embed_tokens.weight")
+	}
+
+	policy, err = newApertusImportTransform(json.RawMessage(`{"tie_word_embeddings":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tensorIncluded(policy, "lm_head.weight") {
+		t.Fatal("untied Apertus import filtered required lm_head.weight")
+	}
+}
+
+func TestApertusCompositeTiedEmbeddingUsesTextConfig(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		tied bool
+	}{
+		{
+			name: "nested false overrides top-level true",
+			raw:  `{"tie_word_embeddings":true,"text_config":{"tie_word_embeddings":false}}`,
+		},
+		{
+			name: "nested true overrides top-level false",
+			raw:  `{"tie_word_embeddings":false,"text_config":{"tie_word_embeddings":true}}`,
+			tied: true,
+		},
+		{
+			name: "missing nested value uses runtime default false",
+			raw:  `{"tie_word_embeddings":true,"text_config":{}}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			policy, err := newApertusImportTransform(json.RawMessage(tt.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotTied := !tensorIncluded(policy, "lm_head.weight"); gotTied != tt.tied {
+				t.Fatalf("tied import = %v, want %v", gotTied, tt.tied)
+			}
+		})
+	}
+}
+
+func TestApertusTiedEmbeddingPlanOmitsDuplicateHead(t *testing.T) {
+	inv := Inventory{
+		RawConfig: json.RawMessage(`{"architectures":["ApertusForCausalLM"],"tie_word_embeddings":true}`),
+		Config:    sourceModelConfig{Architectures: []string{"ApertusForCausalLM"}},
+		Tensors: map[string]SourceTensor{
+			"model.embed_tokens.weight": {Name: "model.embed_tokens.weight", Dtype: "BF16", Shape: []int32{128, 64}},
+			"lm_head.weight":            {Name: "lm_head.weight", Dtype: "BF16", Shape: []int32{128, 64}},
+		},
+	}
+	policy, err := newTensorImportTransform(inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs, err := Plan(inv, Classification{Kind: SourceFloat, Quantize: "nvfp4"}, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := specByName(specs, "lm_head.weight"); ok {
+		t.Fatalf("tied import planned lm_head.weight: %v", specNames(specs))
+	}
+	if _, ok := specByName(specs, "model.embed_tokens.weight"); !ok {
+		t.Fatalf("tied import omitted embedding: %v", specNames(specs))
 	}
 }
