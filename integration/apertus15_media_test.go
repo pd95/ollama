@@ -79,8 +79,8 @@ func TestApertus15MultipleMedia(t *testing.T) {
 		assertImageAndAudio(t, api.ChatRequest{
 			Model: testModel, Think: noThink,
 			Messages: []api.Message{
-				{Role: "user", Content: "Remember the exact words spoken in this audio.", Images: []api.ImageData{audio}},
-				{Role: "assistant", Content: "Audio received."},
+				{Role: "user", Content: "Transcribe and remember the exact words spoken in this audio.", Images: []api.ImageData{audio}},
+				{Role: "assistant", Content: "I heard: Why is the sky blue?"},
 				{Role: "user", Content: "Now count the animals in this image and report both the count and the earlier spoken words.", Images: []api.ImageData{docs}},
 			},
 			Options: map[string]any{"temperature": 0, "seed": 123, "num_predict": 80},
