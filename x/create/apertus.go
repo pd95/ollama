@@ -53,3 +53,7 @@ func apertusElementCount(shape []int32) (uint64, bool) {
 func isApertusNonlinearTensor(name string) bool {
 	return strings.Contains(name, ".act_fn.")
 }
+
+func isApertus1p5TextTensor(name string) bool {
+	return strings.HasPrefix(name, "model.language_model.") || name == "lm_head.weight"
+}
