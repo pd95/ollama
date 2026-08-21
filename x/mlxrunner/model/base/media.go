@@ -83,3 +83,16 @@ type MediaModel interface {
 	// once its expansion is evaluated.
 	EncodeMedia(item *PreparedItem, data *mlx.Array) *mlx.Array
 }
+
+// MediaMaterializer cuts a staged encoder graph at a model-selected boundary.
+// The runner owns evaluation and reclamation; models only identify arrays that
+// must survive the cut.
+type MediaMaterializer func(...*mlx.Array)
+
+// StagedMediaModel is the optional bounded-memory extension to MediaModel.
+// EncodeMedia remains the lazy compatibility path. The runner calls this
+// method when a model needs explicit graph-lifetime boundaries.
+type StagedMediaModel interface {
+	MediaModel
+	EncodeMediaStaged(item *PreparedItem, data *mlx.Array, materialize MediaMaterializer) *mlx.Array
+}
