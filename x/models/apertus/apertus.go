@@ -209,10 +209,10 @@ func tokenizerDataForConfig(cfg Config, data []byte) ([]byte, error) {
 	if !isApertus1p5Config(cfg) {
 		return data, nil
 	}
-	return pruneApertus1p5TokenizerAddedTokens(data, cfg.OutputVocabSize)
+	return pruneApertus1p5TokenizerAddedTokens(data, cfg.VocabSize)
 }
 
-func pruneApertus1p5TokenizerAddedTokens(data []byte, outputVocabSize int32) ([]byte, error) {
+func pruneApertus1p5TokenizerAddedTokens(data []byte, inputVocabSize int32) ([]byte, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -233,7 +233,7 @@ func pruneApertus1p5TokenizerAddedTokens(data []byte, outputVocabSize int32) ([]
 		if err := json.Unmarshal(tokenRaw, &token); err != nil {
 			return nil, err
 		}
-		if token.ID >= 0 && token.ID < outputVocabSize {
+		if token.ID >= 0 && token.ID < inputVocabSize {
 			filtered = append(filtered, tokenRaw)
 		}
 	}

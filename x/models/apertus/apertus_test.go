@@ -166,11 +166,12 @@ func TestPruneApertus1p5TokenizerAddedTokens(t *testing.T) {
 			{"id": 61, "content": "<|system_start|>", "special": true},
 			{"id": 73, "content": "<|tool_output_start|>", "special": true},
 			{"id": 131073, "content": "<|img_start|>", "special": true},
-			{"id": 262344, "content": "<|audio token 0|>", "special": true}
+			{"id": 262344, "content": "<|audio token 0|>", "special": true},
+			{"id": 266752, "content": "<|overflow|>", "special": true}
 		]
 	}`)
 
-	pruned, err := pruneApertus1p5TokenizerAddedTokens(data, 131072)
+	pruned, err := pruneApertus1p5TokenizerAddedTokens(data, 266752)
 	if err != nil {
 		t.Fatalf("pruneApertus1p5TokenizerAddedTokens error: %v", err)
 	}
@@ -191,6 +192,8 @@ func TestPruneApertus1p5TokenizerAddedTokens(t *testing.T) {
 	}{
 		{id: 61, content: "<|system_start|>"},
 		{id: 73, content: "<|tool_output_start|>"},
+		{id: 131073, content: "<|img_start|>"},
+		{id: 262344, content: "<|audio token 0|>"},
 	}
 	if len(got.AddedTokens) != len(want) {
 		t.Fatalf("kept added tokens = %v, want %d", got.AddedTokens, len(want))
@@ -218,7 +221,7 @@ func TestTokenizerPruningIsApertus1p5Only(t *testing.T) {
 	if string(v1) != string(data) {
 		t.Fatalf("Apertus 1.0 tokenizer changed: %s", v1)
 	}
-	v15, err := tokenizerDataForConfig(Config{Architecture: apertus1p5Architecture, OutputVocabSize: 128}, data)
+	v15, err := tokenizerDataForConfig(Config{Architecture: apertus1p5Architecture, VocabSize: 128, OutputVocabSize: 64}, data)
 	if err != nil {
 		t.Fatal(err)
 	}
