@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ollama/ollama/llm"
+	mlxmedia "github.com/ollama/ollama/x/mlxrunner/media"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/models/nn"
 )
@@ -315,7 +317,18 @@ type apertusAudioInput struct {
 }
 
 func preprocessApertusAudio(ctx context.Context, data []byte, cfg AudioTokenizerConfig) (*apertusAudioInput, error) {
-	samples, err := decodeApertusWAV(ctx, data, int(cfg.SamplingRate))
+	var samples []float32
+	var err error
+	if format, ok := llm.AudioFormat(data); ok && format == "mp3" {
+		samples, err = mlxmedia.DecodeMP3(ctx, data, mlxmedia.MP3DecodeOptions{
+			TargetSampleRate: int(cfg.SamplingRate),
+			MaxInputBytes:    maxApertusAudioBytes,
+			MaxSamples:       maxApertusAudioSamples,
+			Overflow:         mlxmedia.AudioOverflowReject,
+		})
+	} else {
+		samples, err = decodeApertusWAV(ctx, data, int(cfg.SamplingRate))
+	}
 	if err != nil {
 		return nil, err
 	}
