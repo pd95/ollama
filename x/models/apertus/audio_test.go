@@ -40,6 +40,7 @@ func TestDecodeApertusExtensibleFloatWAV(t *testing.T) {
 		t.Fatalf("decoded samples = %v", got)
 	}
 }
+
 func TestPreprocessApertusMP3(t *testing.T) {
 	encoded, err := os.ReadFile("../../mlxrunner/media/testdata/synthetic_silence.mp3.base64")
 	if err != nil {
