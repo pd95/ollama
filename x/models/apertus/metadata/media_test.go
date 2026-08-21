@@ -1,7 +1,6 @@
 package metadata
 
 import (
-	"fmt"
 	"testing"
 )
 
@@ -17,23 +16,23 @@ func testConfig() Config {
 
 func testDescriptors() map[string]TensorDescriptor {
 	d := make(map[string]TensorDescriptor)
-	for i := range 247 {
-		d[fmt.Sprintf("%ssynthetic.%d.weight", visionPrefix, i)] = TensorDescriptor{Dtype: "F32", Shape: []int32{1}}
+	for _, name := range visionRequiredNames() {
+		d[name] = TensorDescriptor{Dtype: "F32", Shape: []int32{1}}
 	}
-	delete(d, visionPrefix+"synthetic.0.weight")
-	d[visionPrefix+"encoder.conv_in.weight"] = TensorDescriptor{Dtype: "F32", Shape: []int32{1}}
-	delete(d, visionPrefix+"synthetic.1.weight")
-	d[visionPrefix+"quant_conv.weight"] = TensorDescriptor{Dtype: "F32", Shape: []int32{1}}
-	delete(d, visionPrefix+"synthetic.2.weight")
-	d[visionPrefix+"quantize.embedding.weight"] = TensorDescriptor{Dtype: "F32", Shape: []int32{1}}
-	for i := range 62 {
-		d[fmt.Sprintf("%ssynthetic.%d.weight", audioPrefix, i)] = TensorDescriptor{Dtype: "F32", Shape: []int32{1}}
+	for _, name := range audioRequiredNames() {
+		d[name] = TensorDescriptor{Dtype: "F32", Shape: []int32{1}}
 	}
 	d[AudioCodebook] = TensorDescriptor{Dtype: "F32", Shape: []int32{4096, 512}}
 	return d
 }
 
 func TestMediaInventoryValidation(t *testing.T) {
+	if got := len(VisionRequiredTensorNames()); got != 247 {
+		t.Fatalf("vision required tensor count = %d, want 247", got)
+	}
+	if got := len(AudioRequiredTensorNames()); got != 63 {
+		t.Fatalf("audio required tensor count = %d, want 63", got)
+	}
 	cfg, descriptors := testConfig(), testDescriptors()
 	if err := ValidateVisionInventory(cfg, descriptors); err != nil {
 		t.Fatal(err)
@@ -43,7 +42,7 @@ func TestMediaInventoryValidation(t *testing.T) {
 	}
 
 	missing := testDescriptors()
-	delete(missing, visionPrefix+"quant_conv.weight")
+	delete(missing, visionPrefix+"encoder.down.4.attn.2.v.bias")
 	if err := ValidateVisionInventory(cfg, missing); err == nil {
 		t.Fatal("incomplete vision inventory accepted")
 	}

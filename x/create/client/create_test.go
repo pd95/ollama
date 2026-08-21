@@ -16,6 +16,7 @@ import (
 	"github.com/ollama/ollama/progress"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
+	apertusmetadata "github.com/ollama/ollama/x/models/apertus/metadata"
 	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/safetensors"
 )
@@ -61,19 +62,10 @@ func TestApertus1p5MediaCapabilitiesUseCanonicalInventory(t *testing.T) {
 		}`),
 		Tensors: make(map[string]create.SourceTensor),
 	}
-	for i := range 244 {
-		name := fmt.Sprintf("model.vision_tokenizer.synthetic.%d.weight", i)
+	for _, name := range apertusmetadata.VisionRequiredTensorNames() {
 		inv.Tensors[name] = create.SourceTensor{Name: name, Dtype: "F32", Shape: []int32{1}}
 	}
-	for i := range 62 {
-		name := fmt.Sprintf("model.audio_tokenizer.encoder.synthetic.%d.weight", i)
-		inv.Tensors[name] = create.SourceTensor{Name: name, Dtype: "F32", Shape: []int32{1}}
-	}
-	for _, name := range []string{
-		"model.vision_tokenizer.encoder.conv_in.weight",
-		"model.vision_tokenizer.quant_conv.weight",
-		"model.vision_tokenizer.quantize.embedding.weight",
-	} {
+	for _, name := range apertusmetadata.AudioRequiredTensorNames() {
 		inv.Tensors[name] = create.SourceTensor{Name: name, Dtype: "F32", Shape: []int32{1}}
 	}
 	inv.Tensors["model.audio_tokenizer.quantizer.codebook.embed"] = create.SourceTensor{
