@@ -221,7 +221,18 @@ func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *specu
 		n = media.extendChunk(position, n)
 
 		chunkIDs := mlx.FromValues(tokens[processed:processed+n], 1, n)
+		// A staged media encoder may sweep between model-selected graph cuts.
+		// Preserve the already-live request state that the consuming forward
+		// needs after media encoding completes.
+		live := []*mlx.Array{chunkIDs}
+		for _, c := range caches {
+			if c != nil {
+				live = append(live, c.State()...)
+			}
+		}
+		mlx.Pin(live...)
 		manifest := media.batchMedia(position, n)
+		mlx.Unpin(live...)
 		_, auxHidden := r.Model.Forward(&batch.Batch{
 			InputIDs:     chunkIDs,
 			SeqOffsets:   []int32{int32(position)},
