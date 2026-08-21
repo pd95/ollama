@@ -36,7 +36,7 @@ func init() {
 	base.Register(apertus1p5Architecture, newModel)
 }
 
-// RopeScaling carries the Llama 3 RoPE scaling block used by Apertus.
+// RopeScaling carries the validated RoPE scaling block used by Apertus.
 type RopeScaling struct {
 	Factor                        float32 `json:"factor"`
 	HighFreqFactor                float32 `json:"high_freq_factor"`
@@ -85,6 +85,7 @@ type Config struct {
 
 	HeadDim   int32      `json:"-"`
 	Scale     float32    `json:"-"`
+	RopeScale float32    `json:"-"`
 	RopeFreqs *mlx.Array `json:"-"`
 	prefix    string
 }
@@ -150,18 +151,20 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	ropeFreqs, err := Llama3Freqs(
-		cfg.HeadDim,
-		cfg.RopeTheta,
-		cfg.RopeScaling.Factor,
-		cfg.RopeScaling.LowFreqFactor,
-		cfg.RopeScaling.HighFreqFactor,
-		cfg.RopeScaling.OriginalMaxPositionEmbeddings,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("build llama3 rope frequencies: %w", err)
+	if cfg.ropeType() == "llama3" {
+		ropeFreqs, err := Llama3Freqs(
+			cfg.HeadDim,
+			cfg.RopeTheta,
+			cfg.RopeScaling.Factor,
+			cfg.RopeScaling.LowFreqFactor,
+			cfg.RopeScaling.HighFreqFactor,
+			cfg.RopeScaling.OriginalMaxPositionEmbeddings,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("build llama3 rope frequencies: %w", err)
+		}
+		cfg.RopeFreqs = mlx.FromValues(ropeFreqs, len(ropeFreqs))
 	}
-	cfg.RopeFreqs = mlx.FromValues(ropeFreqs, len(ropeFreqs))
 
 	if qt := root.QuantType(); qt != "" {
 		cfg.QuantType = qt
@@ -203,6 +206,14 @@ func newModel(root *model.Root) (base.Model, error) {
 
 func isApertus1p5Config(cfg Config) bool {
 	return cfg.Architecture == apertus1p5Architecture
+}
+
+func isApertus1p1MiniConfig(cfg Config) bool {
+	if cfg.Architecture != apertus1p0Architecture || cfg.MaxPositionEmbeddings != 4096 || cfg.RopeTheta != 500000 {
+		return false
+	}
+	ropeType := cfg.ropeType()
+	return ropeType == "default" || ropeType == "linear"
 }
 
 func tokenizerDataForConfig(cfg Config, data []byte) ([]byte, error) {
@@ -383,22 +394,32 @@ func parseConfig(configData []byte) (Config, error) {
 	if cfg.MLPBias {
 		return Config{}, fmt.Errorf("unsupported mlp_bias=true")
 	}
-	if cfg.TieWordEmbeddings {
+	if cfg.TieWordEmbeddings && !isApertus1p1MiniConfig(cfg) {
 		return Config{}, fmt.Errorf("unsupported tie_word_embeddings=true")
 	}
-	if ropeType := cfg.ropeType(); ropeType != "llama3" {
+	cfg.RopeScale = 1
+	switch ropeType := cfg.ropeType(); ropeType {
+	case "default":
+		if !isApertus1p1MiniConfig(cfg) {
+			return Config{}, fmt.Errorf("unsupported rope scaling type %q", ropeType)
+		}
+	case "linear":
+		if !isApertus1p1MiniConfig(cfg) || !positiveFinite(cfg.RopeScaling.Factor) {
+			return Config{}, fmt.Errorf("invalid linear rope scaling factor: %v", cfg.RopeScaling.Factor)
+		}
+		cfg.RopeScale = 1 / cfg.RopeScaling.Factor
+	case "llama3":
+		if !positiveFinite(cfg.RopeScaling.Factor) || !positiveFinite(cfg.RopeScaling.LowFreqFactor) || !positiveFinite(cfg.RopeScaling.HighFreqFactor) {
+			return Config{}, fmt.Errorf("invalid llama3 rope scaling factors")
+		}
+		if cfg.RopeScaling.HighFreqFactor <= cfg.RopeScaling.LowFreqFactor {
+			return Config{}, fmt.Errorf("high_freq_factor (%v) must exceed low_freq_factor (%v)", cfg.RopeScaling.HighFreqFactor, cfg.RopeScaling.LowFreqFactor)
+		}
+		if cfg.RopeScaling.OriginalMaxPositionEmbeddings <= 0 || cfg.RopeScaling.OriginalMaxPositionEmbeddings > maxConfigDimension {
+			return Config{}, fmt.Errorf("invalid original_max_position_embeddings: %d", cfg.RopeScaling.OriginalMaxPositionEmbeddings)
+		}
+	default:
 		return Config{}, fmt.Errorf("unsupported rope scaling type %q", ropeType)
-	}
-	if !positiveFinite(cfg.RopeScaling.Factor) ||
-		!positiveFinite(cfg.RopeScaling.LowFreqFactor) ||
-		!positiveFinite(cfg.RopeScaling.HighFreqFactor) {
-		return Config{}, fmt.Errorf("invalid llama3 rope scaling factors")
-	}
-	if cfg.RopeScaling.HighFreqFactor <= cfg.RopeScaling.LowFreqFactor {
-		return Config{}, fmt.Errorf("high_freq_factor (%v) must exceed low_freq_factor (%v)", cfg.RopeScaling.HighFreqFactor, cfg.RopeScaling.LowFreqFactor)
-	}
-	if cfg.RopeScaling.OriginalMaxPositionEmbeddings <= 0 || cfg.RopeScaling.OriginalMaxPositionEmbeddings > maxConfigDimension {
-		return Config{}, fmt.Errorf("invalid original_max_position_embeddings: %d", cfg.RopeScaling.OriginalMaxPositionEmbeddings)
 	}
 	cfg.Scale = float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
 	return cfg, nil
@@ -423,7 +444,10 @@ func (c Config) ropeType() string {
 	if c.RopeScaling.RopeType != "" {
 		return strings.ToLower(c.RopeScaling.RopeType)
 	}
-	return strings.ToLower(c.RopeScaling.Type)
+	if c.RopeScaling.Type != "" {
+		return strings.ToLower(c.RopeScaling.Type)
+	}
+	return "default"
 }
 
 // Llama3InvFreqs returns inverse RoPE frequencies matching Transformers.
@@ -595,8 +619,10 @@ func validateTensors(tensors map[string]*mlx.Array, cfg *Config) error {
 	if err := validateDense(tensors, prefix+"norm.weight", []int{int(cfg.HiddenSize)}); err != nil {
 		return err
 	}
-	if err := validateMatrix(tensors, "lm_head", int(cfg.OutputVocabSize), int(cfg.HiddenSize), cfg, false); err != nil {
-		return err
+	if !cfg.TieWordEmbeddings {
+		if err := validateMatrix(tensors, "lm_head", int(cfg.OutputVocabSize), int(cfg.HiddenSize), cfg, false); err != nil {
+			return err
+		}
 	}
 	qOut := int(cfg.NumAttentionHeads * cfg.HeadDim)
 	kvOut := int(cfg.NumKeyValueHeads * cfg.HeadDim)
@@ -882,7 +908,11 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	linears := model.NewLinearFactory(tensors, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 	m.EmbedTokens = model.MakeEmbeddingLayer(tensors, prefix+"embed_tokens", m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
 	m.Norm = nn.NewRMSNorm(tensors[prefix+"norm.weight"], m.RMSNormEps)
-	m.LMHead = linears.Make("lm_head")
+	if m.TieWordEmbeddings {
+		m.LMHead = m.EmbedTokens.AsLinear()
+	} else {
+		m.LMHead = linears.Make("lm_head")
+	}
 
 	mediaDescriptors, err := apertureMediaDescriptors(tensors)
 	if err != nil {
@@ -980,8 +1010,8 @@ func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positio
 	k := mlx.Transpose(mlx.Reshape(a.KProj.Forward(x), B, L, cfg.NumKeyValueHeads, cfg.HeadDim), 0, 2, 1, 3)
 	k = headRMSNorm(a.KNorm, k, B, cfg.NumKeyValueHeads, L, cfg.HeadDim, cfg.RMSNormEps)
 	v := mlx.Transpose(mlx.Reshape(a.VProj.Forward(x), B, L, cfg.NumKeyValueHeads, cfg.HeadDim), 0, 2, 1, 3)
-	q = mlx.Reshape(mlx.RoPEWithFreqs(q, int(cfg.HeadDim), false, cfg.RopeTheta, 1, positions, cfg.RopeFreqs), B, cfg.NumAttentionHeads, L, cfg.HeadDim)
-	k = mlx.Reshape(mlx.RoPEWithFreqs(k, int(cfg.HeadDim), false, cfg.RopeTheta, 1, positions, cfg.RopeFreqs), B, cfg.NumKeyValueHeads, L, cfg.HeadDim)
+	q = mlx.Reshape(mlx.RoPEWithFreqs(q, int(cfg.HeadDim), false, cfg.RopeTheta, cfg.RopeScale, positions, cfg.RopeFreqs), B, cfg.NumAttentionHeads, L, cfg.HeadDim)
+	k = mlx.Reshape(mlx.RoPEWithFreqs(k, int(cfg.HeadDim), false, cfg.RopeTheta, cfg.RopeScale, positions, cfg.RopeFreqs), B, cfg.NumKeyValueHeads, L, cfg.HeadDim)
 	var kv nn.SDPAOption
 	if c != nil {
 		kv = nn.WithKVHistory(c.(cache.Attention).Update(b, k, v))

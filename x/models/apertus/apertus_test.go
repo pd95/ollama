@@ -972,3 +972,100 @@ func writeManifestBlob(t *testing.T, dir, name string, data []byte) string {
 	}
 	return digest
 }
+
+func TestParseConfigApertusMiniRopeAndTiedEmbeddings(t *testing.T) {
+	tests := []struct {
+		name      string
+		rope      string
+		tied      bool
+		wantType  string
+		wantScale float32
+	}{
+		{
+			name:      "default untied",
+			rope:      `{"rope_type":"default"}`,
+			wantType:  "default",
+			wantScale: 1,
+		},
+		{
+			name:      "missing scaling defaults to standard rope",
+			rope:      `{}`,
+			wantType:  "default",
+			wantScale: 1,
+		},
+		{
+			name:      "linear tied",
+			rope:      `{"rope_type":"linear","factor":2}`,
+			tied:      true,
+			wantType:  "linear",
+			wantScale: 0.5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseConfig([]byte(`{
+				"architectures":["ApertusForCausalLM"],
+				"model_type":"apertus",
+				"hidden_size":16,
+				"intermediate_size":32,
+				"num_hidden_layers":1,
+				"num_attention_heads":4,
+				"num_key_value_heads":2,
+				"max_position_embeddings":4096,
+				"rope_theta":500000,
+				"rms_norm_eps":0.000001,
+				"rope_scaling":` + tt.rope + `,
+				"hidden_act":"xielu",
+				"qk_norm":true,
+				"tie_word_embeddings":` + strconv.FormatBool(tt.tied) + `,
+				"vocab_size":131072
+			}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.ropeType(); got != tt.wantType {
+				t.Fatalf("ropeType() = %q, want %q", got, tt.wantType)
+			}
+			if cfg.RopeScale != tt.wantScale {
+				t.Fatalf("RopeScale = %v, want %v", cfg.RopeScale, tt.wantScale)
+			}
+			if cfg.TieWordEmbeddings != tt.tied {
+				t.Fatalf("TieWordEmbeddings = %v, want %v", cfg.TieWordEmbeddings, tt.tied)
+			}
+		})
+	}
+}
+
+func TestParseConfigRejectsInvalidMiniRope(t *testing.T) {
+	base := `{
+		"architectures":["ApertusForCausalLM"],
+		"hidden_size":16,
+		"intermediate_size":32,
+		"num_hidden_layers":1,
+		"num_attention_heads":4,
+		"num_key_value_heads":2,
+		"max_position_embeddings":4096,
+		"rope_theta":500000,
+		"rms_norm_eps":0.000001,
+		"rope_scaling":%s,
+		"hidden_act":"xielu",
+		"qk_norm":true,
+		"vocab_size":128
+	}`
+	for _, tt := range []struct {
+		name string
+		rope string
+		want string
+	}{
+		{name: "linear factor", rope: `{"rope_type":"linear","factor":0}`, want: "invalid linear rope scaling factor"},
+		{name: "unsupported type", rope: `{"rope_type":"yarn","factor":1}`, want: `unsupported rope scaling type "yarn"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseConfig([]byte(fmt.Sprintf(base, tt.rope)))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("parseConfig error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}

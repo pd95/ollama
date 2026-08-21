@@ -2,13 +2,41 @@ package create
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
-type apertusImportTransform struct{}
+type apertusImportTransform struct {
+	tieWordEmbeddings bool
+}
 
-func newApertusImportTransform(json.RawMessage) (quantizePolicy, error) {
-	return apertusImportTransform{}, nil
+func newApertusImportTransform(rawConfig json.RawMessage) (quantizePolicy, error) {
+	var cfg struct {
+		TieWordEmbeddings *bool `json:"tie_word_embeddings"`
+		TextConfig        *struct {
+			TieWordEmbeddings *bool `json:"tie_word_embeddings"`
+		} `json:"text_config"`
+	}
+	if len(rawConfig) > 0 {
+		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
+			return nil, fmt.Errorf("apertus: parse config.json: %w", err)
+		}
+	}
+	tied := false
+	if cfg.TextConfig != nil {
+		if cfg.TextConfig.TieWordEmbeddings != nil {
+			tied = *cfg.TextConfig.TieWordEmbeddings
+		}
+	} else if cfg.TieWordEmbeddings != nil {
+		tied = *cfg.TieWordEmbeddings
+	}
+	return apertusImportTransform{tieWordEmbeddings: tied}, nil
+}
+
+func (t apertusImportTransform) includeTensor(name string) bool {
+	// Transformers treats tie_word_embeddings as authoritative even when an
+	// export redundantly includes a byte-identical output projection.
+	return !t.tieWordEmbeddings || name != "lm_head.weight"
 }
 
 func (apertusImportTransform) quantizationType(name string, shape []int32, quantize string) string {
