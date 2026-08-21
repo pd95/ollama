@@ -12,12 +12,14 @@ import (
 )
 
 const (
-	apertusToolOpenTag       = "<|tools_prefix|>"
-	apertusToolCloseTag      = "<|tools_suffix|>"
-	apertusAssistantOpenTag  = "<|assistant_start|>"
-	apertusAssistantCloseTag = "<|assistant_end|>"
-	apertusInnerOpenTag      = "<|inner_prefix|>"
-	apertusInnerCloseTag     = "<|inner_suffix|>"
+	apertusToolOpenTag        = "<|tools_prefix|>"
+	apertusToolCloseTag       = "<|tools_suffix|>"
+	apertusAssistantOpenTag   = "<|assistant_start|>"
+	apertusAssistantCloseTag  = "<|assistant_end|>"
+	apertusInnerOpenTag       = "<|inner_prefix|>"
+	apertusInnerCloseTag      = "<|inner_suffix|>"
+	apertusToolOutputOpenTag  = "<|tool_output_start|>"
+	apertusToolOutputCloseTag = "<|tool_output_end|>"
 	// A tool call is one model response fragment. Keep malformed streams from
 	// retaining unbounded output while allowing substantially larger calls than
 	// the model's normal tool grammar produces.
@@ -259,6 +261,10 @@ func cleanApertusContent(s string) string {
 	s = strings.ReplaceAll(s, apertusAssistantCloseTag, "")
 	s = strings.ReplaceAll(s, apertusInnerOpenTag, "")
 	s = strings.ReplaceAll(s, apertusInnerCloseTag, "")
+	s = strings.ReplaceAll(s, apertusToolOutputOpenTag, "")
+	s = strings.ReplaceAll(s, apertusToolOutputCloseTag, "")
+	s = strings.ReplaceAll(s, apertusToolOutputOpenTag, "")
+	s = strings.ReplaceAll(s, apertusToolOutputCloseTag, "")
 	return strings.TrimRightFunc(s, unicode.IsSpace)
 }
 func (p *ApertusParser) HasToolSupport() bool     { return true }
