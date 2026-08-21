@@ -589,7 +589,7 @@ func TestMatrixQuantizationIdentitiesFailClosed(t *testing.T) {
 		t.Skipf("MLX not available: %v", err)
 	}
 	const name = "projection.weight"
-	for _, quantType := range []string{"int4", "int8", "nvfp4", "mxfp4", "mxfp8", "FP4", "Q8"} {
+	for _, quantType := range []string{"int2", "int3", "int4", "int5", "int6", "int8", "nvfp4", "mxfp4", "mxfp8", "FP4", "Q8"} {
 		t.Run("supported model "+quantType, func(t *testing.T) {
 			tensors, cfg := quantizedMatrix(name, quantType, 4, 64)
 			if err := validateMatrix(tensors, "projection", 4, 64, cfg, false); err != nil {
@@ -742,7 +742,10 @@ func quantizedMatrix(name, quantType string, out, input int) (map[string]*mlx.Ar
 	tensors := map[string]*mlx.Array{}
 	switch mode {
 	case "affine":
-		tensors[name] = mlx.Zeros(mlx.DTypeUint32, out, input/(32/bits))
+		if input*bits%32 != 0 {
+			panic("test affine input cannot be represented as packed U32 columns")
+		}
+		tensors[name] = mlx.Zeros(mlx.DTypeUint32, out, input*bits/32)
 		tensors[name+"_scale"] = mlx.Zeros(mlx.DTypeBFloat16, out, input/groupSize)
 		tensors[name+"_qbias"] = mlx.Zeros(mlx.DTypeBFloat16, out, input/groupSize)
 	case "nvfp4", "mxfp4":

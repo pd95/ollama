@@ -45,6 +45,9 @@ func Classify(inv Inventory, requested string) (Classification, error) {
 	if err != nil {
 		return Classification{}, err
 	}
+	if err := validateExplicitMLXSource(inv); err != nil {
+		return Classification{}, err
+	}
 
 	if name, ok := firstUnsupportedFP8(inv); ok {
 		return Classification{}, fmt.Errorf("unsupported fp8 source: tensor %s is F8_E5M2; only F8_E4M3 block-FP8 sources are supported", name)
@@ -93,11 +96,18 @@ func Classify(inv Inventory, requested string) (Classification, error) {
 func detectPrequantizedQuantization(inv Inventory) string {
 	var detected string
 	for _, name := range sortedTensorNames(inv) {
-		spec, _, ok := matchPrequant(name, inv)
-		if !ok {
-			continue
+		var q string
+		for _, pattern := range prequantPatterns {
+			base, ok := strings.CutSuffix(name, pattern.weightSuffix)
+			if !ok || !inv.Has(base+pattern.scaleSuffix) {
+				continue
+			}
+			metadata, err := prequantMetadata(inv, pattern, base+".weight", inv.Tensors[name], inv.Tensors[base+pattern.scaleSuffix])
+			if err == nil {
+				q = quant.Canonical(metadata["quant_type"])
+			}
+			break
 		}
-		q := quant.Canonical(spec.Metadata["quant_type"])
 		if q == "" {
 			continue
 		}
@@ -109,6 +119,29 @@ func detectPrequantizedQuantization(inv Inventory) string {
 	return detected
 }
 
+func validateExplicitMLXSource(inv Inventory) error {
+	for name, tensor := range inv.Tensors {
+		if !strings.HasSuffix(name, ".weight") || !strings.EqualFold(tensor.Dtype, "U32") {
+			continue
+		}
+		metadata, explicit, err := inv.Config.TensorQuantMetadata(name)
+		if err != nil {
+			return err
+		}
+		if !explicit {
+			continue
+		}
+		_, _, mode := quant.Params(metadata["quant_type"])
+		if mode == "affine" {
+			scaleName := strings.TrimSuffix(name, ".weight") + ".scales"
+			if !inv.Has(scaleName) {
+				return fmt.Errorf("MLX affine tensor %s is missing required scale companion %s", name, scaleName)
+			}
+		}
+	}
+	return nil
+}
+
 // normalizeRequested validates the user's quantize value and returns its
 // canonical form ("" for no quantization).
 func normalizeRequested(requested string) (string, error) {
@@ -116,7 +149,7 @@ func normalizeRequested(requested string) (string, error) {
 		return "", nil
 	}
 	c := quant.Canonical(requested)
-	if c == "" {
+	if !quant.Creatable(c) {
 		return "", fmt.Errorf("unsupported quantize type %q: supported types are int4, int8, nvfp4, mxfp4, mxfp8", requested)
 	}
 	return c, nil

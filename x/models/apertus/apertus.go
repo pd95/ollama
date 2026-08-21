@@ -760,13 +760,15 @@ func validateMatrix(tensors map[string]*mlx.Array, path string, out, input int, 
 	scaleShape := []int{out, input / groupSize}
 	switch mode {
 	case "affine":
-		if bits != 4 && bits != 8 {
+		if bits < 2 || bits > 8 || !quant.Importable(fmt.Sprintf("int%d", bits)) {
 			return fmt.Errorf("tensor %q has unsupported affine bit width %d", name, bits)
 		}
-		if input%(32/bits) != 0 {
+		packedBits := uint64(input) * uint64(bits)
+		if packedBits%32 != 0 {
 			return fmt.Errorf("tensor %q input size %d cannot be packed at %d bits", name, input, bits)
 		}
-		if err := validateShape(name, weight, []int{out, input / (32 / bits)}); err != nil {
+		packedColumns := int(packedBits / 32)
+		if err := validateShape(name, weight, []int{out, packedColumns}); err != nil {
 			return err
 		}
 		if weight.DType() != mlx.DTypeUint32 {
