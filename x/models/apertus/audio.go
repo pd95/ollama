@@ -191,9 +191,11 @@ func (l *apertureLSTM) forward(input *mlx.Array, materialize func(...*mlx.Array)
 			c = mlx.Add(mlx.Mul(f, c), mlx.Mul(i, g))
 			h = mlx.Mul(o, c.Tanh())
 			if materialize != nil {
-				keep := make([]*mlx.Array, 0, len(outputs)+2)
+				keep := make([]*mlx.Array, 0, len(outputs)+4)
 				keep = append(keep, outputs...)
-				keep = append(keep, h, c)
+				// x is sliced again by the next recurrent step; residual is
+				// reused after every LSTM layer.
+				keep = append(keep, h, c, x, residual)
 				materialize(keep...)
 			}
 			outputs = append(outputs, h.ExpandDims(1))
