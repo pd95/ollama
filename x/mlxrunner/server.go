@@ -24,13 +24,15 @@ func Execute(args []string) error {
 	slog.SetDefault(logutil.NewLogger(os.Stderr, envconfig.LogLevel()))
 
 	var (
-		modelName string
-		port      int
+		modelName        string
+		port             int
+		mediaMemoryLimit uint64
 	)
 
 	flagSet := flag.NewFlagSet("mlxrunner", flag.ExitOnError)
 	flagSet.StringVar(&modelName, "model", "", "Model name")
 	flagSet.IntVar(&port, "port", 0, "Port to listen on")
+	flagSet.Uint64Var(&mediaMemoryLimit, "media-memory-limit", 0, "Peak-memory budget for media processing")
 	_ = flagSet.Bool("verbose", false, "Enable debug logging")
 	flagSet.Parse(args)
 
@@ -59,8 +61,9 @@ func Execute(args []string) error {
 	defer cancelRunner()
 
 	runner := Runner{
-		Requests:  make(chan Request),
-		mlxThread: worker,
+		Requests:         make(chan Request),
+		mlxThread:        worker,
+		mediaMemoryLimit: mediaMemoryLimit,
 	}
 
 	if err := worker.Do(context.Background(), func() error {
