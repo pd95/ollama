@@ -10,27 +10,40 @@ import (
 )
 
 const (
-	apertusSystemStart     = "<|system_start|>"
-	apertusSystemEnd       = "<|system_end|>"
-	apertusDeveloperStart  = "<|developer_start|>"
-	apertusDeveloperEnd    = "<|developer_end|>"
-	apertusUserStart       = "<|user_start|>"
-	apertusUserEnd         = "<|user_end|>"
-	apertusAssistantStart  = "<|assistant_start|>"
-	apertusAssistantEnd    = "<|assistant_end|>"
-	apertusToolsPrefix     = "<|tools_prefix|>"
-	apertusToolsSuffix     = "<|tools_suffix|>"
-	apertusImageToken      = "<|image|>"
-	apertusInnerOpenTag    = "<|inner_prefix|>"
-	apertusInnerCloseTag   = "<|inner_suffix|>"
-	apertusToolOutputStart = "<|tool_output_start|>"
-	apertusToolOutputEnd   = "<|tool_output_end|>"
-	maxApertusSchemaDepth  = 32
-	maxApertusSchemaNodes  = 4096
+	apertusSystemStart       = "<|system_start|>"
+	apertusSystemEnd         = "<|system_end|>"
+	apertusDeveloperStart    = "<|developer_start|>"
+	apertusDeveloperEnd      = "<|developer_end|>"
+	apertusUserStart         = "<|user_start|>"
+	apertusUserEnd           = "<|user_end|>"
+	apertusAssistantStart    = "<|assistant_start|>"
+	apertusAssistantEnd      = "<|assistant_end|>"
+	apertusToolsPrefix       = "<|tools_prefix|>"
+	apertusToolsSuffix       = "<|tools_suffix|>"
+	apertusImageToken        = "<|image|>"
+	apertusInnerOpenTag      = "<|inner_prefix|>"
+	apertusInnerCloseTag     = "<|inner_suffix|>"
+	apertusToolOutputStart   = "<|tool_output_start|>"
+	apertusToolOutputEnd     = "<|tool_output_end|>"
+	apertus1p1SystemStart    = "<SPECIAL_61>"
+	apertus1p1SystemEnd      = "<SPECIAL_62>"
+	apertus1p1DeveloperStart = "<SPECIAL_63>"
+	apertus1p1DeveloperEnd   = "<SPECIAL_64>"
+	apertus1p1UserStart      = "<SPECIAL_65>"
+	apertus1p1UserEnd        = "<SPECIAL_66>"
+	apertus1p1AssistantStart = "<SPECIAL_67>"
+	apertus1p1AssistantEnd   = "<SPECIAL_68>"
+	apertus1p1InnerPrefix    = "<SPECIAL_69>"
+	apertus1p1InnerSuffix    = "<SPECIAL_70>"
+	apertus1p1ToolsPrefix    = "<SPECIAL_71>"
+	apertus1p1ToolsSuffix    = "<SPECIAL_72>"
+	maxApertusSchemaDepth    = 32
+	maxApertusSchemaNodes    = 4096
 )
 
 type (
 	ApertusRenderer    struct{}
+	Apertus1p1Renderer struct{}
 	Apertus1p5Renderer struct{}
 )
 
@@ -40,12 +53,155 @@ func (r *ApertusRenderer) Render(messages []api.Message, tools []api.Tool, think
 	return renderApertus(messages, tools, think, false)
 }
 
+func (r *Apertus1p1Renderer) LeadingBOS() string { return "" }
+
+func (r *Apertus1p1Renderer) Render(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
+	return renderApertus1p1(messages, tools, think)
+}
+
 func (r *Apertus1p5Renderer) LeadingBOS() string {
 	return ""
 }
 
 func (r *Apertus1p5Renderer) Render(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
 	return renderApertus(messages, tools, think, true)
+}
+
+func renderApertus1p1(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
+	if err := validateApertusTools(tools); err != nil {
+		return "", err
+	}
+	for _, message := range messages {
+		if err := validateApertusText(message.Content); err != nil {
+			return "", err
+		}
+		if err := validateApertusText(message.Thinking); err != nil {
+			return "", err
+		}
+	}
+	thinkingEnabled := think != nil && think.Bool()
+	var sb strings.Builder
+	messageStart, hasInstruction := 0, false
+	sb.WriteString(apertus1p1SystemStart)
+	for messageStart < len(messages) && (messages[messageStart].Role == "system" || messages[messageStart].Role == "developer") {
+		if messages[messageStart].Content != "" {
+			if hasInstruction {
+				sb.WriteString("\n\n")
+			}
+			sb.WriteString(messages[messageStart].Content)
+			hasInstruction = true
+		}
+		messageStart++
+	}
+	sb.WriteString(apertus1p1SystemEnd)
+	sb.WriteString(apertus1p1DeveloperStart)
+	if thinkingEnabled {
+		sb.WriteString("Deliberation: enabled\n")
+	} else {
+		sb.WriteString("Deliberation: disabled\n")
+	}
+	if len(tools) > 0 {
+		sb.WriteString("Tool Capabilities:\n")
+		renderApertusTools(&sb, tools)
+	} else {
+		sb.WriteString("Tool Capabilities: disabled")
+	}
+	sb.WriteString(apertus1p1DeveloperEnd)
+
+	inAssistant, inTool, inInner, waitingForToolOutputs := false, false, false, false
+	closeToolOutputs := func() {
+		if inTool {
+			sb.WriteString("]")
+			inTool = false
+		}
+	}
+	closeAssistant := func() {
+		closeToolOutputs()
+		if inAssistant {
+			sb.WriteString(apertus1p1AssistantEnd)
+			inAssistant, inInner = false, false
+		}
+	}
+	for _, message := range messages[messageStart:] {
+		switch message.Role {
+		case "user":
+			closeAssistant()
+			sb.WriteString(apertus1p1UserStart)
+			sb.WriteString(message.Content)
+			sb.WriteString(apertus1p1UserEnd)
+			waitingForToolOutputs = false
+		case "system", "developer":
+			closeAssistant()
+			sb.WriteString(apertus1p1SystemStart)
+			sb.WriteString(message.Content)
+			sb.WriteString(apertus1p1SystemEnd)
+			waitingForToolOutputs = false
+		case "assistant":
+			if !inAssistant {
+				sb.WriteString(apertus1p1AssistantStart)
+				inAssistant = true
+			}
+			hadToolOutputs := inTool
+			closeToolOutputs()
+			if hadToolOutputs {
+				sb.WriteString(" ")
+			}
+			if thinkingEnabled && message.Thinking != "" {
+				if !inInner {
+					sb.WriteString(apertus1p1InnerPrefix)
+					inInner = true
+				}
+				sb.WriteString(message.Thinking)
+			}
+			if message.Content != "" {
+				if inInner {
+					sb.WriteString(apertus1p1InnerSuffix)
+					inInner = false
+				}
+				sb.WriteString(message.Content)
+			}
+			if len(message.ToolCalls) > 0 {
+				isDisplayAnswers := len(message.ToolCalls) == 1 && message.ToolCalls[0].Function.Name == "display_answers"
+				if inInner && isDisplayAnswers {
+					sb.WriteString(apertus1p1InnerSuffix)
+					inInner = false
+				}
+				if err := renderApertusToolCallsWithTags(&sb, message.ToolCalls, apertus1p1ToolsPrefix, apertus1p1ToolsSuffix); err != nil {
+					return "", err
+				}
+				waitingForToolOutputs = !isDisplayAnswers
+			} else {
+				waitingForToolOutputs = false
+			}
+		case "tool":
+			if !inAssistant {
+				return "", fmt.Errorf("apertus 1.1 tool message outside assistant turn")
+			}
+			if !inTool {
+				sb.WriteString("[")
+				inTool = true
+			} else {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(message.Content)
+			waitingForToolOutputs = false
+		default:
+			return "", fmt.Errorf("unsupported apertus 1.1 message role %q", message.Role)
+		}
+	}
+	closeToolOutputs()
+	if inAssistant && !waitingForToolOutputs {
+		sb.WriteString(apertus1p1AssistantEnd)
+		inAssistant, inInner = false, false
+	}
+	lastRole := ""
+	if len(messages) > 0 {
+		lastRole = messages[len(messages)-1].Role
+	}
+	if lastRole != "assistant" {
+		sb.WriteString(apertus1p1AssistantStart)
+	}
+	return sb.String(), nil
 }
 
 func renderApertus(messages []api.Message, tools []api.Tool, think *api.ThinkValue, v1p5 bool) (string, error) {
@@ -368,7 +524,11 @@ func apertusObjectType(properties *api.ToolPropertiesMap, required []string) str
 }
 
 func renderApertusToolCalls(sb *strings.Builder, calls []api.ToolCall) error {
-	sb.WriteString(apertusToolsPrefix)
+	return renderApertusToolCallsWithTags(sb, calls, apertusToolsPrefix, apertusToolsSuffix)
+}
+
+func renderApertusToolCallsWithTags(sb *strings.Builder, calls []api.ToolCall, openTag, closeTag string) error {
+	sb.WriteString(openTag)
 	sb.WriteString("[")
 	for i, call := range calls {
 		if !apertusIdentifier(call.Function.Name) {
@@ -392,7 +552,7 @@ func renderApertusToolCalls(sb *strings.Builder, calls []api.ToolCall) error {
 		sb.WriteString("}")
 	}
 	sb.WriteString("]")
-	sb.WriteString(apertusToolsSuffix)
+	sb.WriteString(closeTag)
 	return nil
 }
 

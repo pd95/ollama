@@ -98,6 +98,17 @@ type quantizePolicy interface {
 	quantizationType(name string, shape []int32, requested string) string
 }
 
+type tensorIncludePolicy interface {
+	includeTensor(name string) bool
+}
+
+func tensorIncluded(policy quantizePolicy, name string) bool {
+	if includePolicy, ok := policy.(tensorIncludePolicy); ok {
+		return includePolicy.includeTensor(name)
+	}
+	return true
+}
+
 // Plan turns an inventory and its classification into the ordered list of
 // blobs to write. It reads no weight data and makes every decision here, so
 // the writer that follows has nothing left to decide. The policy decides which
@@ -127,7 +138,7 @@ func Plan(inv Inventory, class Classification, policy quantizePolicy) ([]BlobSpe
 	case SourceFloat:
 		specs, err = planFloat(inv, class.Quantize, policy)
 	case SourcePrequantized:
-		specs, err = planPrequantized(inv)
+		specs, err = planPrequantized(inv, policy)
 	case SourceBlockFP8:
 		specs, err = planBlockFP8(inv, class.Quantize, policy)
 	default:
@@ -198,6 +209,9 @@ func planFloat(inv Inventory, quantize string, policy quantizePolicy) ([]BlobSpe
 	groups := make(map[string][]SourceTensor)
 	var plain []string
 	for _, name := range sortedTensorNames(inv) {
+		if !tensorIncluded(policy, name) {
+			continue
+		}
 		if gp, ok := perExpertGroup(name); ok {
 			groups[gp] = append(groups[gp], inv.Tensors[name])
 		} else {
