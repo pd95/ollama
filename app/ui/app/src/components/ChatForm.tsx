@@ -31,6 +31,11 @@ import { ErrorMessage } from "./ErrorMessage";
 import { processFiles } from "@/utils/fileValidation";
 import type { ImageData } from "@/types/webview";
 import { PlusIcon } from "@heroicons/react/24/outline";
+import {
+  resolveThinkingSetting,
+  supportsThinkingLevels,
+  supportsThinkingToggle,
+} from "@/utils/thinking";
 
 export type ThinkingLevel = "low" | "medium" | "high";
 
@@ -162,10 +167,10 @@ function ChatForm({
     setSettings({ ThinkLevel: newLevel });
   };
 
-  const modelSupportsThinkingLevels =
-    selectedModel?.model.toLowerCase().startsWith("gpt-oss") || false;
-  const supportsThinkToggling =
-    selectedModel?.model.toLowerCase().startsWith("deepseek-v3.1") || false;
+  const modelSupportsThinkingLevels = supportsThinkingLevels(
+    selectedModel?.model,
+  );
+  const supportsThinkToggling = supportsThinkingToggle(selectedModel?.model);
 
   useEffect(() => {
     if (supportsThinkToggling && thinkEnabled && webSearchEnabled) {
@@ -492,11 +497,11 @@ function ChatForm({
 
     const useWebSearch =
       supportsWebSearch && webSearchEnabled && !cloudDisabled;
-    const useThink = modelSupportsThinkingLevels
-      ? thinkLevel
-      : supportsThinkToggling
-        ? thinkEnabled
-        : undefined;
+    const useThink = resolveThinkingSetting(
+      selectedModel?.model,
+      thinkEnabled,
+      thinkLevel,
+    );
 
     if (onSubmit) {
       onSubmit(message.content, {
