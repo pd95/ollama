@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/d4l3k/go-bfloat16"
+	"github.com/ollama/ollama/x/quant"
 	"github.com/x448/float16"
 )
 
@@ -96,11 +97,9 @@ func EncodeFloatTensor(dtype string, values []float32) ([]byte, error) {
 func sourceQuantType(mode string, bits int) string {
 	switch strings.ToLower(mode) {
 	case "affine":
-		switch bits {
-		case 4:
-			return "int4"
-		case 8:
-			return "int8"
+		qt := fmt.Sprintf("int%d", bits)
+		if quant.Importable(qt) {
+			return qt
 		}
 	case "nvfp4":
 		return "nvfp4"
