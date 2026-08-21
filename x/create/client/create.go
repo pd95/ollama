@@ -692,6 +692,11 @@ func isApertusFamily(s string) bool {
 	}
 }
 
+func isApertus1p5Family(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "apertus1p5") || strings.Contains(s, "apertus-1.5") || strings.Contains(s, "apertus_1_5")
+}
+
 func qwen35RendererName(modelDir string) string {
 	template := readChatTemplate(modelDir)
 	if strings.Contains(template, "resolved_reasoning_effort") &&
@@ -772,7 +777,7 @@ func getParserName(modelDir string) string {
 func parserNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
-	case isApertusFamily(s):
+	case isApertusFamily(s) || isApertus1p5Family(s):
 		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer"
@@ -841,6 +846,8 @@ func getRendererName(modelDir string) string {
 func rendererNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
+	case isApertus1p5Family(s):
+		return "apertus1p5"
 	case isApertusFamily(s):
 		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":

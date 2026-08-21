@@ -99,8 +99,7 @@ func TestApertusRendererRepeatedCallRoundTripAndPendingTransitions(t *testing.T)
 	}
 	partial := append(append([]api.Message{}, terminal...), api.Message{Role: "tool", Content: `{}`})
 	for _, next := range []api.Message{{Role: "user", Content: "next"}, {Role: "system", Content: "next"}, {Role: "assistant", Content: "next"}} {
-		messages := append(append([]api.Message{}, partial...), next)
-		if _, err := r.Render(messages, []api.Tool{tool}, nil); err == nil {
+		if _, err := r.Render(append(append([]api.Message{}, partial...), next), []api.Tool{tool}, nil); err == nil {
 			t.Fatalf("partial tool results followed by %s accepted", next.Role)
 		}
 	}
@@ -148,6 +147,28 @@ func TestApertusRendererRejectsAmbiguousOrUnsafeSchema(t *testing.T) {
 	}
 	if _, err := r.Render([]api.Message{{Role: "tool", Content: "orphan"}}, nil, nil); err == nil {
 		t.Fatal("orphan tool accepted")
+	}
+}
+
+func TestApertus1p5RendererContract(t *testing.T) {
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "user", Content: "Hello"}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "You are Apertus 1.5 Omni") || !strings.HasSuffix(got, apertusAssistantStart) {
+		t.Fatalf("unexpected 1.5 plain prompt: %q", got)
+	}
+	if _, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "user", Content: "Weather?"}}, []api.Tool{apertusRendererTool("get_weather")}, &api.ThinkValue{Value: true}); err == nil {
+		t.Fatal("1.5 tools with thinking accepted")
+	}
+	args := api.NewToolCallFunctionArguments()
+	args.Set("city", "Zurich")
+	history, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "assistant", ToolCalls: []api.ToolCall{{Function: api.ToolCallFunction{Name: "get_weather", Arguments: args}}}}, {Role: "tool", Content: `{"temperature":22}`}}, []api.Tool{apertusRendererTool("get_weather")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(history, `<|tool_output_start|>{"temperature":22}<|tool_output_end|>`) {
+		t.Fatalf("missing 1.5 output framing: %q", history)
 	}
 }
 
