@@ -287,6 +287,56 @@ func TestParseConfigApertus1p5RequiresRopeParameters(t *testing.T) {
 	}
 }
 
+func TestApertus1p5MediaLoaderRequiresValidIndependentConfig(t *testing.T) {
+	tensors := map[string]*mlx.Array{
+		"model.vision_tokenizer.present": mlx.New("vision"),
+		"model.audio_tokenizer.present":  mlx.New("audio"),
+	}
+	vision := VisionTokenizerConfig{
+		AttnResolutions: []int32{16}, BaseChannels: 256, ChannelMultiplier: []int32{1, 1, 2, 2, 4},
+		CodebookSize: 131072, EmbedDim: 256, InChannels: 3, LatentChannels: 256,
+		NumResBlocks: 4, Resolution: 256,
+	}
+	audio := AudioTokenizerConfig{
+		AudioChannels: 1, CodebookDim: 512, CodebookSize: 4096, Compress: 2,
+		DilationGrowthRate: 2, HiddenSize: 512, KernelSize: 7, LastKernelSize: 7,
+		NormType: "weight_norm", NumFilters: 32, NumLSTMLayers: 2, NumResidualLayers: 1,
+		PadMode: "reflect", ResidualKernelSize: 3, SamplingRate: 24000,
+		UpsamplingRatios: []int32{6, 5, 5, 4}, UseConvShortcut: true,
+	}
+	if err := vision.validate(); err != nil {
+		t.Fatalf("supported vision config rejected: %v", err)
+	}
+	if err := audio.validate(); err != nil {
+		t.Fatalf("supported audio config rejected: %v", err)
+	}
+	if !canValidateVisionTokenizer(tensors, vision) || !canValidateAudioTokenizer(tensors, audio) {
+		t.Fatal("supported independent media configs were suppressed")
+	}
+	if err := (VisionTokenizerConfig{}).validate(); err == nil {
+		t.Fatal("missing vision config accepted")
+	}
+	invalidVision := vision
+	invalidVision.Resolution = 512
+	if err := invalidVision.validate(); err == nil {
+		t.Fatal("invalid vision config accepted")
+	}
+	if canValidateVisionTokenizer(tensors, invalidVision) || !canValidateAudioTokenizer(tensors, audio) {
+		t.Fatal("invalid vision config did not suppress only vision")
+	}
+	if err := (AudioTokenizerConfig{}).validate(); err == nil {
+		t.Fatal("missing audio config accepted")
+	}
+	invalidAudio := audio
+	invalidAudio.SamplingRate = 16000
+	if err := invalidAudio.validate(); err == nil {
+		t.Fatal("invalid audio config accepted")
+	}
+	if canValidateAudioTokenizer(tensors, invalidAudio) || !canValidateVisionTokenizer(tensors, vision) {
+		t.Fatal("invalid audio config did not suppress only audio")
+	}
+}
+
 func TestParseConfigRejectsInvalidOutputVocab(t *testing.T) {
 	_, err := parseConfig([]byte(`{
 		"architectures": ["ApertusForCausalLM"],
