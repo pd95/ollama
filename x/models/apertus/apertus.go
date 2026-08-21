@@ -12,6 +12,7 @@ import (
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
+	apertusmetadata "github.com/ollama/ollama/x/models/apertus/metadata"
 	"github.com/ollama/ollama/x/models/nn"
 	"github.com/ollama/ollama/x/quant"
 	"github.com/ollama/ollama/x/tokenizer"
@@ -48,27 +49,33 @@ type RopeScaling struct {
 
 // Config holds Apertus model configuration.
 type Config struct {
-	Architecture          string      `json:"-"`
-	ModelType             string      `json:"model_type"`
-	DType                 string      `json:"dtype"`
-	HiddenSize            int32       `json:"hidden_size"`
-	IntermediateSize      int32       `json:"intermediate_size"`
-	NumHiddenLayers       int32       `json:"num_hidden_layers"`
-	NumAttentionHeads     int32       `json:"num_attention_heads"`
-	NumKeyValueHeads      int32       `json:"num_key_value_heads"`
-	VocabSize             int32       `json:"vocab_size"`
-	OutputVocabSize       int32       `json:"output_vocab_size"`
-	MaxPositionEmbeddings int32       `json:"max_position_embeddings"`
-	RMSNormEps            float32     `json:"rms_norm_eps"`
-	RopeTheta             float32     `json:"rope_theta"`
-	RopeScaling           RopeScaling `json:"rope_scaling"`
-	RopeParameters        RopeScaling `json:"rope_parameters"`
-	HiddenAct             string      `json:"hidden_act"`
-	QKNorm                bool        `json:"qk_norm"`
-	PostNorm              bool        `json:"post_norm"`
-	AttentionBias         bool        `json:"attention_bias"`
-	MLPBias               bool        `json:"mlp_bias"`
-	TieWordEmbeddings     bool        `json:"tie_word_embeddings"`
+	Architecture          string                `json:"-"`
+	ModelType             string                `json:"model_type"`
+	DType                 string                `json:"dtype"`
+	HiddenSize            int32                 `json:"hidden_size"`
+	IntermediateSize      int32                 `json:"intermediate_size"`
+	NumHiddenLayers       int32                 `json:"num_hidden_layers"`
+	NumAttentionHeads     int32                 `json:"num_attention_heads"`
+	NumKeyValueHeads      int32                 `json:"num_key_value_heads"`
+	VocabSize             int32                 `json:"vocab_size"`
+	OutputVocabSize       int32                 `json:"output_vocab_size"`
+	MaxPositionEmbeddings int32                 `json:"max_position_embeddings"`
+	RMSNormEps            float32               `json:"rms_norm_eps"`
+	RopeTheta             float32               `json:"rope_theta"`
+	RopeScaling           RopeScaling           `json:"rope_scaling"`
+	RopeParameters        RopeScaling           `json:"rope_parameters"`
+	HiddenAct             string                `json:"hidden_act"`
+	QKNorm                bool                  `json:"qk_norm"`
+	PostNorm              bool                  `json:"post_norm"`
+	AttentionBias         bool                  `json:"attention_bias"`
+	MLPBias               bool                  `json:"mlp_bias"`
+	TieWordEmbeddings     bool                  `json:"tie_word_embeddings"`
+	ImageTokenID          int32                 `json:"-"`
+	AudioTokenID          int32                 `json:"-"`
+	ImageTokenOffset      int32                 `json:"-"`
+	AudioTokenOffset      int32                 `json:"-"`
+	VisionTokenizer       VisionTokenizerConfig `json:"-"`
+	AudioTokenizer        AudioTokenizerConfig  `json:"-"`
 
 	QuantGroupSize int                               `json:"-"`
 	QuantBits      int                               `json:"-"`
@@ -88,6 +95,8 @@ type Model struct {
 	Layers      []*Layer
 	Norm        *nn.RMSNorm
 	LMHead      nn.LinearLayer
+	Vision      *VisionTokenizer
+	Audio       *AudioTokenizer
 
 	tok *tokenizer.Tokenizer
 	*Config
@@ -199,17 +208,14 @@ func pruneApertus1p5TokenizerAddedTokens(data []byte, outputVocabSize int32) ([]
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
-
 	addedRaw, ok := raw["added_tokens"]
 	if !ok {
 		return data, nil
 	}
-
 	var added []json.RawMessage
 	if err := json.Unmarshal(addedRaw, &added); err != nil {
 		return nil, err
 	}
-
 	filtered := make([]json.RawMessage, 0, len(added))
 	for _, tokenRaw := range added {
 		var token struct {
@@ -222,13 +228,11 @@ func pruneApertus1p5TokenizerAddedTokens(data []byte, outputVocabSize int32) ([]
 			filtered = append(filtered, tokenRaw)
 		}
 	}
-
 	filteredRaw, err := json.Marshal(filtered)
 	if err != nil {
 		return nil, err
 	}
 	raw["added_tokens"] = filteredRaw
-
 	return json.Marshal(raw)
 }
 
@@ -247,8 +251,14 @@ func parseConfig(configData []byte) (Config, error) {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	var archConfig struct {
-		Architectures []string `json:"architectures"`
-		ModelType     string   `json:"model_type"`
+		Architectures    []string              `json:"architectures"`
+		ModelType        string                `json:"model_type"`
+		ImageTokenID     int32                 `json:"image_token_id"`
+		AudioTokenID     int32                 `json:"audio_token_id"`
+		ImageTokenOffset int32                 `json:"image_token_offset"`
+		AudioTokenOffset int32                 `json:"audio_token_offset"`
+		VisionTokenizer  VisionTokenizerConfig `json:"vision_tokenizer_config"`
+		AudioTokenizer   AudioTokenizerConfig  `json:"audio_tokenizer_config"`
 	}
 	if err := json.Unmarshal(configData, &archConfig); err != nil {
 		return Config{}, fmt.Errorf("parse architecture: %w", err)
@@ -258,6 +268,12 @@ func parseConfig(configData []byte) (Config, error) {
 	} else {
 		cfg.Architecture = archConfig.ModelType
 	}
+	cfg.ImageTokenID = archConfig.ImageTokenID
+	cfg.AudioTokenID = archConfig.AudioTokenID
+	cfg.ImageTokenOffset = archConfig.ImageTokenOffset
+	cfg.AudioTokenOffset = archConfig.AudioTokenOffset
+	cfg.VisionTokenizer = archConfig.VisionTokenizer
+	cfg.AudioTokenizer = archConfig.AudioTokenizer
 	if cfg.Architecture == "" {
 		return Config{}, fmt.Errorf("missing architecture in config.json")
 	}
@@ -465,6 +481,9 @@ func validateTensorNamespace(tensors map[string]*mlx.Array, architecture, expect
 			if strings.HasPrefix(name, "model.language_model.") {
 				return fmt.Errorf("unexpected Apertus 1.5 tensor namespace %q for %s", name, architecture)
 			}
+			if strings.HasPrefix(name, "model.vision_tokenizer.") || strings.HasPrefix(name, "model.audio_tokenizer.") {
+				return fmt.Errorf("unexpected Apertus 1.5 media tensor %q for %s", name, architecture)
+			}
 		case apertus1p5Architecture:
 			if strings.HasPrefix(name, "model.embed_tokens.") ||
 				strings.HasPrefix(name, "model.norm.") || strings.HasPrefix(name, "model.layers.") {
@@ -476,6 +495,54 @@ func validateTensorNamespace(tensors map[string]*mlx.Array, architecture, expect
 		return fmt.Errorf("missing tensor prefix for %s", architecture)
 	}
 	return nil
+}
+
+func apertureMediaDescriptors(tensors map[string]*mlx.Array) (map[string]apertusmetadata.TensorDescriptor, error) {
+	descriptors := make(map[string]apertusmetadata.TensorDescriptor, len(tensors))
+	for name, tensor := range tensors {
+		if tensor == nil || !tensor.Valid() {
+			continue
+		}
+		dims := tensor.Dims()
+		shape := make([]int32, len(dims))
+		for i, dim := range dims {
+			if dim <= 0 || uint64(dim) > uint64(math.MaxInt32) {
+				return nil, fmt.Errorf("Apertus media tensor %q has invalid dimension %d", name, dim)
+			}
+			shape[i] = int32(dim)
+		}
+		descriptors[name] = apertusmetadata.TensorDescriptor{Dtype: tensor.DType().String(), Shape: shape}
+	}
+	return descriptors, nil
+}
+
+func (m *Model) mediaMetadataConfig() apertusmetadata.Config {
+	return apertusmetadata.Config{
+		Architectures:    []string{m.Architecture},
+		ModelType:        m.ModelType,
+		ImageTokenID:     m.ImageTokenID,
+		AudioTokenID:     m.AudioTokenID,
+		ImageTokenOffset: m.ImageTokenOffset,
+		AudioTokenOffset: m.AudioTokenOffset,
+		Vision: apertusmetadata.VisionConfig{
+			CodebookSize: m.VisionTokenizer.CodebookSize, EmbedDim: m.VisionTokenizer.EmbedDim,
+			InChannels: m.VisionTokenizer.InChannels, ChannelMultiplier: m.VisionTokenizer.ChannelMultiplier,
+		},
+		Audio: apertusmetadata.AudioConfig{
+			CodebookSize: m.AudioTokenizer.CodebookSize, CodebookDim: m.AudioTokenizer.CodebookDim,
+			AudioChannels: m.AudioTokenizer.AudioChannels, SamplingRate: m.AudioTokenizer.SamplingRate,
+			UpsamplingRatios: m.AudioTokenizer.UpsamplingRatios,
+		},
+	}
+}
+
+func hasTensorPrefix(tensors map[string]*mlx.Array, prefix string) bool {
+	for name := range tensors {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func qkNormShape(batch, seqLen, heads, headDim int32) []int32 {
@@ -800,6 +867,30 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	m.Norm = nn.NewRMSNorm(tensors[prefix+"norm.weight"], m.RMSNormEps)
 	m.LMHead = linears.Make("lm_head")
 
+	mediaDescriptors, err := apertureMediaDescriptors(tensors)
+	if err != nil {
+		return err
+	}
+	mediaConfig := m.mediaMetadataConfig()
+	if hasTensorPrefix(tensors, "model.vision_tokenizer.") {
+		if err := apertusmetadata.ValidateVisionInventory(mediaConfig, mediaDescriptors); err != nil {
+			return err
+		}
+		m.Vision, err = loadVisionTokenizer(tensors, m.VisionTokenizer)
+		if err != nil {
+			return fmt.Errorf("load Apertus 1.5 vision tokenizer: %w", err)
+		}
+	}
+	if hasTensorPrefix(tensors, "model.audio_tokenizer.") {
+		if err := apertusmetadata.ValidateAudioInventory(mediaConfig, mediaDescriptors); err != nil {
+			return err
+		}
+		m.Audio, err = loadAudioTokenizer(tensors, m.AudioTokenizer)
+		if err != nil {
+			return fmt.Errorf("load Apertus 1.5 audio tokenizer: %w", err)
+		}
+	}
+
 	for i := range m.NumHiddenLayers {
 		layerPrefix := fmt.Sprintf("%slayers.%d", prefix, i)
 		act, err := newXIELU(
@@ -831,6 +922,7 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (hidden, auxHidden
 	B, L := int32(dims[0]), int32(dims[1])
 	positions := mlx.FromValues(b.SeqOffsets, len(b.SeqOffsets))
 	h := mlx.Reshape(m.EmbedTokens.Forward(b.InputIDs), B, L, m.HiddenSize)
+	h = m.scatterMedia(h, b)
 	for i, layer := range m.Layers {
 		var c cache.Cache
 		if caches != nil && i < len(caches) {
