@@ -35,6 +35,7 @@ func TestApertusImageSize(t *testing.T) {
 		})
 	}
 }
+
 func TestApertusAdaptiveImageMemoryTiers(t *testing.T) {
 	const gib = uint64(1 << 30)
 	limits := []uint64{12 * gib, 18 * gib, 24 * gib, 36 * gib, 48 * gib, 96 * gib}
