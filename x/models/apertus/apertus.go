@@ -18,6 +18,9 @@ import (
 )
 
 const (
+	apertus1p0Architecture = "ApertusForCausalLM"
+	apertus1p5Architecture = "Apertus1p5ForConditionalGeneration"
+
 	maxConfigDimension = int32(1 << 24)
 	maxLayers          = int32(1024)
 	maxHeads           = int32(1024)
@@ -28,7 +31,8 @@ const (
 )
 
 func init() {
-	base.Register("ApertusForCausalLM", newModel)
+	base.Register(apertus1p0Architecture, newModel)
+	base.Register(apertus1p5Architecture, newModel)
 }
 
 // RopeScaling carries the Llama 3 RoPE scaling block used by Apertus.
@@ -37,6 +41,7 @@ type RopeScaling struct {
 	HighFreqFactor                float32 `json:"high_freq_factor"`
 	LowFreqFactor                 float32 `json:"low_freq_factor"`
 	OriginalMaxPositionEmbeddings int32   `json:"original_max_position_embeddings"`
+	RopeTheta                     float32 `json:"rope_theta,omitempty"`
 	RopeType                      string  `json:"rope_type,omitempty"`
 	Type                          string  `json:"type,omitempty"`
 }
@@ -52,10 +57,12 @@ type Config struct {
 	NumAttentionHeads     int32       `json:"num_attention_heads"`
 	NumKeyValueHeads      int32       `json:"num_key_value_heads"`
 	VocabSize             int32       `json:"vocab_size"`
+	OutputVocabSize       int32       `json:"output_vocab_size"`
 	MaxPositionEmbeddings int32       `json:"max_position_embeddings"`
 	RMSNormEps            float32     `json:"rms_norm_eps"`
 	RopeTheta             float32     `json:"rope_theta"`
 	RopeScaling           RopeScaling `json:"rope_scaling"`
+	RopeParameters        RopeScaling `json:"rope_parameters"`
 	HiddenAct             string      `json:"hidden_act"`
 	QKNorm                bool        `json:"qk_norm"`
 	PostNorm              bool        `json:"post_norm"`
@@ -72,6 +79,7 @@ type Config struct {
 	HeadDim   int32      `json:"-"`
 	Scale     float32    `json:"-"`
 	RopeFreqs *mlx.Array `json:"-"`
+	prefix    string
 }
 
 // Model is an Apertus text model.
@@ -152,6 +160,11 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load tokenizer config: %w", err)
 	}
+	tokData, err = tokenizerDataForConfig(cfg, tokData)
+	if err != nil {
+		return nil, fmt.Errorf("prepare Apertus tokenizer: %w", err)
+	}
+
 	tokConfig := &tokenizer.TokenizerConfig{ConfigJSON: configData}
 	if data, err := root.Manifest.ReadConfig("generation_config.json"); err == nil {
 		tokConfig.GenerationConfigJSON = data
@@ -168,6 +181,55 @@ func newModel(root *model.Root) (base.Model, error) {
 	}
 
 	return &Model{Config: &cfg, Layers: make([]*Layer, int(cfg.NumHiddenLayers)), tok: tok}, nil
+}
+
+func isApertus1p5Config(cfg Config) bool {
+	return cfg.Architecture == apertus1p5Architecture
+}
+
+func tokenizerDataForConfig(cfg Config, data []byte) ([]byte, error) {
+	if !isApertus1p5Config(cfg) {
+		return data, nil
+	}
+	return pruneApertus1p5TokenizerAddedTokens(data, cfg.OutputVocabSize)
+}
+
+func pruneApertus1p5TokenizerAddedTokens(data []byte, outputVocabSize int32) ([]byte, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	addedRaw, ok := raw["added_tokens"]
+	if !ok {
+		return data, nil
+	}
+
+	var added []json.RawMessage
+	if err := json.Unmarshal(addedRaw, &added); err != nil {
+		return nil, err
+	}
+
+	filtered := make([]json.RawMessage, 0, len(added))
+	for _, tokenRaw := range added {
+		var token struct {
+			ID int32 `json:"id"`
+		}
+		if err := json.Unmarshal(tokenRaw, &token); err != nil {
+			return nil, err
+		}
+		if token.ID >= 0 && token.ID < outputVocabSize {
+			filtered = append(filtered, tokenRaw)
+		}
+	}
+
+	filteredRaw, err := json.Marshal(filtered)
+	if err != nil {
+		return nil, err
+	}
+	raw["added_tokens"] = filteredRaw
+
+	return json.Marshal(raw)
 }
 
 func parseConfig(configData []byte) (Config, error) {
@@ -199,6 +261,11 @@ func parseConfig(configData []byte) (Config, error) {
 	if cfg.Architecture == "" {
 		return Config{}, fmt.Errorf("missing architecture in config.json")
 	}
+	prefix, err := tensorPrefixForArchitecture(cfg.Architecture)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.prefix = prefix
 
 	for _, field := range []struct {
 		name  string
@@ -238,6 +305,13 @@ func parseConfig(configData []byte) (Config, error) {
 	if _, err := checkedProduct("key/value projection", uint64(cfg.NumKeyValueHeads), uint64(cfg.HeadDim)); err != nil {
 		return Config{}, err
 	}
+	if isApertus1p5Config(cfg) {
+		if cfg.RopeParameters.RopeTheta == 0 {
+			return Config{}, fmt.Errorf("missing rope_parameters.rope_theta")
+		}
+		cfg.RopeTheta = cfg.RopeParameters.RopeTheta
+		cfg.RopeScaling = cfg.RopeParameters
+	}
 	if _, err := checkedProduct("embedding", uint64(cfg.VocabSize), uint64(cfg.HiddenSize)); err != nil {
 		return Config{}, err
 	}
@@ -259,6 +333,18 @@ func parseConfig(configData []byte) (Config, error) {
 	}
 	if cfg.HiddenAct != "xielu" {
 		return Config{}, fmt.Errorf("unsupported hidden_act %q", cfg.HiddenAct)
+	}
+	if cfg.VocabSize <= 0 {
+		return Config{}, fmt.Errorf("invalid vocab_size: %d", cfg.VocabSize)
+	}
+	if isApertus1p5Config(cfg) {
+		if cfg.OutputVocabSize <= 0 || cfg.OutputVocabSize > cfg.VocabSize {
+			return Config{}, fmt.Errorf("invalid output_vocab_size: %d (vocab_size: %d)", cfg.OutputVocabSize, cfg.VocabSize)
+		}
+	} else if cfg.OutputVocabSize == 0 {
+		cfg.OutputVocabSize = cfg.VocabSize
+	} else if cfg.OutputVocabSize != cfg.VocabSize {
+		return Config{}, fmt.Errorf("invalid output_vocab_size: %d (vocab_size: %d)", cfg.OutputVocabSize, cfg.VocabSize)
 	}
 	if !cfg.QKNorm {
 		return Config{}, fmt.Errorf("unsupported qk_norm=false")
@@ -361,6 +447,37 @@ func Llama3Freqs(headDim int32, base, factor, lowFreqFactor, highFreqFactor floa
 	return freqs, nil
 }
 
+func tensorPrefixForArchitecture(architecture string) (string, error) {
+	switch architecture {
+	case apertus1p0Architecture:
+		return "model.", nil
+	case apertus1p5Architecture:
+		return "model.language_model.", nil
+	default:
+		return "", fmt.Errorf("unsupported Apertus architecture %q", architecture)
+	}
+}
+
+func validateTensorNamespace(tensors map[string]*mlx.Array, architecture, expected string) error {
+	for name := range tensors {
+		switch architecture {
+		case apertus1p0Architecture:
+			if strings.HasPrefix(name, "model.language_model.") {
+				return fmt.Errorf("unexpected Apertus 1.5 tensor namespace %q for %s", name, architecture)
+			}
+		case apertus1p5Architecture:
+			if strings.HasPrefix(name, "model.embed_tokens.") ||
+				strings.HasPrefix(name, "model.norm.") || strings.HasPrefix(name, "model.layers.") {
+				return fmt.Errorf("unexpected Apertus 1.0 tensor namespace %q for %s", name, architecture)
+			}
+		}
+	}
+	if expected == "" {
+		return fmt.Errorf("missing tensor prefix for %s", architecture)
+	}
+	return nil
+}
+
 func qkNormShape(batch, seqLen, heads, headDim int32) []int32 {
 	return []int32{batch, heads, seqLen, headDim}
 }
@@ -378,31 +495,41 @@ func validateTensors(tensors map[string]*mlx.Array, cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("missing Apertus config")
 	}
-	if err := validateMatrix(tensors, "model.embed_tokens", int(cfg.VocabSize), int(cfg.HiddenSize), cfg, true); err != nil {
+	prefix, err := tensorPrefixForArchitecture(cfg.Architecture)
+	if err != nil {
 		return err
 	}
-	if err := validateDense(tensors, "model.norm.weight", []int{int(cfg.HiddenSize)}); err != nil {
+	if cfg.prefix != "" && cfg.prefix != prefix {
+		return fmt.Errorf("Apertus tensor prefix %q does not match architecture %s", cfg.prefix, cfg.Architecture)
+	}
+	if err := validateTensorNamespace(tensors, cfg.Architecture, prefix); err != nil {
 		return err
 	}
-	if err := validateMatrix(tensors, "lm_head", int(cfg.VocabSize), int(cfg.HiddenSize), cfg, false); err != nil {
+	if err := validateMatrix(tensors, prefix+"embed_tokens", int(cfg.VocabSize), int(cfg.HiddenSize), cfg, true); err != nil {
+		return err
+	}
+	if err := validateDense(tensors, prefix+"norm.weight", []int{int(cfg.HiddenSize)}); err != nil {
+		return err
+	}
+	if err := validateMatrix(tensors, "lm_head", int(cfg.OutputVocabSize), int(cfg.HiddenSize), cfg, false); err != nil {
 		return err
 	}
 	qOut := int(cfg.NumAttentionHeads * cfg.HeadDim)
 	kvOut := int(cfg.NumKeyValueHeads * cfg.HeadDim)
 	for i := range cfg.NumHiddenLayers {
-		prefix := fmt.Sprintf("model.layers.%d", i)
+		layerPrefix := fmt.Sprintf("%slayers.%d", prefix, i)
 		for _, spec := range []struct {
 			name  string
 			shape []int
 		}{
-			{prefix + ".attention_layernorm.weight", []int{int(cfg.HiddenSize)}},
-			{prefix + ".feedforward_layernorm.weight", []int{int(cfg.HiddenSize)}},
-			{prefix + ".self_attn.q_norm.weight", []int{int(cfg.HeadDim)}},
-			{prefix + ".self_attn.k_norm.weight", []int{int(cfg.HeadDim)}},
-			{prefix + ".mlp.act_fn.alpha_p", []int{1}},
-			{prefix + ".mlp.act_fn.alpha_n", []int{1}},
-			{prefix + ".mlp.act_fn.beta", nil},
-			{prefix + ".mlp.act_fn.eps", nil},
+			{layerPrefix + ".attention_layernorm.weight", []int{int(cfg.HiddenSize)}},
+			{layerPrefix + ".feedforward_layernorm.weight", []int{int(cfg.HiddenSize)}},
+			{layerPrefix + ".self_attn.q_norm.weight", []int{int(cfg.HeadDim)}},
+			{layerPrefix + ".self_attn.k_norm.weight", []int{int(cfg.HeadDim)}},
+			{layerPrefix + ".mlp.act_fn.alpha_p", []int{1}},
+			{layerPrefix + ".mlp.act_fn.alpha_n", []int{1}},
+			{layerPrefix + ".mlp.act_fn.beta", nil},
+			{layerPrefix + ".mlp.act_fn.eps", nil},
 		} {
 			if err := validateDense(tensors, spec.name, spec.shape); err != nil {
 				return fmt.Errorf("layer %d: %w", i, err)
@@ -412,12 +539,12 @@ func validateTensors(tensors map[string]*mlx.Array, cfg *Config) error {
 			path       string
 			out, input int
 		}{
-			{prefix + ".self_attn.q_proj", qOut, int(cfg.HiddenSize)},
-			{prefix + ".self_attn.k_proj", kvOut, int(cfg.HiddenSize)},
-			{prefix + ".self_attn.v_proj", kvOut, int(cfg.HiddenSize)},
-			{prefix + ".self_attn.o_proj", int(cfg.HiddenSize), qOut},
-			{prefix + ".mlp.up_proj", int(cfg.IntermediateSize), int(cfg.HiddenSize)},
-			{prefix + ".mlp.down_proj", int(cfg.HiddenSize), int(cfg.IntermediateSize)},
+			{layerPrefix + ".self_attn.q_proj", qOut, int(cfg.HiddenSize)},
+			{layerPrefix + ".self_attn.k_proj", kvOut, int(cfg.HiddenSize)},
+			{layerPrefix + ".self_attn.v_proj", kvOut, int(cfg.HiddenSize)},
+			{layerPrefix + ".self_attn.o_proj", int(cfg.HiddenSize), qOut},
+			{layerPrefix + ".mlp.up_proj", int(cfg.IntermediateSize), int(cfg.HiddenSize)},
+			{layerPrefix + ".mlp.down_proj", int(cfg.HiddenSize), int(cfg.IntermediateSize)},
 		} {
 			if err := validateMatrix(tensors, spec.path, spec.out, spec.input, cfg, false); err != nil {
 				return fmt.Errorf("layer %d: %w", i, err)
@@ -501,6 +628,9 @@ func validateMatrix(tensors map[string]*mlx.Array, path string, out, input int, 
 	if scales == nil {
 		if qbiases != nil || global != nil || legacyGlobal != nil {
 			return fmt.Errorf("incomplete quantization companions for %q", name)
+		}
+		if tq, ok := cfg.TensorQuant[name]; ok && tq != nil && quant.Canonical(tq.QuantType) != "" {
+			return fmt.Errorf("missing quantization companions for explicitly quantized tensor %q", name)
 		}
 		if err := validateShape(name, weight, []int{out, input}); err != nil {
 			return err
@@ -660,32 +790,37 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	if err := validateTensors(tensors, m.Config); err != nil {
 		return err
 	}
+	prefix, err := tensorPrefixForArchitecture(m.Architecture)
+	if err != nil {
+		return err
+	}
+	m.prefix = prefix
 	linears := model.NewLinearFactory(tensors, m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
-	m.EmbedTokens = model.MakeEmbeddingLayer(tensors, "model.embed_tokens", m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
-	m.Norm = nn.NewRMSNorm(tensors["model.norm.weight"], m.RMSNormEps)
+	m.EmbedTokens = model.MakeEmbeddingLayer(tensors, prefix+"embed_tokens", m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant)
+	m.Norm = nn.NewRMSNorm(tensors[prefix+"norm.weight"], m.RMSNormEps)
 	m.LMHead = linears.Make("lm_head")
 
 	for i := range m.NumHiddenLayers {
-		prefix := fmt.Sprintf("model.layers.%d", i)
+		layerPrefix := fmt.Sprintf("%slayers.%d", prefix, i)
 		act, err := newXIELU(
-			tensors[prefix+".mlp.act_fn.alpha_p"], tensors[prefix+".mlp.act_fn.alpha_n"],
-			tensors[prefix+".mlp.act_fn.beta"], tensors[prefix+".mlp.act_fn.eps"],
+			tensors[layerPrefix+".mlp.act_fn.alpha_p"], tensors[layerPrefix+".mlp.act_fn.alpha_n"],
+			tensors[layerPrefix+".mlp.act_fn.beta"], tensors[layerPrefix+".mlp.act_fn.eps"],
 		)
 		if err != nil {
 			return fmt.Errorf("layer %d: load xielu activation parameters: %w", i, err)
 		}
 		m.Layers[i] = &Layer{
-			AttentionNorm: nn.NewRMSNorm(tensors[prefix+".attention_layernorm.weight"], m.RMSNormEps),
-			FFNNorm:       nn.NewRMSNorm(tensors[prefix+".feedforward_layernorm.weight"], m.RMSNormEps),
+			AttentionNorm: nn.NewRMSNorm(tensors[layerPrefix+".attention_layernorm.weight"], m.RMSNormEps),
+			FFNNorm:       nn.NewRMSNorm(tensors[layerPrefix+".feedforward_layernorm.weight"], m.RMSNormEps),
 			Attention: &Attention{
-				QProj: linears.Make(prefix + ".self_attn.q_proj"),
-				KProj: linears.Make(prefix + ".self_attn.k_proj"),
-				VProj: linears.Make(prefix + ".self_attn.v_proj"),
-				OProj: linears.Make(prefix + ".self_attn.o_proj"),
-				QNorm: nn.NewRMSNorm(tensors[prefix+".self_attn.q_norm.weight"], m.RMSNormEps),
-				KNorm: nn.NewRMSNorm(tensors[prefix+".self_attn.k_norm.weight"], m.RMSNormEps),
+				QProj: linears.Make(layerPrefix + ".self_attn.q_proj"),
+				KProj: linears.Make(layerPrefix + ".self_attn.k_proj"),
+				VProj: linears.Make(layerPrefix + ".self_attn.v_proj"),
+				OProj: linears.Make(layerPrefix + ".self_attn.o_proj"),
+				QNorm: nn.NewRMSNorm(tensors[layerPrefix+".self_attn.q_norm.weight"], m.RMSNormEps),
+				KNorm: nn.NewRMSNorm(tensors[layerPrefix+".self_attn.k_norm.weight"], m.RMSNormEps),
 			},
-			MLP: &MLP{UpProj: linears.Make(prefix + ".mlp.up_proj"), DownProj: linears.Make(prefix + ".mlp.down_proj"), Act: act},
+			MLP: &MLP{UpProj: linears.Make(layerPrefix + ".mlp.up_proj"), DownProj: linears.Make(layerPrefix + ".mlp.down_proj"), Act: act},
 		}
 	}
 	return nil
@@ -709,7 +844,8 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (hidden, auxHidden
 
 func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
 	dims := x.Dims()
-	return mlx.Reshape(m.LMHead.Forward(x), int32(dims[0]), int32(dims[1]), m.VocabSize)
+	B, L := int32(dims[0]), int32(dims[1])
+	return mlx.Reshape(m.LMHead.Forward(x), B, L, m.OutputVocabSize)
 }
 
 func (m *Model) Tokenizer() *tokenizer.Tokenizer { return m.tok }
