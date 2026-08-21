@@ -127,7 +127,11 @@ func (m *requestMedia) batchMedia(pos, n int) []batch.MediaItem {
 		}
 		if m.features[i] == nil {
 			data := mlx.FromValues(item.item.MediaData, item.item.Dims...)
-			m.features[i] = m.model.EncodeMedia(item.item, data)
+			if staged, ok := m.model.(base.StagedMediaModel); ok {
+				m.features[i] = staged.EncodeMediaStaged(item.item, data, materializeMedia)
+			} else {
+				m.features[i] = m.model.EncodeMedia(item.item, data)
+			}
 			mlx.Pin(m.features[i])
 			// The upload copied the pixels; free them here — release never
 			// passes the end of an expansion reaching the prompt's last token.
@@ -136,6 +140,13 @@ func (m *requestMedia) batchMedia(pos, n int) []batch.MediaItem {
 		m.manifest[i].Features = m.features[i]
 	}
 	return m.manifest
+}
+
+func materializeMedia(arrays ...*mlx.Array) {
+	mlx.Eval(arrays...)
+	mlx.Pin(arrays...)
+	mlx.Sweep()
+	mlx.Unpin(arrays...)
 }
 
 // release frees what items fully evaluated or restored at position pos no
