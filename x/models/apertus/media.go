@@ -148,16 +148,24 @@ func placeholderSpans(tokens []int32, id int32) [][2]int {
 
 // EncodeMedia builds a lazy feature graph from the runner-owned media data.
 func (m *Model) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
+	return m.encodeMedia(item, data, nil)
+}
+
+func (m *Model) EncodeMediaStaged(item *base.PreparedItem, data *mlx.Array, materialize base.MediaMaterializer) *mlx.Array {
+	return m.encodeMedia(item, data, materialize)
+}
+
+func (m *Model) encodeMedia(item *base.PreparedItem, data *mlx.Array, materialize base.MediaMaterializer) *mlx.Array {
 	payload := item.Opaque.(apertusMediaPayload)
 	var codes *mlx.Array
 	var err error
 	var offset int32
 	switch payload.kind {
 	case "image":
-		codes, err = m.Vision.encode(data, payload.width, payload.height)
+		codes, err = m.Vision.encodeStaged(data, payload.width, payload.height, materialize)
 		offset = m.ImageTokenOffset
 	case "audio":
-		codes, err = m.Audio.encode(data, payload.samples)
+		codes, err = m.Audio.encodeStaged(data, payload.samples, materialize)
 		offset = m.AudioTokenOffset
 	default:
 		panic(fmt.Sprintf("invalid Apertus 1.5 media kind %q", payload.kind))
@@ -199,3 +207,4 @@ func (m *Model) scatterMedia(h *mlx.Array, b *batch.Batch) *mlx.Array {
 }
 
 var _ base.MediaModel = (*Model)(nil)
+var _ base.StagedMediaModel = (*Model)(nil)

@@ -168,7 +168,7 @@ func loadApertureLSTM(tensors map[string]*mlx.Array, path string, layers int, hi
 	return l, nil
 }
 
-func (l *apertureLSTM) forward(input *mlx.Array) (*mlx.Array, error) {
+func (l *apertureLSTM) forward(input *mlx.Array, materialize func(...*mlx.Array)) (*mlx.Array, error) {
 	residual := input
 	x := input
 	for layer := range l.inputWeights {
@@ -188,6 +188,9 @@ func (l *apertureLSTM) forward(input *mlx.Array) (*mlx.Array, error) {
 			o := mlx.Sigmoid(gates.Slice(mlx.Slice(), mlx.Slice(int(3*l.hidden), int(4*l.hidden))))
 			c = mlx.Add(mlx.Mul(f, c), mlx.Mul(i, g))
 			h = mlx.Mul(o, c.Tanh())
+			if materialize != nil {
+				materialize(h, c)
+			}
 			outputs = append(outputs, h.ExpandDims(1))
 		}
 		x = mlx.Concatenate(outputs, 1)
@@ -266,27 +269,40 @@ func loadAudioTokenizer(tensors map[string]*mlx.Array, cfg AudioTokenizerConfig)
 }
 
 func (a *AudioTokenizer) encode(data *mlx.Array, sampleCount int) (*mlx.Array, error) {
+	return a.encodeStaged(data, sampleCount, nil)
+}
+
+func (a *AudioTokenizer) encodeStaged(data *mlx.Array, sampleCount int, materialize func(...*mlx.Array)) (*mlx.Array, error) {
 	if sampleCount == 0 {
 		return nil, errors.New("empty Apertus audio")
 	}
 	x := mlx.Reshape(data, 1, int32(sampleCount), 1)
 	h := a.initial.forward(x)
+	if materialize != nil {
+		materialize(h)
+	}
 	if h.Dim(1) == 0 {
 		return nil, fmt.Errorf("Apertus audio initial convolution produced an empty sequence from %d samples", sampleCount)
 	}
 	for i := range a.residuals {
 		h = a.residuals[i].forward(h)
 		h = a.downsample[i].forward(apertureELU(h))
+		if materialize != nil {
+			materialize(h)
+		}
 		if h.Dim(1) == 0 {
 			return nil, fmt.Errorf("Apertus audio downsample stage %d produced an empty sequence", i)
 		}
 	}
 	var err error
-	h, err = a.lstm.forward(h)
+	h, err = a.lstm.forward(h, materialize)
 	if err != nil {
 		return nil, err
 	}
 	h = a.final.forward(apertureELU(h))
+	if materialize != nil {
+		materialize(h)
+	}
 	flat := mlx.Reshape(h, int32(h.Dim(1)), a.config.CodebookDim)
 	dot := mlx.Mul(mlx.Matmul(flat, mlx.Transpose(a.codebook, 1, 0)), mlx.NewScalarArray(float32(2)))
 	codeNorm := mlx.Sum(mlx.Mul(a.codebook, a.codebook), 1, false)

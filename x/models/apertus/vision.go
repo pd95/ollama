@@ -311,28 +311,62 @@ func loadVisionTokenizer(tensors map[string]*mlx.Array, cfg VisionTokenizerConfi
 }
 
 func (v *VisionTokenizer) encode(data *mlx.Array, width, height int) (*mlx.Array, error) {
+	return v.encodeStaged(data, width, height, nil)
+}
+
+func (v *VisionTokenizer) encodeStaged(data *mlx.Array, width, height int, materialize func(...*mlx.Array)) (*mlx.Array, error) {
 	x := mlx.Reshape(data, 1, int32(height), int32(width), 3)
 	h := v.convIn.forward(x)
+	if materialize != nil {
+		materialize(h)
+	}
 	for _, level := range v.levels {
 		for i, block := range level.blocks {
 			h = block.forward(h)
+			if materialize != nil {
+				materialize(h)
+			}
 			if len(level.attn) > 0 {
 				h = level.attn[i].forward(h)
+				if materialize != nil {
+					materialize(h)
+				}
 			}
 		}
 		if level.downsample != nil {
 			h = mlx.PadConstant(h, []int{1, 2}, []int{0, 0}, []int{1, 1})
 			h = level.downsample.forward(h)
+			if materialize != nil {
+				materialize(h)
+			}
 		}
 	}
 	h = v.mid1.forward(h)
+	if materialize != nil {
+		materialize(h)
+	}
 	h = v.midAttn.forward(h)
+	if materialize != nil {
+		materialize(h)
+	}
 	h = v.mid2.forward(h)
+	if materialize != nil {
+		materialize(h)
+	}
 	h = v.convOut.forward(mlx.SiLU(v.normOut.forward(h)))
+	if materialize != nil {
+		materialize(h)
+	}
 	h = v.quantConv.forward(h)
+	if materialize != nil {
+		materialize(h)
+	}
 	d := h.Dims()
 	count := int32(d[1] * d[2])
 	flat := mlx.Reshape(h, count, v.config.EmbedDim)
+	if materialize != nil {
+		materialize(flat)
+	}
 	var bestScore, bestID *mlx.Array
 	for start := int32(0); start < v.config.CodebookSize; start += visionCodebookChunk {
 		end := min(start+visionCodebookChunk, v.config.CodebookSize)
@@ -346,6 +380,9 @@ func (v *VisionTokenizer) encode(data *mlx.Array, width, height int) (*mlx.Array
 			better := chunkScore.Greater(bestScore)
 			bestScore = mlx.Where(better, chunkScore, bestScore)
 			bestID = mlx.Where(better, chunkID, bestID)
+		}
+		if materialize != nil {
+			materialize(bestScore, bestID)
 		}
 	}
 	return mlx.Reshape(bestID, 1, count), nil
@@ -373,14 +410,7 @@ func preprocessApertusImage(ctx context.Context, data []byte) (*apertusImageInpu
 	if width <= 0 || height <= 0 || width > maxApertusImageDimension || height > maxApertusImageDimension || int64(width)*int64(height) > maxApertusImagePixels {
 		return nil, fmt.Errorf("Apertus image dimensions %dx%d are invalid", width, height)
 	}
-	targetArea := max(256*256, min(1400*1400, width*height))
-	aspect := float64(width) / float64(height)
-	targetH := int(math.Sqrt(float64(targetArea) / aspect))
-	targetW := int(float64(targetH) * aspect)
-	targetH = ((targetH + 8) / 16) * 16
-	targetW = ((targetW + 8) / 16) * 16
-	targetH = max(targetH, 16)
-	targetW = max(targetW, 16)
+	targetW, targetH := apertusImageSize(width, height)
 	pixels := resizeApertusImage(img, b, targetW, targetH)
 	for y := range targetH {
 		if y&127 == 0 {
@@ -396,6 +426,18 @@ func preprocessApertusImage(ctx context.Context, data []byte) (*apertusImageInpu
 		}
 	}
 	return &apertusImageInput{pixels: pixels, width: targetW, height: targetH, gridWidth: targetW / 16, gridHeight: targetH / 16}, nil
+}
+
+func apertusImageSize(width, height int) (int, int) {
+	targetArea := max(256*256, min(1400*1400, width*height))
+	aspect := float64(width) / float64(height)
+	targetH := int(math.Sqrt(float64(targetArea) / aspect))
+	targetW := int(float64(targetH) * aspect)
+	targetH = ((targetH + 8) / 16) * 16
+	targetW = ((targetW + 8) / 16) * 16
+	targetH = max(targetH, 16)
+	targetW = max(targetW, 16)
+	return targetW, targetH
 }
 
 type apertureResamplePoint struct {
