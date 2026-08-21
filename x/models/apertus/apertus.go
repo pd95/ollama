@@ -554,6 +554,14 @@ func hasTensorPrefix(tensors map[string]*mlx.Array, prefix string) bool {
 	return false
 }
 
+func canValidateVisionTokenizer(tensors map[string]*mlx.Array, cfg VisionTokenizerConfig) bool {
+	return hasTensorPrefix(tensors, "model.vision_tokenizer.") && cfg.validate() == nil
+}
+
+func canValidateAudioTokenizer(tensors map[string]*mlx.Array, cfg AudioTokenizerConfig) bool {
+	return hasTensorPrefix(tensors, "model.audio_tokenizer.") && cfg.validate() == nil
+}
+
 func qkNormShape(batch, seqLen, heads, headDim int32) []int32 {
 	return []int32{batch, heads, seqLen, headDim}
 }
@@ -881,7 +889,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		return err
 	}
 	mediaConfig := m.mediaMetadataConfig()
-	if hasTensorPrefix(tensors, "model.vision_tokenizer.") {
+	if canValidateVisionTokenizer(tensors, m.VisionTokenizer) {
 		if err := apertusmetadata.ValidateVisionInventory(mediaConfig, mediaDescriptors); err != nil {
 			return err
 		}
@@ -890,7 +898,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			return fmt.Errorf("load Apertus 1.5 vision tokenizer: %w", err)
 		}
 	}
-	if hasTensorPrefix(tensors, "model.audio_tokenizer.") {
+	if canValidateAudioTokenizer(tensors, m.AudioTokenizer) {
 		if err := apertusmetadata.ValidateAudioInventory(mediaConfig, mediaDescriptors); err != nil {
 			return err
 		}
