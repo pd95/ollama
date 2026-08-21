@@ -191,7 +191,10 @@ func (l *apertureLSTM) forward(input *mlx.Array, materialize func(...*mlx.Array)
 			c = mlx.Add(mlx.Mul(f, c), mlx.Mul(i, g))
 			h = mlx.Mul(o, c.Tanh())
 			if materialize != nil {
-				materialize(h, c)
+				keep := make([]*mlx.Array, 0, len(outputs)+2)
+				keep = append(keep, outputs...)
+				keep = append(keep, h, c)
+				materialize(keep...)
 			}
 			outputs = append(outputs, h.ExpandDims(1))
 		}

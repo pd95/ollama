@@ -410,7 +410,9 @@ func (v *VisionTokenizer) encodeStaged(data *mlx.Array, width, height int, mater
 			bestID = mlx.Where(better, chunkID, bestID)
 		}
 		if materialize != nil {
-			materialize(bestScore, bestID)
+			// Every codebook chunk reuses the realized latent row. Keep it
+			// across runner-owned sweeps until the search is complete.
+			materialize(bestScore, bestID, flat)
 		}
 	}
 	return mlx.Reshape(bestID, 1, count), nil
