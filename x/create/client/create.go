@@ -169,8 +169,12 @@ func CreateModel(opts CreateOptions, p *progress.Progress) error {
 	var capabilities []string
 	var parserName, rendererName string
 	if isSafetensors {
-		parserName = getParserName(opts.ModelDir)
-		rendererName = getRendererName(opts.ModelDir)
+		apertusVariant := detectApertus1p1Variant(opts.ModelDir)
+		if err := validateApertus1p1Variant(apertusVariant); err != nil {
+			return err
+		}
+		parserName = getParserNameForApertusVariant(opts.ModelDir, apertusVariant)
+		rendererName = getRendererNameForApertusVariant(opts.ModelDir, apertusVariant)
 		capabilities = inferSafetensorsCapabilities(opts.ModelDir, resolveParserName(opts.Modelfile, parserName))
 	}
 
@@ -711,6 +715,29 @@ func readChatTemplate(modelDir string) string {
 	return ""
 }
 
+// readApertus1p1ChatTemplate distinguishes an absent template (the official
+// Mini base checkpoint) from a present but empty template (an incomplete or
+// malformed Instruct download).
+func readApertus1p1ChatTemplate(modelDir string) (string, bool) {
+	if data, err := os.ReadFile(filepath.Join(modelDir, "tokenizer_config.json")); err == nil {
+		var cfg map[string]json.RawMessage
+		if json.Unmarshal(data, &cfg) != nil {
+			return "", true
+		}
+		if raw, ok := cfg["chat_template"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			var template string
+			if json.Unmarshal(raw, &template) != nil {
+				return "", true
+			}
+			return template, true
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(modelDir, "chat_template.jinja")); err == nil {
+		return string(data), true
+	}
+	return "", false
+}
+
 // chatTemplateHasThinkingSupport reports whether a chat template emits thinking
 // blocks. Copied from server.chatTemplateHasThinkingSupport so this package need
 // not depend on the server package for an eight-line string check.
@@ -806,9 +833,102 @@ func nemotronRendererParserName(modelDir string) string {
 	return "nemotron-3-nano"
 }
 
+type apertus1p1Variant int
+
+const (
+	apertus1p1NotMini apertus1p1Variant = iota
+	apertus1p1Base
+	apertus1p1Instruct
+	apertus1p1Invalid
+)
+
+func validateApertus1p1Metadata(modelDir string) error {
+	return validateApertus1p1Variant(detectApertus1p1Variant(modelDir))
+}
+
+func validateApertus1p1Variant(variant apertus1p1Variant) error {
+	if variant == apertus1p1Invalid {
+		return fmt.Errorf("apertus v1.1 Mini metadata is incomplete: tokenizer.json and any chat template must contain <SPECIAL_61> through <SPECIAL_72>")
+	}
+	return nil
+}
+
+func detectApertus1p1Variant(modelDir string) apertus1p1Variant {
+	data, err := os.ReadFile(filepath.Join(modelDir, "config.json"))
+	if err != nil {
+		return apertus1p1NotMini
+	}
+	var cfg struct {
+		Architectures         []string `json:"architectures"`
+		ModelType             string   `json:"model_type"`
+		MaxPositionEmbeddings int32    `json:"max_position_embeddings"`
+		RopeTheta             float64  `json:"rope_theta"`
+		RopeScaling           struct {
+			RopeType string `json:"rope_type"`
+			Type     string `json:"type"`
+		} `json:"rope_scaling"`
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return apertus1p1NotMini
+	}
+	isApertus := strings.EqualFold(cfg.ModelType, "apertus")
+	for _, arch := range cfg.Architectures {
+		if strings.EqualFold(arch, "ApertusForCausalLM") {
+			isApertus = true
+			break
+		}
+	}
+	ropeType := cfg.RopeScaling.RopeType
+	if ropeType == "" {
+		ropeType = cfg.RopeScaling.Type
+	}
+	if ropeType == "" {
+		ropeType = "default"
+	}
+	if !isApertus || cfg.MaxPositionEmbeddings != 4096 || cfg.RopeTheta != 500000 ||
+		(!strings.EqualFold(ropeType, "default") && !strings.EqualFold(ropeType, "linear")) {
+		return apertus1p1NotMini
+	}
+
+	tokenizerData, err := os.ReadFile(filepath.Join(modelDir, "tokenizer.json"))
+	if err != nil || !hasApertus1p1SpecialTokenSignature(string(tokenizerData)) {
+		return apertus1p1Invalid
+	}
+	template, hasTemplate := readApertus1p1ChatTemplate(modelDir)
+	if hasTemplate {
+		if !hasApertus1p1SpecialTokenSignature(template) {
+			return apertus1p1Invalid
+		}
+		return apertus1p1Instruct
+	}
+	return apertus1p1Base
+}
+
+func hasApertus1p1SpecialTokenSignature(value string) bool {
+	for id := 61; id <= 72; id++ {
+		if !strings.Contains(value, fmt.Sprintf("<SPECIAL_%d>", id)) {
+			return false
+		}
+	}
+	return true
+}
+
 // getParserName returns the parser name for a model based on its architecture.
 // This reads the config.json from the model directory and determines the appropriate parser.
 func getParserName(modelDir string) string {
+	return getParserNameForApertusVariant(modelDir, detectApertus1p1Variant(modelDir))
+}
+
+func getParserNameForApertusVariant(modelDir string, variant apertus1p1Variant) string {
+	switch variant {
+	case apertus1p1Instruct:
+		return "apertus1p1"
+	case apertus1p1Base:
+		return ""
+	case apertus1p1Invalid:
+		return ""
+	}
+
 	configPath := filepath.Join(modelDir, "config.json")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -876,6 +996,19 @@ func parserNameForIdentifier(modelDir, s string) string {
 // getRendererName returns the renderer name for a model based on its architecture.
 // This reads the config.json from the model directory and determines the appropriate renderer.
 func getRendererName(modelDir string) string {
+	return getRendererNameForApertusVariant(modelDir, detectApertus1p1Variant(modelDir))
+}
+
+func getRendererNameForApertusVariant(modelDir string, variant apertus1p1Variant) string {
+	switch variant {
+	case apertus1p1Instruct:
+		return "apertus1p1"
+	case apertus1p1Base:
+		return ""
+	case apertus1p1Invalid:
+		return ""
+	}
+
 	configPath := filepath.Join(modelDir, "config.json")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
