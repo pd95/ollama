@@ -12,13 +12,15 @@ func newApertusImportTransform(json.RawMessage) (quantizePolicy, error) {
 }
 
 func (apertusImportTransform) quantizationType(name string, shape []int32, quantize string) string {
+	if isApertus1p5MediaTensor(name) {
+		return ""
+	}
 	// This policy is deliberately limited to Apertus NVFP4 imports. Unknown or
 	// mismatched requests remain at source precision rather than falling through
 	// to a different shared quantization recipe.
 	if normalizeQuantType(quantize) != "nvfp4" {
 		return ""
 	}
-
 	stackedExpert := isStackedExpertWeight(name)
 	if !stackedExpert && !ShouldQuantize(name, "") {
 		return ""
@@ -56,4 +58,21 @@ func isApertusNonlinearTensor(name string) bool {
 
 func isApertus1p5TextTensor(name string) bool {
 	return strings.HasPrefix(name, "model.language_model.") || name == "lm_head.weight"
+}
+
+func isApertus1p5VisionTensor(name string) bool {
+	return strings.HasPrefix(name, "model.vision_tokenizer.")
+}
+
+func isApertus1p5AudioTensor(name string) bool {
+	return strings.HasPrefix(name, "model.audio_tokenizer.encoder.") ||
+		name == "model.audio_tokenizer.quantizer.codebook.embed"
+}
+
+func isApertus1p5MediaTensor(name string) bool {
+	return isApertus1p5VisionTensor(name) || isApertus1p5AudioTensor(name)
+}
+
+func isApertus1p5RuntimeTensor(name string) bool {
+	return isApertus1p5TextTensor(name) || isApertus1p5MediaTensor(name)
 }
