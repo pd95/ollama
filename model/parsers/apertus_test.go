@@ -243,6 +243,35 @@ func TestApertusParserSplitThinkingTags(t *testing.T) {
 	}
 }
 
+func TestApertusParserStripsApertus1p5ContinuationFraming(t *testing.T) {
+	parser := &ApertusParser{}
+	parser.Init(nil, nil, nil)
+
+	content, thinking, calls, err := parser.Add(`<|tool_output_start|>{"temperature":22}<|tool_output_end|><|assistant_start|>It is mild.<|assistant_end|>`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != `{"temperature":22}It is mild.` || thinking != "" || len(calls) != 0 {
+		t.Fatalf("content=%q thinking=%q calls=%d, want cleaned continuation text", content, thinking, len(calls))
+	}
+}
+
+func TestApertusParserStripsAssistantEndAfterToolCall(t *testing.T) {
+	parser := &ApertusParser{}
+	parser.Init([]api.Tool{apertusParserTool("get_weather")}, nil, nil)
+
+	content, _, calls, err := parser.Add(`<|tools_prefix|>[{"get_weather": {"location":"Zurich"}}]<|tools_suffix|><|assistant_end|>`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" {
+		t.Fatalf("content = %q, want empty", content)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("len(calls) = %d, want 1", len(calls))
+	}
+}
+
 func apertusParserTool(name string) api.Tool {
 	return api.Tool{Type: "function", Function: api.ToolFunction{Name: name}}
 }
