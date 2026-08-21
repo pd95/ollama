@@ -270,6 +270,19 @@ func TestCreateModel_InvalidDir(t *testing.T) {
 	}
 }
 
+func TestCreateModelRejectsImportOnlyQuantizationTarget(t *testing.T) {
+	for _, quantize := range []string{"int2", "int3", "int5", "int6", "q6"} {
+		err := CreateModel(CreateOptions{
+			ModelName: "test-model",
+			ModelDir:  t.TempDir(),
+			Quantize:  quantize,
+		}, nil)
+		if err == nil || !strings.Contains(err.Error(), "unsupported --quantize") {
+			t.Errorf("--quantize %s error = %v, want unsupported", quantize, err)
+		}
+	}
+}
+
 func TestCreateModel_NotSafetensorsDir(t *testing.T) {
 	// Test that CreateModel returns error for directory without safetensors
 	dir := t.TempDir()
