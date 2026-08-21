@@ -1,0 +1,195 @@
+package apertus
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/ollama/ollama/x/mlxrunner/batch"
+	"github.com/ollama/ollama/x/mlxrunner/mlx"
+	"github.com/ollama/ollama/x/mlxrunner/model/base"
+)
+
+const (
+	apertusBOI          = "<|img_start|>"
+	apertusEOI          = "<|img_end|>"
+	apertusImageWrapper = "<|img_token_start|>"
+	apertusImageEOL     = "<|img_end_of_row|>"
+	apertusImageToken   = "<|image|>"
+	apertusBOA          = "<|audio_start|>"
+	apertusEOA          = "<|audio_end|>"
+	apertusAudioToken   = "<|audio|>"
+)
+
+type apertusMediaPayload struct {
+	kind       string
+	spans      [][2]int
+	expected   int
+	width      int
+	height     int
+	gridWidth  int
+	gridHeight int
+	samples    int
+}
+
+// PrepareMedia expands each media segment in stream order and retains one
+// cache-identity item per source segment.
+func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
+	if !isApertus1p5Config(*m.Config) {
+		return nil, errors.New("Apertus media is only supported by Apertus 1.5")
+	}
+	prepared := &base.PreparedRequest{}
+	for source, seg := range segments {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if seg.Data == nil {
+			prepared.Tokens = append(prepared.Tokens, seg.Tokens...)
+			continue
+		}
+
+		start := len(prepared.Tokens)
+		payload := apertusMediaPayload{kind: seg.Kind}
+		var mediaData []float32
+		var dims []int
+		var expansion string
+		switch seg.Kind {
+		case "image":
+			if m.Vision == nil {
+				return nil, errors.New("Apertus 1.5 image input requires complete vision tokenizer weights")
+			}
+			image, err := preprocessApertusImage(ctx, seg.Data)
+			if err != nil {
+				return nil, fmt.Errorf("Apertus 1.5 image: %w", err)
+			}
+			payload.expected = image.gridWidth * image.gridHeight
+			payload.width, payload.height = image.width, image.height
+			payload.gridWidth, payload.gridHeight = image.gridWidth, image.gridHeight
+			rows := make([]string, image.gridHeight)
+			row := strings.Repeat(apertusImageToken, image.gridWidth)
+			for i := range rows {
+				rows[i] = row
+			}
+			expansion = apertusBOI + fmt.Sprintf("%d*%d", image.gridHeight, image.gridWidth) + apertusImageWrapper + strings.Join(rows, apertusImageEOL) + apertusEOI
+			mediaData = image.pixels
+			dims = []int{1, image.height, image.width, 3}
+		case "audio":
+			if m.Audio == nil {
+				return nil, errors.New("Apertus 1.5 audio input requires complete audio tokenizer weights")
+			}
+			audio, err := preprocessApertusAudio(ctx, seg.Data, m.AudioTokenizer)
+			if err != nil {
+				return nil, fmt.Errorf("Apertus 1.5 audio: %w", err)
+			}
+			payload.expected = audio.codes
+			payload.samples = len(audio.samples)
+			expansion = apertusBOA + strings.Repeat(apertusAudioToken, payload.expected) + apertusEOA
+			mediaData = audio.samples
+			dims = []int{1, len(audio.samples), 1}
+		default:
+			return nil, fmt.Errorf("Apertus 1.5 does not support %s input", seg.Kind)
+		}
+
+		expansionTokens := m.tok.Encode(expansion, false)
+		placeholder := m.ImageTokenID
+		if seg.Kind == "audio" {
+			placeholder = m.AudioTokenID
+		}
+		payload.spans = placeholderSpans(expansionTokens, placeholder)
+		count := 0
+		for _, span := range payload.spans {
+			count += span[1] - span[0]
+		}
+		if count != payload.expected {
+			return nil, fmt.Errorf("Apertus 1.5 %s expansion has %d placeholder tokens, want %d", seg.Kind, count, payload.expected)
+		}
+		if seg.Kind == "image" {
+			if len(payload.spans) != payload.gridHeight {
+				return nil, fmt.Errorf("Apertus 1.5 image has %d placeholder rows, want %d", len(payload.spans), payload.gridHeight)
+			}
+			for _, span := range payload.spans {
+				if span[1]-span[0] != payload.gridWidth {
+					return nil, fmt.Errorf("Apertus 1.5 image row has %d placeholder tokens, want %d", span[1]-span[0], payload.gridWidth)
+				}
+			}
+		}
+		prepared.Tokens = append(prepared.Tokens, expansionTokens...)
+		prepared.Items = append(prepared.Items, base.PreparedItem{
+			Range:     [2]int{start, len(prepared.Tokens)},
+			Source:    source,
+			MediaData: mediaData,
+			Dims:      dims,
+			Opaque:    payload,
+			Causal:    true,
+		})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return prepared, nil
+}
+
+func placeholderSpans(tokens []int32, id int32) [][2]int {
+	var spans [][2]int
+	for i := 0; i < len(tokens); {
+		if tokens[i] != id {
+			i++
+			continue
+		}
+		start := i
+		for i < len(tokens) && tokens[i] == id {
+			i++
+		}
+		spans = append(spans, [2]int{start, i})
+	}
+	return spans
+}
+
+// EncodeMedia builds a lazy feature graph from the runner-owned media data.
+func (m *Model) EncodeMedia(item *base.PreparedItem, data *mlx.Array) *mlx.Array {
+	payload := item.Opaque.(apertusMediaPayload)
+	var codes *mlx.Array
+	var err error
+	var offset int32
+	switch payload.kind {
+	case "image":
+		codes, err = m.Vision.encode(data, payload.width, payload.height)
+		offset = m.ImageTokenOffset
+	case "audio":
+		codes, err = m.Audio.encode(data, payload.samples)
+		offset = m.AudioTokenOffset
+	default:
+		panic(fmt.Sprintf("invalid Apertus 1.5 media kind %q", payload.kind))
+	}
+	if err != nil {
+		panic(err)
+	}
+	vocabIDs := mlx.Add(codes, mlx.NewScalarArray(float32(offset)).AsType(mlx.DTypeInt32))
+	return mlx.Squeeze(m.EmbedTokens.Forward(vocabIDs), 0)
+}
+
+func (m *Model) scatterMedia(h *mlx.Array, b *batch.Batch) *mlx.Array {
+	for _, item := range b.Media {
+		if item.Features == nil {
+			continue
+		}
+		payload := item.Opaque.(apertusMediaPayload)
+		featureOffset := 0
+		for _, span := range payload.spans {
+			start, end := item.Pos+span[0], item.Pos+span[1]
+			basePos := int(b.SeqOffsets[item.Seq])
+			lo := max(start, basePos)
+			hi := min(end, basePos+int(b.SeqQueryLens[item.Seq]))
+			if hi > lo {
+				features := item.Features.Slice(mlx.Slice(featureOffset+lo-start, featureOffset+hi-start), mlx.Slice())
+				features = mlx.Reshape(features.AsType(h.DType()), 1, int32(hi-lo), m.HiddenSize)
+				h = h.SliceUpdate(features, mlx.Slice(item.Seq, item.Seq+1), mlx.Slice(lo-basePos, hi-basePos), mlx.Slice())
+			}
+			featureOffset += span[1] - span[0]
+		}
+	}
+	return h
+}
+
+var _ base.MediaModel = (*Model)(nil)
