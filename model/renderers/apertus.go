@@ -69,10 +69,11 @@ func renderApertus(messages []api.Message, tools []api.Tool, think *api.ThinkVal
 		return "", fmt.Errorf("Apertus 1.5 does not support tool calling with thinking enabled")
 	}
 	var sb strings.Builder
+	mediaOffset := 0
 	start := 0
 	if len(messages) > 0 && messages[0].Role == "system" {
 		sb.WriteString(apertusSystemStart)
-		sb.WriteString(renderApertusContent(messages[0]))
+		sb.WriteString(renderApertusContent(messages[0], v1p5, &mediaOffset))
 		sb.WriteString(apertusSystemEnd)
 		start = 1
 	} else {
@@ -124,11 +125,11 @@ func renderApertus(messages []api.Message, tools []api.Tool, think *api.ThinkVal
 			closeAssistant()
 			if message.Role == "user" {
 				sb.WriteString(apertusUserStart)
-				sb.WriteString(renderApertusContent(message))
+				sb.WriteString(renderApertusContent(message, v1p5, &mediaOffset))
 				sb.WriteString(apertusUserEnd)
 			} else {
 				sb.WriteString(apertusSystemStart)
-				sb.WriteString(renderApertusContent(message))
+				sb.WriteString(renderApertusContent(message, v1p5, &mediaOffset))
 				sb.WriteString(apertusSystemEnd)
 			}
 			pendingToolResults = 0
@@ -221,7 +222,12 @@ func validateApertusHistoricalCalls(calls []api.ToolCall, declared map[string]st
 	return nil
 }
 
-func renderApertusContent(message api.Message) string {
+func renderApertusContent(message api.Message, v1p5 bool, mediaOffset *int) string {
+	if v1p5 {
+		content, next := renderContentWithImageTags(message.Content, len(message.Images), *mediaOffset)
+		*mediaOffset = next
+		return content
+	}
 	return strings.Repeat(apertusImageToken, len(message.Images)) + message.Content
 }
 

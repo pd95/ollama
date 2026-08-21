@@ -41,6 +41,57 @@ func TestModelfileConfig(t *testing.T) {
 	}
 }
 
+func TestApertus1p5MediaCapabilitiesUseCanonicalInventory(t *testing.T) {
+	inv := create.Inventory{
+		RawConfig: json.RawMessage(`{
+			"architectures":["Apertus1p5ForConditionalGeneration"],
+			"model_type":"apertus_1_5",
+			"image_token_id":131079,
+			"audio_token_id":131085,
+			"image_token_offset":131272,
+			"audio_token_offset":262344,
+			"vision_tokenizer_config":{"codebook_size":131072,"embed_dim":256,"in_channels":3,"channel_multiplier":[1,1,2,2,4]},
+			"audio_tokenizer_config":{"codebook_size":4096,"codebook_dim":512,"audio_channels":1,"sampling_rate":24000,"upsampling_ratios":[6,5,5,4]}
+		}`),
+		Tensors: make(map[string]create.SourceTensor),
+	}
+	for i := range 244 {
+		name := fmt.Sprintf("model.vision_tokenizer.synthetic.%d.weight", i)
+		inv.Tensors[name] = create.SourceTensor{Name: name, Dtype: "F32", Shape: []int32{1}}
+	}
+	for i := range 62 {
+		name := fmt.Sprintf("model.audio_tokenizer.encoder.synthetic.%d.weight", i)
+		inv.Tensors[name] = create.SourceTensor{Name: name, Dtype: "F32", Shape: []int32{1}}
+	}
+	for _, name := range []string{
+		"model.vision_tokenizer.encoder.conv_in.weight",
+		"model.vision_tokenizer.quant_conv.weight",
+		"model.vision_tokenizer.quantize.embedding.weight",
+	} {
+		inv.Tensors[name] = create.SourceTensor{Name: name, Dtype: "F32", Shape: []int32{1}}
+	}
+	inv.Tensors["model.audio_tokenizer.quantizer.codebook.embed"] = create.SourceTensor{
+		Name: "model.audio_tokenizer.quantizer.codebook.embed", Dtype: "F32", Shape: []int32{4096, 512},
+	}
+
+	if got := apertus1p5MediaCapabilities(inv); !got.vision || !got.audio {
+		t.Fatalf("valid canonical inventory capabilities = %+v, want vision and audio", got)
+	}
+	delete(inv.Tensors, "model.vision_tokenizer.quant_conv.weight")
+	if got := apertus1p5MediaCapabilities(inv); got.vision || !got.audio {
+		t.Fatalf("incomplete vision inventory capabilities = %+v, want audio only", got)
+	}
+	inv.Tensors["model.vision_tokenizer.quant_conv.weight"] = create.SourceTensor{
+		Name: "model.vision_tokenizer.quant_conv.weight", Dtype: "F32", Shape: []int32{1},
+	}
+	codebook := inv.Tensors["model.audio_tokenizer.quantizer.codebook.embed"]
+	codebook.Shape = []int32{512, 4096}
+	inv.Tensors[codebook.Name] = codebook
+	if got := apertus1p5MediaCapabilities(inv); !got.vision || got.audio {
+		t.Fatalf("malformed audio inventory capabilities = %+v, want vision only", got)
+	}
+}
+
 func TestNemotronNanoOmniMetadataInference(t *testing.T) {
 	dir := t.TempDir()
 	config := `{
