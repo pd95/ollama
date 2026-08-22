@@ -2897,6 +2897,47 @@ func customApplyPatchTool() ResponsesTool {
 	}
 }
 
+func TestFromResponsesRequest_CustomApplyPatchPreservesInstructions(t *testing.T) {
+	description := "Use apply_patch to edit files. This is a FREEFORM tool; do not wrap the patch in JSON."
+	request := ResponsesRequest{Tools: []ResponsesTool{{
+		Type:        "custom",
+		Name:        "apply_patch",
+		Description: &description,
+		Format:      json.RawMessage(`{"type":"grammar","syntax":"lark","definition":"start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nupdate_hunk: \"*** Update File: \" filename LF\nend_patch: \"*** End Patch\" LF?\n"}`),
+	}}}
+
+	chat, err := FromResponsesRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Tools) != 1 {
+		t.Fatalf("tool count = %d, want 1: %#v", len(chat.Tools), chat.Tools)
+	}
+	if got, want := chat.Tools[0].Function.Description, description+"\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines."; got != want {
+		t.Fatalf("custom tool description = %q, want %q", got, want)
+	}
+
+	legacy, err := FromResponsesRequest(ResponsesRequest{Tools: []ResponsesTool{{Type: "custom", Name: "apply_patch"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := legacy.Tools[0].Function.Description, "Apply a patch to files. The input field must contain the complete raw patch text."; got != want {
+		t.Fatalf("legacy custom tool description = %q, want %q", got, want)
+	}
+
+	incompatible := "A different custom grammar"
+	chat, err = FromResponsesRequest(ResponsesRequest{Tools: []ResponsesTool{{
+		Type: "custom", Name: "apply_patch", Description: &incompatible,
+		Format: json.RawMessage(`{"type":"grammar","syntax":"lark","definition":"start: value\nvalue: /.+/"}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := chat.Tools[0].Function.Description; got != incompatible {
+		t.Fatalf("incompatible custom grammar changed description: %q", got)
+	}
+}
+
 func customApplyPatchCall(id, patch string) api.ToolCall {
 	return api.ToolCall{
 		ID: id,
@@ -2966,12 +3007,6 @@ func TestFromResponsesRequest_CustomApplyPatchCollisions(t *testing.T) {
 		items []ResponsesInputItem
 	}{
 		{name: "duplicate custom", tools: []ResponsesTool{customDeclaration, customDeclaration}},
-		{name: "function then custom declarations", tools: []ResponsesTool{functionDeclaration, customDeclaration}},
-		{name: "custom then function declarations", tools: []ResponsesTool{customDeclaration, functionDeclaration}},
-		{name: "function then custom histories", items: []ResponsesInputItem{functionHistory, customHistory}},
-		{name: "custom then function histories", items: []ResponsesInputItem{customHistory, functionHistory}},
-		{name: "function declaration custom history", tools: []ResponsesTool{functionDeclaration}, items: []ResponsesInputItem{customHistory}},
-		{name: "custom declaration function history", tools: []ResponsesTool{customDeclaration}, items: []ResponsesInputItem{functionHistory}},
 		{name: "nested custom", tools: []ResponsesTool{responsesNamespace("editor", customDeclaration)}},
 		{name: "unsupported declaration", tools: []ResponsesTool{{Type: "custom", Name: "shell"}}},
 		{name: "unsupported history", items: []ResponsesInputItem{ResponsesCustomToolCall{Type: "custom_tool_call", Name: "shell"}}},
@@ -2984,22 +3019,13 @@ func TestFromResponsesRequest_CustomApplyPatchCollisions(t *testing.T) {
 		})
 	}
 
-	left := ResponsesRequest{Tools: []ResponsesTool{functionDeclaration, customDeclaration}}
-	right := ResponsesRequest{Tools: []ResponsesTool{customDeclaration, functionDeclaration}}
-	_, leftErr := FromResponsesRequest(left)
-	_, rightErr := FromResponsesRequest(right)
-	if leftErr.Error() != rightErr.Error() {
-		t.Fatalf("declaration-order errors differ:\nleft: %v\nright: %v", leftErr, rightErr)
-	}
-	historyLeft := ResponsesRequest{Input: ResponsesInput{Items: []ResponsesInputItem{functionHistory, customHistory}}}
-	historyRight := ResponsesRequest{Input: ResponsesInput{Items: []ResponsesInputItem{customHistory, functionHistory}}}
-	_, leftErr = FromResponsesRequest(historyLeft)
-	_, rightErr = FromResponsesRequest(historyRight)
-	if leftErr.Error() != rightErr.Error() {
-		t.Fatalf("history-order errors differ:\nleft: %v\nright: %v", leftErr, rightErr)
-	}
-
 	accepted := []ResponsesRequest{
+		{Tools: []ResponsesTool{functionDeclaration, customDeclaration}},
+		{Tools: []ResponsesTool{customDeclaration, functionDeclaration}},
+		{Input: ResponsesInput{Items: []ResponsesInputItem{functionHistory, customHistory}}},
+		{Input: ResponsesInput{Items: []ResponsesInputItem{customHistory, functionHistory}}},
+		{Tools: []ResponsesTool{functionDeclaration}, Input: ResponsesInput{Items: []ResponsesInputItem{customHistory}}},
+		{Tools: []ResponsesTool{customDeclaration}, Input: ResponsesInput{Items: []ResponsesInputItem{functionHistory}}},
 		{Tools: []ResponsesTool{customDeclaration, responsesNamespace("editor", responsesFunction("apply_patch"))}},
 		{Tools: []ResponsesTool{responsesNamespace("editor", responsesFunction("apply_patch")), customDeclaration}},
 		{Tools: []ResponsesTool{customDeclaration}, Input: ResponsesInput{Items: []ResponsesInputItem{customHistory, ResponsesCustomToolCall{Type: "custom_tool_call", CallID: "ctc2", Name: "apply_patch"}}}},
@@ -3008,6 +3034,14 @@ func TestFromResponsesRequest_CustomApplyPatchCollisions(t *testing.T) {
 		if _, err := FromResponsesRequest(request); err != nil {
 			t.Fatalf("accepted request[%d] rejected: %v", i, err)
 		}
+	}
+
+	chat, err := FromResponsesRequest(ResponsesRequest{Tools: []ResponsesTool{functionDeclaration, customDeclaration}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Tools) != 1 || chat.Tools[0].Function.Name != "apply_patch" {
+		t.Fatalf("mixed apply_patch tool identities = %#v", chat.Tools)
 	}
 
 	unrelated := responsesFunction("get_weather")
@@ -3148,12 +3182,6 @@ func TestResponsesCustomApplyPatchOutputClassification(t *testing.T) {
 			t.Fatalf("malformed %q output = %#v, want exact arguments %q", test.call.ID, got, test.wantArguments)
 		}
 	}
-
-	invalidRequest := ResponsesRequest{Tools: []ResponsesTool{customApplyPatchTool(), responsesFunction("apply_patch")}}
-	fallback := ResponsesFunctionCallOutputItems(invalidRequest, "fc_fallback_", []api.ToolCall{customApplyPatchCall("call", patch)})
-	if len(fallback) != 1 || fallback[0].Type != "function_call" || fallback[0].Name != "apply_patch" || fallback[0].Arguments == "" {
-		t.Fatalf("invalid-resolver fallback = %#v", fallback)
-	}
 }
 
 func TestResponsesStreamConverter_CustomApplyPatchFallbacks(t *testing.T) {
@@ -3164,14 +3192,6 @@ func TestResponsesStreamConverter_CustomApplyPatchFallbacks(t *testing.T) {
 		call    api.ToolCall
 		want    string
 	}{
-		{
-			name: "invalid flat custom resolver",
-			request: ResponsesRequest{Tools: []ResponsesTool{
-				customApplyPatchTool(), responsesFunction("apply_patch"),
-			}},
-			call: customApplyPatchCall("call_invalid_resolver", validPatch),
-			want: `{"input":"*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"}`,
-		},
 		{
 			name:    "malformed patch",
 			request: ResponsesRequest{Tools: []ResponsesTool{customApplyPatchTool()}},

@@ -744,22 +744,24 @@ type responsesToolDeclaration struct {
 }
 
 type responsesToolResolver struct {
-	byExternal        map[responsesToolExternalName]responsesToolName
-	byInternal        map[string]responsesToolName
-	declarations      map[responsesToolDeclaration]struct{}
-	namespaceChildren map[responsesNamespaceChild]struct{}
-	nextNamespaceID   uint64
-	tools             []api.Tool
-	hasWebSearchTool  bool
+	byExternal          map[responsesToolExternalName]responsesToolName
+	byInternal          map[string]responsesToolName
+	declarations        map[responsesToolDeclaration]struct{}
+	namespaceChildren   map[responsesNamespaceChild]struct{}
+	nextNamespaceID     uint64
+	tools               []api.Tool
+	hasWebSearchTool    bool
+	hasCustomApplyPatch bool
 }
 
 func newResponsesToolResolver(r ResponsesRequest) (*responsesToolResolver, error) {
 	resolver := &responsesToolResolver{
-		byExternal:        make(map[responsesToolExternalName]responsesToolName),
-		byInternal:        make(map[string]responsesToolName),
-		declarations:      make(map[responsesToolDeclaration]struct{}),
-		namespaceChildren: make(map[responsesNamespaceChild]struct{}),
-		hasWebSearchTool:  HasWebSearchTool(r.Tools),
+		byExternal:          make(map[responsesToolExternalName]responsesToolName),
+		byInternal:          make(map[string]responsesToolName),
+		declarations:        make(map[responsesToolDeclaration]struct{}),
+		namespaceChildren:   make(map[responsesNamespaceChild]struct{}),
+		hasWebSearchTool:    HasWebSearchTool(r.Tools),
+		hasCustomApplyPatch: hasCustomApplyPatch(r),
 	}
 
 	for _, tool := range r.Tools {
@@ -787,6 +789,20 @@ func newResponsesToolResolver(r ResponsesRequest) (*responsesToolResolver, error
 	}
 
 	return resolver, nil
+}
+
+func hasCustomApplyPatch(r ResponsesRequest) bool {
+	for _, tool := range r.Tools {
+		if tool.Type == "custom" && tool.Name == "apply_patch" {
+			return true
+		}
+	}
+	for _, item := range r.Input.Items {
+		if call, ok := item.(ResponsesCustomToolCall); ok && call.Name == "apply_patch" {
+			return true
+		}
+	}
+	return false
 }
 
 func joinNamespaceToolName(namespace, name string) string {
@@ -868,6 +884,11 @@ func (r *responsesToolResolver) register(kind responsesToolKind, namespace, name
 	internal := name
 	if namespace != "" {
 		internal = joinNamespaceToolName(namespace, name)
+	} else if kind == responsesToolKindFunction && name == "apply_patch" && r.hasCustomApplyPatch {
+		// Keep the custom tool's model-visible name stable for Codex. A client
+		// may also declare a flat function with that name; disambiguate only the
+		// model-facing function identity and map it back on Responses output.
+		internal = "apply_patch__function"
 	}
 	candidate := responsesToolName{external: external, internal: internal, declarationNode: declarationNode, declared: declaration}
 
@@ -954,6 +975,12 @@ func convertTools(t ResponsesTool, namespaceNode *responsesNamespaceNode, resolv
 		if t.Type != "function" {
 			return []api.Tool{tool}, nil
 		}
+		if resolver.hasCustomApplyPatch && namespaceNode == nil && t.Name == "apply_patch" {
+			// Codex may redundantly send a flat function declaration alongside
+			// its authoritative custom apply_patch tool. Only expose the custom
+			// tool to the model; otherwise tool selection becomes ambiguous.
+			return nil, nil
+		}
 
 		// The built-in tool retains upstream ownership of its private model name.
 		if resolver.hasWebSearchTool && namespaceNode == nil && t.Name == "web_search" {
@@ -1002,7 +1029,7 @@ func convertTool(t ResponsesTool) (api.Tool, error) {
 			Type: "function",
 			Function: api.ToolFunction{
 				Name:        "apply_patch",
-				Description: "Apply a patch to files. The input field must contain the complete raw patch text.",
+				Description: applyPatchToolDescription(t),
 				Parameters:  applyPatchFunctionParameters(),
 			},
 		}, nil
@@ -1033,6 +1060,32 @@ func convertTool(t ResponsesTool) (api.Tool, error) {
 			Parameters:  params,
 		},
 	}, nil
+}
+
+func applyPatchToolDescription(t ResponsesTool) string {
+	description := "Apply a patch to files. The input field must contain the complete raw patch text."
+	if t.Description != nil && strings.TrimSpace(*t.Description) != "" {
+		description = *t.Description
+	}
+
+	if len(t.Format) == 0 || string(t.Format) == "null" {
+		return description
+	}
+
+	var format struct {
+		Type       string `json:"type"`
+		Syntax     string `json:"syntax"`
+		Definition string `json:"definition"`
+	}
+	if err := json.Unmarshal(t.Format, &format); err == nil &&
+		format.Type == "grammar" && format.Syntax == "lark" &&
+		strings.Contains(format.Definition, "*** Begin Patch") &&
+		strings.Contains(format.Definition, "*** Update File:") &&
+		strings.Contains(format.Definition, "*** End Patch") {
+		return description + "\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines."
+	}
+
+	return description
 }
 
 func applyPatchFunctionParameters() api.ToolFunctionParameters {
