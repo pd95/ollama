@@ -1698,10 +1698,12 @@ func getStringFromMap(m map[string]any, key, defaultValue string) string {
 	return defaultValue
 }
 
-// isImageAttachment checks if a filename is an image file
-func isImageAttachment(filename string) bool {
+// isMediaAttachment checks whether a filename is supported model media.
+// api.Message.Images is the legacy transport field for both image and audio data.
+func isMediaAttachment(filename string) bool {
 	ext := strings.ToLower(filename)
-	return strings.HasSuffix(ext, ".png") || strings.HasSuffix(ext, ".jpg") || strings.HasSuffix(ext, ".jpeg") || strings.HasSuffix(ext, ".webp")
+	return strings.HasSuffix(ext, ".png") || strings.HasSuffix(ext, ".jpg") || strings.HasSuffix(ext, ".jpeg") || strings.HasSuffix(ext, ".webp") ||
+		strings.HasSuffix(ext, ".wav") || strings.HasSuffix(ext, ".mp3")
 }
 
 // ptr is a convenience function for &literal
@@ -1726,11 +1728,11 @@ func (s *Server) buildChatRequest(chat *store.Chat, model string, think any, ava
 		sb := strings.Builder{}
 		sb.WriteString(m.Content)
 
-		var images []api.ImageData
+		var media []api.ImageData
 		if m.Role == "user" && len(m.Attachments) > 0 {
 			for _, a := range m.Attachments {
-				if isImageAttachment(a.Filename) {
-					images = append(images, api.ImageData(a.Data))
+				if isMediaAttachment(a.Filename) {
+					media = append(media, api.ImageData(a.Data))
 				} else {
 					content := convertBytesToText(a.Data, a.Filename)
 					sb.WriteString(fmt.Sprintf("\n--- File: %s ---\n%s\n--- End of %s ---",
@@ -1740,7 +1742,7 @@ func (s *Server) buildChatRequest(chat *store.Chat, model string, think any, ava
 		}
 
 		apiMsg.Content = sb.String()
-		apiMsg.Images = images
+		apiMsg.Images = media
 
 		switch m.Role {
 		case "assistant":
