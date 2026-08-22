@@ -21,6 +21,37 @@ import (
 	"github.com/ollama/ollama/cmd/launch"
 )
 
+func TestBuildChatRequestPreservesAudioAttachmentsAsMedia(t *testing.T) {
+	server := &Server{}
+	chat := &store.Chat{Messages: []store.Message{{
+		Role:    "user",
+		Content: "Transcribe the audio.",
+		Attachments: []store.File{
+			{Filename: "speech.mp3", Data: []byte{1, 2, 3}},
+			{Filename: "speech.wav", Data: []byte{4, 5, 6}},
+			{Filename: "notes.txt", Data: []byte("keep this text attachment")},
+		},
+	}}}
+
+	req, err := server.buildChatRequest(chat, "apertus-1.5-mlx", false, nil)
+	if err != nil {
+		t.Fatalf("buildChatRequest: %v", err)
+	}
+	if len(req.Messages) != 1 {
+		t.Fatalf("message count = %d, want 1", len(req.Messages))
+	}
+	message := req.Messages[0]
+	if len(message.Images) != 2 || !bytes.Equal(message.Images[0], []byte{1, 2, 3}) || !bytes.Equal(message.Images[1], []byte{4, 5, 6}) {
+		t.Fatalf("media attachments = %v, want mp3 and wav bytes in order", message.Images)
+	}
+	if strings.Contains(message.Content, "Binary file of type .mp3") || strings.Contains(message.Content, "Binary file of type .wav") {
+		t.Fatalf("audio was converted to text content: %q", message.Content)
+	}
+	if !strings.Contains(message.Content, "keep this text attachment") {
+		t.Fatalf("text attachment missing from content: %q", message.Content)
+	}
+}
+
 func TestHandlePostApiSettings(t *testing.T) {
 	tests := []struct {
 		name      string
