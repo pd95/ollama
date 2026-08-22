@@ -2917,6 +2917,28 @@ func TestFromResponsesRequest_CustomApplyPatchPreservesInstructions(t *testing.T
 		t.Fatalf("custom tool description = %q, want %q", got, want)
 	}
 
+	withExample := description + "\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines.\n\nExample complete input:\n*** Begin Patch\n*** Update File: path/to/file\n@@\n-old text\n+new text\n*** End Patch"
+	for _, model := range []string{"gemma4:12b-mlx", "qwen3:8b"} {
+		request.Model = model
+		chat, err = FromResponsesRequest(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := chat.Tools[0].Function.Description; got != withExample {
+			t.Fatalf("%s custom tool description = %q, want %q", model, got, withExample)
+		}
+	}
+	for _, model := range []string{"gptoss-mlx:20b-mxfp4", "gpt-oss:20b"} {
+		request.Model = model
+		chat, err = FromResponsesRequest(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := chat.Tools[0].Function.Description; got != description+"\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines." {
+			t.Fatalf("%s custom tool description = %q, want no example", model, got)
+		}
+	}
+
 	legacy, err := FromResponsesRequest(ResponsesRequest{Tools: []ResponsesTool{{Type: "custom", Name: "apply_patch"}}})
 	if err != nil {
 		t.Fatal(err)
