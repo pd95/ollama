@@ -752,6 +752,7 @@ type responsesToolResolver struct {
 	tools               []api.Tool
 	hasWebSearchTool    bool
 	hasCustomApplyPatch bool
+	applyPatchExample   bool
 }
 
 func newResponsesToolResolver(r ResponsesRequest) (*responsesToolResolver, error) {
@@ -762,6 +763,7 @@ func newResponsesToolResolver(r ResponsesRequest) (*responsesToolResolver, error
 		namespaceChildren:   make(map[responsesNamespaceChild]struct{}),
 		hasWebSearchTool:    HasWebSearchTool(r.Tools),
 		hasCustomApplyPatch: hasCustomApplyPatch(r),
+		applyPatchExample:   applyPatchExampleForModel(r.Model),
 	}
 
 	for _, tool := range r.Tools {
@@ -803,6 +805,11 @@ func hasCustomApplyPatch(r ResponsesRequest) bool {
 		}
 	}
 	return false
+}
+
+func applyPatchExampleForModel(model string) bool {
+	model = strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(strings.TrimSpace(model)))
+	return model != "" && !strings.HasPrefix(model, "gptoss")
 }
 
 func joinNamespaceToolName(namespace, name string) string {
@@ -955,7 +962,7 @@ func convertTools(t ResponsesTool, namespaceNode *responsesNamespaceNode, resolv
 		if t.Name != "apply_patch" {
 			return nil, fmt.Errorf("unsupported responses custom tool %q", t.Name)
 		}
-		tool, err := convertTool(t)
+		tool, err := convertTool(t, resolver.applyPatchExample)
 		if err != nil {
 			return nil, err
 		}
@@ -968,7 +975,7 @@ func convertTools(t ResponsesTool, namespaceNode *responsesNamespaceNode, resolv
 	}
 
 	if t.Type != "namespace" {
-		tool, err := convertTool(t)
+		tool, err := convertTool(t, resolver.applyPatchExample)
 		if err != nil {
 			return nil, err
 		}
@@ -1023,13 +1030,13 @@ func convertTools(t ResponsesTool, namespaceNode *responsesNamespaceNode, resolv
 	return tools, nil
 }
 
-func convertTool(t ResponsesTool) (api.Tool, error) {
+func convertTool(t ResponsesTool, applyPatchExample bool) (api.Tool, error) {
 	if t.Type == "custom" && t.Name == "apply_patch" {
 		return api.Tool{
 			Type: "function",
 			Function: api.ToolFunction{
 				Name:        "apply_patch",
-				Description: applyPatchToolDescription(t),
+				Description: applyPatchToolDescription(t, applyPatchExample),
 				Parameters:  applyPatchFunctionParameters(),
 			},
 		}, nil
@@ -1062,7 +1069,7 @@ func convertTool(t ResponsesTool) (api.Tool, error) {
 	}, nil
 }
 
-func applyPatchToolDescription(t ResponsesTool) string {
+func applyPatchToolDescription(t ResponsesTool, includeExample bool) string {
 	description := "Apply a patch to files. The input field must contain the complete raw patch text."
 	if t.Description != nil && strings.TrimSpace(*t.Description) != "" {
 		description = *t.Description
@@ -1082,7 +1089,11 @@ func applyPatchToolDescription(t ResponsesTool) string {
 		strings.Contains(format.Definition, "*** Begin Patch") &&
 		strings.Contains(format.Definition, "*** Update File:") &&
 		strings.Contains(format.Definition, "*** End Patch") {
-		return description + "\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines."
+		instructions := "\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines."
+		if includeExample {
+			instructions += "\n\nExample complete input:\n*** Begin Patch\n*** Update File: path/to/file\n@@\n-old text\n+new text\n*** End Patch"
+		}
+		return description + instructions
 	}
 
 	return description
@@ -1092,7 +1103,7 @@ func applyPatchFunctionParameters() api.ToolFunctionParameters {
 	properties := api.NewToolPropertiesMap()
 	properties.Set("input", api.ToolProperty{
 		Type:        api.PropertyType{"string"},
-		Description: "Raw patch text beginning with *** Begin Patch and ending with *** End Patch.",
+		Description: "Complete raw patch text. Use the custom patch format and example in this tool's description.",
 	})
 	return api.ToolFunctionParameters{
 		Type:       "object",
