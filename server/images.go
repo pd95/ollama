@@ -441,11 +441,18 @@ func (m *Model) parserCapabilities(capabilities []model.Capability) []model.Capa
 	if builtinParser.HasToolSupport() {
 		capabilities = appendCapability(capabilities, model.CapabilityTools)
 	}
-	if builtinParser.HasThinkingSupport() {
+	if builtinParser.HasThinkingSupport() && !isApertus1p0SafetensorsConfig(m.Config) {
 		capabilities = appendCapability(capabilities, model.CapabilityThinking)
 	}
 
 	return capabilities
+}
+
+func isApertus1p0SafetensorsConfig(cfg model.ConfigV2) bool {
+	return cfg.ModelFormat == "safetensors" &&
+		cfg.ModelFamily == "apertus" &&
+		cfg.Parser == "apertus" &&
+		cfg.Renderer == "apertus"
 }
 
 func (m *Model) modelFamilyCapabilities(capabilities []model.Capability) []model.Capability {
