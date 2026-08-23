@@ -582,11 +582,15 @@ func validateMatrix(tensors map[string]*mlx.Array, path string, out, input int, 
 		if bits != 8 {
 			return fmt.Errorf("tensor %q has invalid mxfp8 bit width %d", name, bits)
 		}
-		if err := validateShape(name, weight, []int{out, input}); err != nil {
+		// MLX stores four 8-bit MXFP8 values in each U32 word.
+		if input%4 != 0 {
+			return fmt.Errorf("tensor %q has mxfp8 input width %d, which is not divisible by 4", name, input)
+		}
+		if err := validateShape(name, weight, []int{out, input / 4}); err != nil {
 			return err
 		}
-		if weight.DType() != mlx.DTypeUint8 {
-			return fmt.Errorf("tensor %q dtype %s, want U8 mxfp8", name, weight.DType())
+		if weight.DType() != mlx.DTypeUint32 {
+			return fmt.Errorf("tensor %q dtype %s, want U32 packed mxfp8", name, weight.DType())
 		}
 		if err := validateShape(name+"_scale", scales, scaleShape); err != nil {
 			return err
