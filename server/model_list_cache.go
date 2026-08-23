@@ -382,7 +382,7 @@ func buildModelListSummary(name model.Name, mf *manifest.Manifest) (modelListSum
 		hasTags := openingTag != "" && closingTag != ""
 		isGptoss := slices.Contains([]string{"gptoss", "gpt-oss"}, cfg.ModelFamily)
 		if !slices.Contains(summary.Capabilities, model.CapabilityThinking) &&
-			(hasTags || isGptoss || (builtinParser != nil && builtinParser.HasThinkingSupport())) {
+			(hasTags || isGptoss || (builtinParser != nil && builtinParser.HasThinkingSupport() && !isApertus1p0SafetensorsConfig(cfg))) {
 			summary.Capabilities = appendModelListCapability(summary.Capabilities, model.CapabilityThinking)
 		}
 	}
