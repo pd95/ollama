@@ -103,6 +103,20 @@ func TestClassifyGPTOSSNativeMXFP4TrustBoundary(t *testing.T) {
 		}
 	}
 
+	// Native GPT-OSS checkpoints have shipped with quantization metadata in
+	// more than one shape. The packed expert layout, rather than an optional
+	// metadata spelling, is the import contract.
+	withoutMetadata := gptossInventory(valid)
+	withoutMetadata.Config.Quantization = sourceQuantization{}
+	withoutMetadata.RawConfig = []byte(`{"architectures":["GptOssForCausalLM"]}`)
+	class, err := Classify(withoutMetadata, "mxfp4")
+	if err != nil {
+		t.Fatalf("Classify(native layout without quantization metadata) error = %v", err)
+	}
+	if class.Kind != SourcePrequantized || class.Quantize != "mxfp4" {
+		t.Fatalf("Classify(native layout without quantization metadata) = %+v", class)
+	}
+
 	for _, tt := range []struct {
 		name           string
 		mutate         func(*Inventory)
@@ -116,9 +130,6 @@ func TestClassifyGPTOSSNativeMXFP4TrustBoundary(t *testing.T) {
 		{"wrong blocks dtype", func(inv *Inventory) {
 			inv.Tensors["model.layers.0.mlp.experts.down_proj_blocks"] = SourceTensor{Name: "model.layers.0.mlp.experts.down_proj_blocks", Dtype: "BF16", Shape: []int32{2, 16, 1, 16}}
 		}, false},
-		{"wrong quant metadata", func(inv *Inventory) { inv.Config.Quantization.Mode = "affine" }, false},
-		{"wrong bits", func(inv *Inventory) { inv.Config.Quantization.Bits = 8 }, true},
-		{"wrong group", func(inv *Inventory) { inv.Config.Quantization.GroupSize = 64 }, true},
 		{"architecture only", func(inv *Inventory) {
 			clear(inv.Tensors)
 			inv.Tensors["model.layers.0.weight"] = SourceTensor{Name: "model.layers.0.weight", Dtype: "U32", Shape: []int32{16, 4}}
