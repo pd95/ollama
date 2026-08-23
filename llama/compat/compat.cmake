@@ -34,7 +34,8 @@ set(_compat_dir ${CMAKE_CURRENT_LIST_DIR})
 set(OLLAMA_LLAMA_CPP_COMPAT_PATCH_COMMAND
     ${CMAKE_COMMAND}
         -DPATCH_DIR=${_compat_dir}
-        -P ${_compat_dir}/apply-patch.cmake
+        -DPATCH_LABEL=llama/compat
+        -P ${CMAKE_SOURCE_DIR}/cmake/apply-git-patches.cmake
     CACHE INTERNAL "llama.cpp compat patch command for FetchContent")
 
 # Where the compat source files live, so the main CMakeLists can wire them
