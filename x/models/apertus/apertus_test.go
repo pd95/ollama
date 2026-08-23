@@ -460,7 +460,7 @@ func quantizedMatrix(name, quantType string, out, input int) (map[string]*mlx.Ar
 		tensors[name] = mlx.Zeros(mlx.DTypeUint32, out, input/8)
 		tensors[name+"_scale"] = mlx.Zeros(mlx.DTypeUint8, out, input/groupSize)
 	case "mxfp8":
-		tensors[name] = mlx.Zeros(mlx.DTypeUint8, out, input)
+		tensors[name] = mlx.Zeros(mlx.DTypeUint32, out, input/4)
 		tensors[name+"_scale"] = mlx.Zeros(mlx.DTypeUint8, out, input/groupSize)
 	}
 	return tensors, &Config{QuantType: quantType, QuantGroupSize: groupSize, QuantBits: bits, QuantMode: mode}
