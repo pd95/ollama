@@ -166,20 +166,6 @@ func gptossNativeMXFP4Evidence(inv Inventory) bool {
 	if inv.Config.Architecture() != "GptOssForCausalLM" {
 		return false
 	}
-	var selected sourceQuantization
-	for _, candidate := range inv.Config.quantizationConfigs() {
-		if candidate.Bits != 0 {
-			selected = candidate
-			break
-		}
-	}
-	mode := selected.Mode
-	if mode == "" {
-		mode = selected.QuantMethod
-	}
-	if selected.Bits != 4 || selected.GroupSize != 32 || !strings.EqualFold(mode, "mxfp4") {
-		return false
-	}
 
 	found := false
 	for _, name := range sortedTensorNames(inv) {
