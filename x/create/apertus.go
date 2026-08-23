@@ -43,10 +43,14 @@ func (apertusImportTransform) quantizationType(name string, shape []int32, quant
 	if isApertus1p5MediaTensor(name) {
 		return ""
 	}
-	// This policy is deliberately limited to Apertus NVFP4 imports. Unknown or
-	// mismatched requests remain at source precision rather than falling through
-	// to a different shared quantization recipe.
-	if normalizeQuantType(quantize) != "nvfp4" {
+	base := normalizeQuantType(quantize)
+	if base == "mxfp8" {
+		// Apertus has a bespoke NVFP4 policy, but its MXFP8 imports use the
+		// established general policy. Returning source precision here turns a
+		// 70B MXFP8 request into a BF16-sized artifact that cannot be admitted.
+		return GetTensorQuantization(name, shape, quantize)
+	}
+	if base != "nvfp4" {
 		return ""
 	}
 	stackedExpert := isStackedExpertWeight(name)
