@@ -49,6 +49,26 @@ func TestApertusQuantizationPolicy(t *testing.T) {
 	}
 }
 
+func TestApertusMXFP8UsesGeneralQuantizationPolicy(t *testing.T) {
+	transform := apertusImportTransform{}
+	for _, tt := range []struct {
+		name, tensor, want string
+		shape              []int32
+	}{
+		{"70B lm head", "lm_head.weight", "mxfp8", []int32{131072, 8192}},
+		{"70B attention projection", "model.layers.0.self_attn.q_proj.weight", "mxfp8", []int32{8192, 8192}},
+		{"70B MLP projection", "model.layers.0.mlp.down_proj.weight", "mxfp8", []int32{8192, 28672}},
+		{"embedding remains source precision", "model.embed_tokens.weight", "", []int32{131072, 8192}},
+		{"routing remains source precision", "model.layers.0.mlp.gate.weight", "", []int32{8192, 8192}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := transform.quantizationType(tt.tensor, tt.shape, "mxfp8"); got != tt.want {
+				t.Fatalf("quantizationType(%q, %v, mxfp8) = %q, want %q", tt.tensor, tt.shape, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApertusElementCount(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
