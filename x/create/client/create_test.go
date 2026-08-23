@@ -730,6 +730,49 @@ func TestNewManifestWriter_PopulatesGPTOSSFamily(t *testing.T) {
 	}
 }
 
+func TestNewManifestWriter_PopulatesApertusFamily(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", t.TempDir())
+
+	modelDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(modelDir, "config.json"), []byte(`{
+		"architectures": ["ApertusForCausalLM"],
+		"model_type": "apertus"
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CreateOptions{ModelName: "apertus-family-test", ModelDir: modelDir}
+	writer := newManifestWriter(opts, []string{"completion", "tools", "thinking"}, "apertus", "apertus")
+	if err := writer(opts.ModelName, create.LayerInfo{}, nil, create.Classification{Kind: create.SourceFloat, Quantize: "nvfp4"}); err != nil {
+		t.Fatalf("newManifestWriter() error = %v", err)
+	}
+
+	name := model.ParseName(opts.ModelName)
+	mf, err := manifest.ParseNamedManifest(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := manifest.BlobsPath(mf.Config.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg model.ConfigV2
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ModelFamily != "apertus" {
+		t.Fatalf("ModelFamily = %q, want apertus", cfg.ModelFamily)
+	}
+	if !slices.Equal(cfg.ModelFamilies, []string{"apertus"}) {
+		t.Fatalf("ModelFamilies = %v, want [apertus]", cfg.ModelFamilies)
+	}
+}
+
 func TestNewManifestWriter_PopulatesDraftMetadata(t *testing.T) {
 	t.Setenv("OLLAMA_MODELS", t.TempDir())
 
