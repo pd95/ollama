@@ -469,6 +469,9 @@ func inferModelFamily(modelDir string) string {
 		if isGPTOSSFamily(identifier) {
 			return "gptoss"
 		}
+		if isApertusFamily(identifier) || isApertus1p5Family(identifier) {
+			return "apertus"
+		}
 	}
 
 	return ""
