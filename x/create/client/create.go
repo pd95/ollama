@@ -407,6 +407,12 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 			}
 			configData.Draft = draft
 		}
+		if configData.ModelFamily == "" {
+			configData.ModelFamily = inferModelFamily(opts.ModelDir)
+		}
+		if configData.ModelFamily != "" && len(configData.ModelFamilies) == 0 {
+			configData.ModelFamilies = []string{configData.ModelFamily}
+		}
 		configJSON, err := json.Marshal(configData)
 		if err != nil {
 			return fmt.Errorf("failed to marshal config: %w", err)
@@ -440,6 +446,32 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 
 		return manifest.WriteManifest(name, configLayer, manifestLayers)
 	}
+}
+
+func inferModelFamily(modelDir string) string {
+	data, err := os.ReadFile(filepath.Join(modelDir, "config.json"))
+	if err != nil {
+		return ""
+	}
+
+	var cfg struct {
+		Architectures []string `json:"architectures"`
+		ModelType     string   `json:"model_type"`
+		LLMConfig     struct {
+			ModelType string `json:"model_type"`
+		} `json:"llm_config"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+
+	for _, identifier := range append(cfg.Architectures, cfg.ModelType, cfg.LLMConfig.ModelType) {
+		if isGPTOSSFamily(identifier) {
+			return "gptoss"
+		}
+	}
+
+	return ""
 }
 
 func resolveParserName(mf *ModelfileConfig, inferred string) string {
