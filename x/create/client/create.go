@@ -352,7 +352,7 @@ func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 		capabilities = append(capabilities, "tools")
 	}
 
-	if caps.thinking || (builtinParser != nil && builtinParser.HasThinkingSupport()) {
+	if caps.thinking || (builtinParser != nil && builtinParser.HasThinkingSupport() && !isApertus1p0ModelDir(modelDir, parserName)) {
 		capabilities = append(capabilities, "thinking")
 	}
 
@@ -566,6 +566,55 @@ func detectCapabilities(modelDir string) modelCapabilities {
 		thinking: chatTemplateHasThinkingSupport(readChatTemplate(modelDir)) ||
 			alwaysSupportsThinking(cfg.Architectures, cfg.ModelType),
 	}
+}
+
+func isApertus1p5ModelConfig(architectures []string, modelType string) bool {
+	for _, value := range append(architectures, modelType) {
+		value = strings.ToLower(value)
+		if strings.Contains(value, "apertus1p5") || strings.Contains(value, "apertus-1.5") || strings.Contains(value, "apertus_1_5") {
+			return true
+		}
+	}
+	return false
+}
+
+// isApertus1p0ModelDir distinguishes the original text-only Apertus release
+// from later Apertus variants that share its parser but support deliberation.
+// Parser capability alone is insufficient because the legacy grammar can
+// parse inner spans for history compatibility even though the 1.0 checkpoint
+// itself was not trained to produce thinking output.
+func isApertus1p0ModelDir(modelDir, parserName string) bool {
+	if parserName != "apertus" || detectApertus1p1Variant(modelDir) != apertus1p1NotMini {
+		return false
+	}
+
+	data, err := os.ReadFile(filepath.Join(modelDir, "config.json"))
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		Architectures []string `json:"architectures"`
+		ModelType     string   `json:"model_type"`
+		LLMConfig     struct {
+			ModelType string `json:"model_type"`
+		} `json:"llm_config"`
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return false
+	}
+
+	identifiers := append(slices.Clone(cfg.Architectures), cfg.ModelType, cfg.LLMConfig.ModelType)
+	for _, identifier := range identifiers {
+		if isApertus1p5Family(identifier) {
+			return false
+		}
+	}
+	for _, identifier := range identifiers {
+		if isApertusFamily(identifier) {
+			return true
+		}
+	}
+	return false
 }
 
 // readChatTemplate returns the model's chat template, preferring the

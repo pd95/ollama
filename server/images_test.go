@@ -362,6 +362,32 @@ func TestModelCapabilities(t *testing.T) {
 		expectedCaps []model.Capability
 	}{
 		{
+			name: "Apertus 1.0 parser does not imply thinking",
+			model: Model{
+				Config: model.ConfigV2{
+					ModelFormat: "safetensors",
+					ModelFamily: "apertus",
+					Parser:      "apertus",
+					Renderer:    "apertus",
+				},
+				Template: chatTemplate,
+			},
+			expectedCaps: []model.Capability{model.CapabilityTools},
+		},
+		{
+			name: "later Apertus renderer retains parser thinking",
+			model: Model{
+				Config: model.ConfigV2{
+					ModelFormat: "safetensors",
+					ModelFamily: "apertus",
+					Parser:      "apertus",
+					Renderer:    "apertus1p5",
+				},
+				Template: chatTemplate,
+			},
+			expectedCaps: []model.Capability{model.CapabilityTools, model.CapabilityThinking},
+		},
+		{
 			name: "model with image generation capability via config",
 			model: Model{
 				Config: model.ConfigV2{
