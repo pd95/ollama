@@ -60,7 +60,11 @@ type moeTestInputs struct {
 }
 
 func newMoETestInputs(expertIDs []uint32) moeTestInputs {
-	const experts, rows, colVecs, topK = 2, 4, 32, 1
+	return newMoETestInputsWithRows(expertIDs, 4)
+}
+
+func newMoETestInputsWithRows(expertIDs []uint32, rows int) moeTestInputs {
+	const experts, colVecs, topK = 2, 32, 1
 	batch := len(expertIDs) / topK
 	return moeTestInputs{
 		input:     Zeros(DTypeFloat32, batch, colVecs*32),
@@ -72,6 +76,23 @@ func newMoETestInputs(expertIDs []uint32) moeTestInputs {
 		upScales:  Zeros(DTypeUint8, experts, rows, colVecs),
 		upBias:    Zeros(DTypeBFloat16, experts, rows),
 	}
+}
+
+// validateMoEExpertIDsForTest deliberately synchronizes and reads selector
+// values on the CPU. Keep it test-only so it cannot be reintroduced into the
+// lazy decode graph.
+func validateMoEExpertIDsForTest(expertIDs *Array, experts int) bool {
+	if expertIDs == nil || expertIDs.DType() != DTypeUint32 || expertIDs.Size() == 0 || !validMoEPositiveInt(experts) {
+		return false
+	}
+	ids := expertIDs.AsType(DTypeInt32)
+	Eval(ids)
+	for _, expertID := range ids.Ints() {
+		if expertID < 0 || int64(expertID) >= int64(experts) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestValidateMoEInputs(t *testing.T) {
@@ -86,21 +107,17 @@ func TestValidateMoEInputs(t *testing.T) {
 		if _, ok := validateMoEDownInputs(downInput, valid.weight, valid.scales, valid.bias, valid.expertIDs, 4, 32, 1); !ok {
 			t.Fatal("valid down inputs rejected")
 		}
+		if validateMoEExpertIDsForTest(newMoETestInputs([]uint32{2}).expertIDs, 2) {
+			t.Fatal("expert equal to count accepted by explicit value validation")
+		}
+		if validateMoEExpertIDsForTest(newMoETestInputs([]uint32{math.MaxUint32}).expertIDs, 2) {
+			t.Fatal("maximum expert accepted by explicit value validation")
+		}
 
 		for _, tt := range []struct {
 			name string
 			fn   func() bool
 		}{
-			{name: "expert equal to count", fn: func() bool {
-				bad := newMoETestInputs([]uint32{2})
-				_, ok := validateMoEGateUpInputs(bad.input, bad.weight, bad.scales, bad.bias, bad.upWeight, bad.upScales, bad.upBias, bad.expertIDs, 4, 32, 1)
-				return ok
-			}},
-			{name: "maximum expert", fn: func() bool {
-				bad := newMoETestInputs([]uint32{math.MaxUint32})
-				_, ok := validateMoEDownInputs(downInput, bad.weight, bad.scales, bad.bias, bad.expertIDs, 4, 32, 1)
-				return ok
-			}},
 			{name: "wrong selector dtype", fn: func() bool {
 				ids := FromValues([]int32{0}, 1, 1)
 				_, ok := validateMoEDownInputs(downInput, valid.weight, valid.scales, valid.bias, ids, 4, 32, 1)
@@ -172,41 +189,43 @@ func TestValidateMoEInputs(t *testing.T) {
 	})
 }
 
-func TestMoEFusedZeroReferenceAndValidationIsolation(t *testing.T) {
+func TestMoEFusedBoundsGuardMixedSelectors(t *testing.T) {
 	skipIfNoMLX(t)
 	withMLXThread(t, func() {
 		if !MetalIsAvailable() {
 			t.Skip("Metal is not available")
 		}
 
-		bad := newMoETestInputs([]uint32{2})
-		if out, ok := MoEFusedGateUpSwiGLU(bad.input, bad.weight, bad.scales, bad.bias, bad.upWeight, bad.upScales, bad.upBias, bad.expertIDs, 4, 32, 1, -7, 7); ok || out != nil {
-			t.Fatal("out-of-range gate/up selector accepted")
+		const rows = 16
+		selectors := []uint32{0, 1, 2, math.MaxUint32}
+		inputs := newMoETestInputsWithRows(selectors, rows)
+		biasValues := make([]float32, 2*rows)
+		for i := range biasValues {
+			biasValues[i] = 1
 		}
+		inputs.bias = FromValues(biasValues, 2, rows).AsType(DTypeBFloat16)
+		inputs.upBias = FromValues(biasValues, 2, rows).AsType(DTypeBFloat16)
 
-		valid := newMoETestInputs([]uint32{1})
-		gateOut, ok := MoEFusedGateUpSwiGLU(valid.input, valid.weight, valid.scales, valid.bias, valid.upWeight, valid.upScales, valid.upBias, valid.expertIDs, 4, 32, 1, -7, 7)
-		if !ok {
-			t.Fatal("valid gate/up call failed after malformed call")
+		gateOut, ok := MoEFusedGateUpSwiGLU(inputs.input, inputs.weight, inputs.scales, inputs.bias, inputs.upWeight, inputs.upScales, inputs.upBias, inputs.expertIDs, rows, 32, 1, -7, 7)
+		if !ok || gateOut == nil {
+			t.Fatal("mixed-selector gate/up call failed")
 		}
 		Eval(gateOut)
-		assertMoEZeroReference(t, gateOut, []int{1, 1, 4})
+		assertMoEGuardedRows(t, gateOut, rows, []bool{true, true, false, false})
 
-		downInput := Zeros(DTypeFloat32, 1, 1, 32*32)
-		if out, ok := MoEFusedDown(downInput, valid.weight, valid.scales, valid.bias, bad.expertIDs, 4, 32, 1); ok || out != nil {
-			t.Fatal("out-of-range down selector accepted")
-		}
-		downOut, ok := MoEFusedDown(downInput, valid.weight, valid.scales, valid.bias, valid.expertIDs, 4, 32, 1)
-		if !ok {
-			t.Fatal("valid down call failed after malformed call")
+		downInput := Zeros(DTypeFloat32, len(selectors), 1, 32*32)
+		downOut, ok := MoEFusedDown(downInput, inputs.weight, inputs.scales, inputs.bias, inputs.expertIDs, rows, 32, 1)
+		if !ok || downOut == nil {
+			t.Fatal("mixed-selector down call failed")
 		}
 		Eval(downOut)
-		assertMoEZeroReference(t, downOut, []int{1, 1, 4})
+		assertMoEGuardedRows(t, downOut, rows, []bool{true, true, false, false})
 	})
 }
 
-func assertMoEZeroReference(t *testing.T, got *Array, wantShape []int) {
+func assertMoEGuardedRows(t *testing.T, got *Array, rows int, wantNonzero []bool) {
 	t.Helper()
+	wantShape := []int{len(wantNonzero), 1, rows}
 	if dims := got.Dims(); len(dims) != len(wantShape) {
 		t.Fatalf("shape = %v, want %v", dims, wantShape)
 	} else {
@@ -216,9 +235,17 @@ func assertMoEZeroReference(t *testing.T, got *Array, wantShape []int) {
 			}
 		}
 	}
-	for i, value := range got.Floats() {
-		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) || math.Abs(float64(value)) > 1e-6 {
-			t.Fatalf("output[%d] = %v, want zero reference within 1e-6", i, value)
+	for batch, nonzero := range wantNonzero {
+		for row, value := range got.Floats()[batch*rows : (batch+1)*rows] {
+			if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+				t.Fatalf("output[%d,%d] = %v, want finite", batch, row, value)
+			}
+			if nonzero && math.Abs(float64(value)) <= 1e-4 {
+				t.Fatalf("output[%d,%d] = %v, want nonzero valid-selector output", batch, row, value)
+			}
+			if !nonzero && math.Abs(float64(value)) > 1e-6 {
+				t.Fatalf("output[%d,%d] = %v, want zero guarded output", batch, row, value)
+			}
 		}
 	}
 }
