@@ -178,12 +178,8 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load tokenizer config: %w", err)
 	}
-	tokData, err = tokenizerDataForConfig(cfg, tokData)
-	if err != nil {
-		return nil, fmt.Errorf("prepare Apertus tokenizer: %w", err)
-	}
 
-	tokConfig := &tokenizer.TokenizerConfig{ConfigJSON: configData}
+	tokConfig := tokenizerConfigForModel(cfg, configData)
 	if data, err := root.Manifest.ReadConfig("generation_config.json"); err == nil {
 		tokConfig.GenerationConfigJSON = data
 	}
@@ -205,44 +201,12 @@ func isApertus1p5Config(cfg Config) bool {
 	return cfg.Architecture == apertus1p5Architecture
 }
 
-func tokenizerDataForConfig(cfg Config, data []byte) ([]byte, error) {
-	if !isApertus1p5Config(cfg) {
-		return data, nil
+func tokenizerConfigForModel(cfg Config, configData []byte) *tokenizer.TokenizerConfig {
+	tokConfig := &tokenizer.TokenizerConfig{ConfigJSON: configData}
+	if isApertus1p5Config(cfg) {
+		tokConfig.AddedTokenIDLimit = cfg.VocabSize
 	}
-	return pruneApertus1p5TokenizerAddedTokens(data, cfg.VocabSize)
-}
-
-func pruneApertus1p5TokenizerAddedTokens(data []byte, inputVocabSize int32) ([]byte, error) {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	addedRaw, ok := raw["added_tokens"]
-	if !ok {
-		return data, nil
-	}
-	var added []json.RawMessage
-	if err := json.Unmarshal(addedRaw, &added); err != nil {
-		return nil, err
-	}
-	filtered := make([]json.RawMessage, 0, len(added))
-	for _, tokenRaw := range added {
-		var token struct {
-			ID int32 `json:"id"`
-		}
-		if err := json.Unmarshal(tokenRaw, &token); err != nil {
-			return nil, err
-		}
-		if token.ID >= 0 && token.ID < inputVocabSize {
-			filtered = append(filtered, tokenRaw)
-		}
-	}
-	filteredRaw, err := json.Marshal(filtered)
-	if err != nil {
-		return nil, err
-	}
-	raw["added_tokens"] = filteredRaw
-	return json.Marshal(raw)
+	return tokConfig
 }
 
 func parseConfig(configData []byte) (Config, error) {
