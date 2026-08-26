@@ -81,6 +81,111 @@ func TestLoadFromBytesRejectsInvalidTokenizerIDs(t *testing.T) {
 	}
 }
 
+func TestLoadFromBytesWithConfigFiltersAddedTokenIDs(t *testing.T) {
+	data := tokenizerJSON(`{"base":0}`, `[
+		{"id":-1,"content":"negative"},
+		{"id":1,"content":"kept"},
+		{"id":2,"content":"at-limit"},
+		{"id":3,"content":"above-limit"}
+	]`)
+	tok, err := LoadFromBytesWithConfig(data, &TokenizerConfig{AddedTokenIDLimit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := tok.VocabSize(); got != 2 {
+		t.Fatalf("VocabSize() = %d, want 2", got)
+	}
+	if got := tok.Decode([]int32{0, 1}); got != "basekept" {
+		t.Fatalf("Decode([0 1]) = %q, want %q", got, "basekept")
+	}
+	if id, ok := tok.GetSpecialToken("kept"); !ok || id != 1 {
+		t.Fatalf("GetSpecialToken(kept) = (%d, %v), want (1, true)", id, ok)
+	}
+	for _, content := range []string{"negative", "at-limit", "above-limit"} {
+		if id, ok := tok.GetSpecialToken(content); ok {
+			t.Fatalf("GetSpecialToken(%q) = (%d, true), want absent", content, id)
+		}
+	}
+}
+
+func TestLoadFromBytesWithConfigAddedTokenIDLimitDisabled(t *testing.T) {
+	data := tokenizerJSON(`{}`, `[{"id":-1,"content":"negative"}]`)
+	for name, config := range map[string]*TokenizerConfig{
+		"nil config": nil,
+		"zero limit": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadFromBytesWithConfig(data, config)
+			if err == nil || !strings.Contains(err.Error(), "invalid added token") {
+				t.Fatalf("error = %v, want invalid added token", err)
+			}
+		})
+	}
+}
+
+func TestLoadFromBytesWithConfigRejectsNegativeAddedTokenIDLimit(t *testing.T) {
+	_, err := LoadFromBytesWithConfig(tokenizerJSON(`{}`, `[]`), &TokenizerConfig{AddedTokenIDLimit: -1})
+	if err == nil || err.Error() != "added token ID limit must not be negative: -1" {
+		t.Fatalf("error = %v, want negative limit error", err)
+	}
+}
+
+func TestLoadFromBytesWithConfigValidatesOnlyRetainedAddedTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "duplicate IDs are filtered",
+			data: tokenizerJSON(`{"base":0}`, `[
+				{"id":2,"content":"first"},
+				{"id":2,"content":"second"},
+				{"id":1,"content":"kept"}
+			]`),
+		},
+		{
+			name: "duplicate content is filtered",
+			data: tokenizerJSON(`{"base":0}`, `[
+				{"id":2,"content":"duplicate"},
+				{"id":3,"content":"duplicate"},
+				{"id":1,"content":"kept"}
+			]`),
+		},
+		{
+			name: "base collision is filtered",
+			data: tokenizerJSON(`{"base":0}`, `[
+				{"id":2,"content":"base"},
+				{"id":1,"content":"kept"}
+			]`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tok, err := LoadFromBytesWithConfig(tt.data, &TokenizerConfig{AddedTokenIDLimit: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := tok.VocabSize(); got != 2 {
+				t.Fatalf("VocabSize() = %d, want 2", got)
+			}
+		})
+	}
+}
+
+func TestLoadFromBytesWithConfigRejectsRetainedAddedTokenCollision(t *testing.T) {
+	data := tokenizerJSON(`{"base":0}`, `[
+		{"id":1,"content":"first"},
+		{"id":1,"content":"second"},
+		{"id":2,"content":"filtered"}
+	]`)
+	_, err := LoadFromBytesWithConfig(data, &TokenizerConfig{AddedTokenIDLimit: 2})
+	if err == nil || err.Error() != "duplicate added token ID 1" {
+		t.Fatalf("error = %v, want retained-token collision", err)
+	}
+}
+
 func TestLoadFromBytesSupportsBoundedSparseIDs(t *testing.T) {
 	tests := []struct {
 		name        string
