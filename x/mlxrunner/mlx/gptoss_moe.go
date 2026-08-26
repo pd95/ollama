@@ -63,23 +63,6 @@ func validateMoEIndexSpans(experts, batch, numRows, numColVecs, topK int, down b
 	return ok
 }
 
-func validateMoEExpertIDs(expertIds *Array, experts int) bool {
-	if expertIds == nil || expertIds.DType() != DTypeUint32 || expertIds.Size() == 0 || !validMoEPositiveInt(experts) {
-		return false
-	}
-	Eval(expertIds)
-	data := C.mlx_array_data_uint32(expertIds.ctx)
-	if data == nil {
-		return false
-	}
-	for _, expertID := range unsafe.Slice(data, expertIds.Size()) {
-		if uint64(expertID) >= uint64(experts) {
-			return false
-		}
-	}
-	return true
-}
-
 func validMoEArray(a *Array, dtype DType, dims ...int) bool {
 	if a == nil || a.DType() != dtype || len(dims) != a.NumDims() {
 		return false
@@ -139,8 +122,7 @@ func validateMoEGateUpInputs(
 		!validMoEArray(expertIds, DTypeUint32, batch, topK) {
 		return 0, false
 	}
-	if !validateMoEIndexSpans(experts, batch, numRows, numColVecs, topK, false) ||
-		!validateMoEExpertIDs(expertIds, experts) {
+	if !validateMoEIndexSpans(experts, batch, numRows, numColVecs, topK, false) {
 		return 0, false
 	}
 	return batch, true
@@ -163,8 +145,7 @@ func validateMoEDownInputs(input, weight, scales, bias, expertIds *Array, numRow
 		!validMoEArray(expertIds, DTypeUint32, batch, topK) {
 		return 0, false
 	}
-	if !validateMoEIndexSpans(experts, batch, numRows, numColVecs, topK, true) ||
-		!validateMoEExpertIDs(expertIds, experts) {
+	if !validateMoEIndexSpans(experts, batch, numRows, numColVecs, topK, true) {
 		return 0, false
 	}
 	return batch, true
@@ -187,7 +168,7 @@ var (
 // odd compute up). After a barrier, simdgroup pairs apply SwiGLU to produce
 // nSg/2 output channels per threadgroup.
 //
-// Template args: NumColVecs (int), NumRows (int), NumTopK (int)
+// Template args: NumExperts (int), NumColVecs (int), NumRows (int), NumTopK (int)
 // Inputs (named): input(float), gate_w(uint), gate_s(bfloat), gate_b(bfloat),
 //
 //	up_w(uint), up_s(bfloat), up_b(bfloat),
@@ -205,6 +186,15 @@ threadgroup float tg_buf[32];
 
 uint outCh = gid.x * (nSg / 2) + (sgIdx / 2);
 uint expertId = expert_ids[gid.y * NumTopK + gid.z];
+uint tid = sgIdx * sgSize + sgTid;
+
+if (expertId >= (uint)NumExperts) {
+    if (tid * 2 < nSg) {
+        uint ch = gid.x * (nSg / 2) + tid;
+        output[gid.y * (uint)NumTopK * (uint)NumRows + gid.z * (uint)NumRows + ch] = 0.0f;
+    }
+    return;
+}
 
 uint rowStride = (uint)NumColVecs;
 uint expertStride = (uint)NumRows * rowStride;
@@ -298,7 +288,6 @@ if (simd_is_first()) {
 }
 threadgroup_barrier(mem_flags::mem_threadgroup);
 
-uint tid = sgIdx * sgSize + sgTid;
 if (tid * 2 < nSg) {
     const float2 gu = reinterpret_cast<const threadgroup float2*>(tg_buf)[tid];
     const float smin = swiglu_params[0];
@@ -355,7 +344,10 @@ func initMoESwiGLUKernel() {
 
 // MoEFusedGateUpSwiGLU runs a fused gate+up+SwiGLU kernel for MXFP4 MoE experts.
 // It returns (result, true) on success, or (nil, false) if the kernel is unavailable
-// or the inputs are incompatible.
+// or the static input metadata is incompatible. Dynamic expert IDs are expected
+// to come from the model's bounded routing operation. An out-of-range ID is
+// guarded on the device and produces zeros for that selector's output rows;
+// the call still returns (result, true).
 //
 // Parameters:
 //   - input: float32 [batch, hiddenSize] — flattened input hidden states
@@ -410,6 +402,7 @@ func MoEFusedGateUpSwiGLU(
 		name  string
 		value int
 	}{
+		{"NumExperts", gateWeight.Dim(0)},
 		{"NumColVecs", numColVecs},
 		{"NumRows", numRows},
 		{"NumTopK", topK},
@@ -489,7 +482,7 @@ func MoEFusedGateUpSwiGLU(
 // The input is per-expert: input[gid.y * NumTopK * NumInCols + gid.z * NumInCols + ...]
 // where NumInCols is the intermediate_size (in float32 elements).
 //
-// Template args: NumColVecs (int), NumRows (int), NumTopK (int)
+// Template args: NumExperts (int), NumColVecs (int), NumRows (int), NumTopK (int)
 // Inputs (named): input(float), down_w(uint), down_s(bfloat), down_b(bfloat),
 //
 //	expert_ids(uint)
@@ -504,6 +497,13 @@ constexpr uint sgSize = 32;
 
 uint outCh = gid.x * nSg + sgIdx;
 uint expertId = expert_ids[gid.y * NumTopK + gid.z];
+
+if (expertId >= (uint)NumExperts) {
+    if (simd_is_first()) {
+        output[gid.y * (uint)NumTopK * (uint)NumRows + gid.z * (uint)NumRows + outCh] = 0.0f;
+    }
+    return;
+}
 
 uint rowStride = (uint)NumColVecs;
 uint expertStride = (uint)NumRows * rowStride;
@@ -621,7 +621,10 @@ func initMoEDownKernel() {
 
 // MoEFusedDown runs a fused down-projection kernel for MXFP4 MoE experts.
 // It returns (result, true) on success, or (nil, false) if the kernel is unavailable
-// or the inputs are incompatible.
+// or the static input metadata is incompatible. Dynamic expert IDs are expected
+// to come from the model's bounded routing operation. An out-of-range ID is
+// guarded on the device and produces zeros for that selector's output rows;
+// the call still returns (result, true).
 //
 // Parameters:
 //   - input: float32 [batch, topK, intermediateSize] — per-expert SwiGLU output
@@ -670,6 +673,7 @@ func MoEFusedDown(
 		name  string
 		value int
 	}{
+		{"NumExperts", downWeight.Dim(0)},
 		{"NumColVecs", numColVecs},
 		{"NumRows", numRows},
 		{"NumTopK", topK},
