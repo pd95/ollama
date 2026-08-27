@@ -5,6 +5,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	st "github.com/ollama/ollama/x/safetensors"
@@ -153,6 +154,46 @@ func TestClassifyGPTOSSNativeMXFP4TrustBoundary(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGPTOSSNativeMXFP4MissingBiasIsRejected(t *testing.T) {
+	inv := gptossInventory(map[string]SourceTensor{
+		"model.layers.0.mlp.experts.down_proj_blocks": {Name: "model.layers.0.mlp.experts.down_proj_blocks", Dtype: "U8", Shape: []int32{2, 16, 1, 16}},
+		"model.layers.0.mlp.experts.down_proj_scales": {Name: "model.layers.0.mlp.experts.down_proj_scales", Dtype: "U8", Shape: []int32{2, 16, 1}},
+	})
+
+	for _, requested := range []string{"", "mxfp4"} {
+		if _, err := Classify(inv, requested); err == nil || !strings.Contains(err.Error(), "down_proj_bias") {
+			t.Fatalf("Classify(requested=%q) error = %v, want required bias error", requested, err)
+		}
+	}
+
+	policy, err := newTensorImportTransform(inv)
+	if err != nil {
+		t.Fatalf("newTensorImportTransform() error = %v", err)
+	}
+	if _, err := Plan(inv, Classification{Kind: SourcePrequantized, Quantize: "mxfp4"}, policy); err == nil || !strings.Contains(err.Error(), "down_proj_bias") {
+		t.Fatalf("Plan() error = %v, want required bias error", err)
+	}
+}
+
+func TestCreateGPTOSSNativeMXFP4MissingBiasIsRejectedWithoutRequest(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigJSON(t, dir, `{
+		"architectures":["GptOssForCausalLM"],
+		"quantization":{"quant_method":"mxfp4","mode":"mxfp4","bits":4,"group_size":32}
+	}`)
+	createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_blocks", "U8", []int32{1, 2, 1, 16}, make([]byte, 32)),
+		st.NewTensorDataFromBytes("model.layers.0.mlp.experts.down_proj_scales", "U8", []int32{1, 2, 1}, make([]byte, 2)),
+	})
+
+	err := Create("gptoss", dir, "", newCaptureStore(), func(string, LayerInfo, []LayerInfo, Classification) error {
+		return nil
+	}, func(string) {})
+	if err == nil || !strings.Contains(err.Error(), "down_proj_bias") {
+		t.Fatalf("Create() error = %v, want required bias error", err)
 	}
 }
 
