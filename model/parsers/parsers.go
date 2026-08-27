@@ -1,6 +1,7 @@
 package parsers
 
 import (
+	"encoding/json"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -21,6 +22,12 @@ type Parser interface {
 	PreservedTokens() []string
 	HasToolSupport() bool
 	HasThinkingSupport() bool
+}
+
+// RequestFormatParser is implemented by parsers whose output interpretation
+// depends on the structured response format for the current request.
+type RequestFormatParser interface {
+	InitWithFormat(tools []api.Tool, lastMessage *api.Message, thinkValue *api.ThinkValue, format json.RawMessage) []api.Tool
 }
 
 type ParserConstructor func() Parser

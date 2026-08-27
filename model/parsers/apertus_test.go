@@ -1,11 +1,131 @@
 package parsers
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/ollama/ollama/api"
 )
+
+func TestApertusParserFormatFallback(t *testing.T) {
+	format := json.RawMessage(`{"type":"object"}`)
+	for _, response := range []string{
+		`{"answer":"forty-two"}`,
+		`[{"answer":"forty-two"}]`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			p := &ApertusParser{}
+			p.InitWithFormat([]api.Tool{apertusParserTool("known")}, nil, nil, format)
+			content, _, calls, err := p.Add(response, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if content != response || len(calls) != 0 {
+				t.Fatalf("content=%q calls=%#v", content, calls)
+			}
+		})
+	}
+}
+
+func TestApertusParserFormatDoesNotRelaxToolCallErrors(t *testing.T) {
+	format := json.RawMessage(`{"type":"object"}`)
+
+	t.Run("normal unknown bare call", func(t *testing.T) {
+		p := &ApertusParser{}
+		p.Init([]api.Tool{apertusParserTool("known")}, nil, nil)
+		if _, _, _, err := p.Add(`{"unknown":{}}`, true); err == nil {
+			t.Fatal("unknown bare call accepted without a response format")
+		}
+	})
+
+	t.Run("tagged unknown call", func(t *testing.T) {
+		p := &ApertusParser{}
+		p.InitWithFormat([]api.Tool{apertusParserTool("known")}, nil, nil, format)
+		if _, _, _, err := p.Add(apertusToolOpenTag+`{"unknown":{}}`+apertusToolCloseTag, true); err == nil {
+			t.Fatal("tagged unknown call accepted with a response format")
+		}
+	})
+
+	t.Run("declared bare call", func(t *testing.T) {
+		p := &ApertusParser{}
+		p.InitWithFormat([]api.Tool{apertusParserTool("known")}, nil, nil, format)
+		content, _, calls, err := p.Add(`{"known":{"value":1}}`, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if content != "" || len(calls) != 1 || calls[0].Function.Index != 0 || calls[0].Function.Name != "known" {
+			t.Fatalf("content=%q calls=%#v", content, calls)
+		}
+	})
+
+	t.Run("format is request scoped", func(t *testing.T) {
+		p := &ApertusParser{}
+		p.InitWithFormat([]api.Tool{apertusParserTool("known")}, nil, nil, format)
+		p.Init([]api.Tool{apertusParserTool("known")}, nil, nil)
+		if _, _, _, err := p.Add(`{"unknown":{}}`, true); err == nil {
+			t.Fatal("format from a previous request remained active")
+		}
+	})
+
+	for _, inactive := range []json.RawMessage{nil, json.RawMessage(`null`), json.RawMessage(`""`), json.RawMessage(`{"type":`)} {
+		t.Run("inactive format "+string(inactive), func(t *testing.T) {
+			p := &ApertusParser{}
+			p.InitWithFormat([]api.Tool{apertusParserTool("known")}, nil, nil, inactive)
+			if _, _, _, err := p.Add(`{"unknown":{}}`, true); err == nil {
+				t.Fatalf("unknown bare call accepted with inactive format %q", inactive)
+			}
+		})
+	}
+}
+
+func TestApertusParserFormatFallbackCallIndexIsTransactional(t *testing.T) {
+	p := &ApertusParser{}
+	p.InitWithFormat([]api.Tool{apertusParserTool("known")}, nil, nil, json.RawMessage(`{"type":"array"}`))
+
+	mixed := `[{"known":{}},{"unknown":{}}]`
+	content, _, calls, err := p.Add(mixed, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != mixed || len(calls) != 0 {
+		t.Fatalf("content=%q calls=%#v", content, calls)
+	}
+
+	content, _, calls, err = p.Add(`{"known":{}}`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || len(calls) != 1 || calls[0].Function.Index != 0 {
+		t.Fatalf("content=%q calls=%#v", content, calls)
+	}
+}
+
+func TestApertusParserFormatFallbackStreamingBoundaries(t *testing.T) {
+	format := json.RawMessage(`{"type":"object"}`)
+	for _, response := range []string{
+		`{"answer":"forty-two"}`,
+		`[{"answer":"forty-two"}]`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			for split := range len(response) + 1 {
+				p := &ApertusParser{}
+				p.InitWithFormat([]api.Tool{apertusParserTool("known")}, nil, nil, format)
+				content1, _, calls1, err := p.Add(response[:split], false)
+				if err != nil {
+					t.Fatalf("split %d first chunk: %v", split, err)
+				}
+				content2, _, calls2, err := p.Add(response[split:], true)
+				if err != nil {
+					t.Fatalf("split %d final chunk: %v", split, err)
+				}
+				if content1+content2 != response || len(calls1)+len(calls2) != 0 {
+					t.Fatalf("split %d: content=%q calls=%d", split, content1+content2, len(calls1)+len(calls2))
+				}
+			}
+		})
+	}
+}
 
 func TestApertusParserGrammarAndStreamingBoundaries(t *testing.T) {
 	input := `prefix <|tools_prefix|>[{"get_weather":{"city":"Bern"}}]<|tools_suffix|><|assistant_end|>`
