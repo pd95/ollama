@@ -235,6 +235,49 @@ func TestPlanGPTOSSNativeExperts(t *testing.T) {
 	}
 }
 
+func TestPlanGPTOSSNativeExpertsCanonicalizesStaleQuantizationMetadata(t *testing.T) {
+	for _, requested := range []string{"", "mxfp4"} {
+		t.Run("requested="+requested, func(t *testing.T) {
+			inv := gptossInventory(map[string]SourceTensor{
+				"model.layers.0.mlp.experts.down_proj_blocks": {Name: "model.layers.0.mlp.experts.down_proj_blocks", Dtype: "U8", Shape: []int32{2, 16, 1, 16}},
+				"model.layers.0.mlp.experts.down_proj_scales": {Name: "model.layers.0.mlp.experts.down_proj_scales", Dtype: "U8", Shape: []int32{2, 16, 1}},
+				"model.layers.0.mlp.experts.down_proj_bias":   {Name: "model.layers.0.mlp.experts.down_proj_bias", Dtype: "BF16", Shape: []int32{2, 16}},
+			})
+			inv.Config.Quantization = sourceQuantization{QuantMethod: "affine", Mode: "affine", Bits: 4, GroupSize: 64}
+			inv.RawConfig = []byte(`{
+				"architectures":["GptOssForCausalLM"],
+				"quantization":{
+					"quant_method":"affine","mode":"affine","bits":4,"group_size":64,
+					"model.layers.0.mlp.experts.down_proj":{"mode":"affine","bits":4,"group_size":64}
+				}
+			}`)
+
+			class, err := Classify(inv, requested)
+			if err != nil {
+				t.Fatalf("Classify() error = %v", err)
+			}
+			if class.Kind != SourcePrequantized || class.Quantize != "mxfp4" {
+				t.Fatalf("Classify() = %+v, want native mxfp4", class)
+			}
+			policy, err := newTensorImportTransform(inv)
+			if err != nil {
+				t.Fatalf("newTensorImportTransform() error = %v", err)
+			}
+			specs, err := Plan(inv, class, policy)
+			if err != nil {
+				t.Fatalf("Plan() error = %v", err)
+			}
+			experts, ok := specByName(specs, "blocks.0.experts")
+			if !ok {
+				t.Fatalf("missing expert blob; got %v", specNames(specs))
+			}
+			if got := experts.Metadata; got["quant_type"] != "mxfp4" || got["group_size"] != "32" {
+				t.Fatalf("expert metadata = %v, want runtime-loadable mxfp4/group32", got)
+			}
+		})
+	}
+}
+
 func TestPlanGPTOSSNativeDenseQuantizedBlob(t *testing.T) {
 	inv := gptossInventory(map[string]SourceTensor{
 		"model.layers.0.self_attn.q_proj.weight": {Name: "model.layers.0.self_attn.q_proj.weight", Dtype: "U32", Shape: []int32{64, 8}},

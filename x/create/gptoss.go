@@ -304,7 +304,11 @@ func (t *gptossImportTransform) planNativeExpertTensor(inv Inventory, blocksName
 	blocks := inv.Tensors[blocksName]
 	scales := inv.Tensors[scalesName]
 	sources := []string{blocksName, scalesName}
-	metadata := t.prequantizedMetadata(strings.TrimSuffix(blocksName, "_blocks")+".weight", t.defaultMetadata())
+	// The native _blocks/_scales layout is the authoritative direct-expert
+	// contract. Classification accepts it even when config.json is missing or
+	// stale, so never let global or per-tensor affine metadata relabel the
+	// preserved MXFP4 bytes into a runtime-incompatible format.
+	metadata := map[string]string{"quant_type": "mxfp4", "group_size": "32"}
 	if strings.Contains(outName, ".gate_up_proj.weight") {
 		gateWeight := strings.Replace(outName, "gate_up_proj", "gate_proj", 1)
 		upWeight := strings.Replace(outName, "gate_up_proj", "up_proj", 1)
