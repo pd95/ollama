@@ -2998,6 +2998,40 @@ func TestFromResponsesRequest_CustomApplyPatchPreservesInstructions(t *testing.T
 	}
 }
 
+func TestFromResponsesRequest_CustomApplyPatchSchemaGuidance(t *testing.T) {
+	request := ResponsesRequest{Tools: []ResponsesTool{{
+		Type:   "custom",
+		Name:   "apply_patch",
+		Format: json.RawMessage(`{"type":"grammar","syntax":"lark","definition":"start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nupdate_hunk: \"*** Update File: \" filename LF\nend_patch: \"*** End Patch\" LF?\n"}`),
+	}}}
+	for _, tt := range []struct {
+		name        string
+		model       string
+		wantExample bool
+	}{
+		{name: "non GPT OSS includes example", model: "gemma4:12b-mlx", wantExample: true},
+		{name: "GPT OSS omits example", model: "gpt-oss:20b", wantExample: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request.Model = tt.model
+			chat, err := FromResponsesRequest(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(chat.Tools[0].Function.Description, "Example complete input:"); got != tt.wantExample {
+				t.Fatalf("example presence = %v, want %v: %q", got, tt.wantExample, chat.Tools[0].Function.Description)
+			}
+			input, ok := chat.Tools[0].Function.Parameters.Properties.Get("input")
+			if !ok {
+				t.Fatal("missing apply_patch input schema")
+			}
+			if got, want := input.Description, "Complete raw patch text. Use the custom patch format guidance in this tool's description."; got != want {
+				t.Fatalf("input schema description = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func customApplyPatchCall(id, patch string) api.ToolCall {
 	return api.ToolCall{
 		ID: id,

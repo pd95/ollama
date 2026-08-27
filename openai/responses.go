@@ -1103,7 +1103,7 @@ func applyPatchFunctionParameters() api.ToolFunctionParameters {
 	properties := api.NewToolPropertiesMap()
 	properties.Set("input", api.ToolProperty{
 		Type:        api.PropertyType{"string"},
-		Description: "Complete raw patch text. Use the custom patch format and example in this tool's description.",
+		Description: "Complete raw patch text. Use the custom patch format guidance in this tool's description.",
 	})
 	return api.ToolFunctionParameters{
 		Type:       "object",
