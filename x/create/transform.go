@@ -8,10 +8,27 @@ import (
 	"github.com/ollama/ollama/x/safetensors"
 )
 
+type byteTransformResult struct {
+	tensors []*safetensors.TensorData
+	err     error
+}
+
+// byteTransformCache is scoped to one output blob. GPT-OSS gate/up companion
+// TensorSpecs share the same source pair, so retaining their one split until
+// that blob is stored avoids four full reads and split allocations without
+// leaking transformed tensors across blobs, requests, or concurrent creates.
+type byteTransformCache struct {
+	gptossGateUp map[string]byteTransformResult
+}
+
+func newByteTransformCache() *byteTransformCache {
+	return &byteTransformCache{gptossGateUp: make(map[string]byteTransformResult)}
+}
+
 // applyByteTransform produces a TensorSpec's output tensor from its resolved
 // source tensors using only byte-level (non-MLX) operations. The MLX transform
 // (decode_fp8) and quantization are handled separately by the MLX writer path.
-func applyByteTransform(ts TensorSpec, sources []*safetensors.TensorData) (*safetensors.TensorData, error) {
+func applyByteTransform(ts TensorSpec, sources []*safetensors.TensorData, cache *byteTransformCache) (*safetensors.TensorData, error) {
 	switch ts.Transform {
 	case TransformNone:
 		if len(sources) != 1 {
@@ -66,10 +83,16 @@ func applyByteTransform(ts TensorSpec, sources []*safetensors.TensorData) (*safe
 		if len(sources) != 2 {
 			return nil, fmt.Errorf("transform %s expects block+scale sources, got %d", ts.Transform, len(sources))
 		}
-		out, err := preserveAndSplitGateUpTensor(ts.Name, sources[0], sources[1])
-		if err != nil {
-			return nil, err
+		key := fmt.Sprintf("%s\x00%d\x00%s\x00%d", sources[0].Name, sources[0].Size, sources[1].Name, sources[1].Size)
+		result, ok := cache.gptossGateUp[key]
+		if !ok {
+			result.tensors, result.err = preserveAndSplitGateUpTensor(ts.Name, sources[0], sources[1])
+			cache.gptossGateUp[key] = result
 		}
+		if result.err != nil {
+			return nil, result.err
+		}
+		out := result.tensors
 		switch ts.Transform {
 		case TransformGPTOSSGateUpWeight:
 			return out[0].WithName(ts.Name), nil

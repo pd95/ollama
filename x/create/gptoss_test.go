@@ -1,6 +1,7 @@
 package create
 
 import (
+	"bytes"
 	"io"
 	"maps"
 	"path/filepath"
@@ -10,6 +11,23 @@ import (
 
 	st "github.com/ollama/ollama/x/safetensors"
 )
+
+type countingReaderAt struct {
+	data      []byte
+	bytesRead int
+}
+
+func (r *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off >= int64(len(r.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[off:])
+	r.bytesRead += n
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
 
 func TestNewTensorImportTransform_GptOSSRegistered(t *testing.T) {
 	inv := gptossInventory(nil)
@@ -119,18 +137,18 @@ func TestClassifyGPTOSSNativeMXFP4TrustBoundary(t *testing.T) {
 	}
 
 	for _, tt := range []struct {
-		name           string
-		mutate         func(*Inventory)
-		checkNoRequest bool
+		name            string
+		mutate          func(*Inventory)
+		rejectNoRequest bool
 	}{
-		{"missing scales", func(inv *Inventory) { delete(inv.Tensors, "model.layers.0.mlp.experts.down_proj_scales") }, false},
-		{"missing bias", func(inv *Inventory) { delete(inv.Tensors, "model.layers.0.mlp.experts.down_proj_bias") }, false},
+		{"missing scales", func(inv *Inventory) { delete(inv.Tensors, "model.layers.0.mlp.experts.down_proj_scales") }, true},
+		{"missing bias", func(inv *Inventory) { delete(inv.Tensors, "model.layers.0.mlp.experts.down_proj_bias") }, true},
 		{"mismatched scales", func(inv *Inventory) {
 			inv.Tensors["model.layers.0.mlp.experts.down_proj_scales"] = SourceTensor{Name: "model.layers.0.mlp.experts.down_proj_scales", Dtype: "U8", Shape: []int32{2, 15, 1}}
-		}, false},
+		}, true},
 		{"wrong blocks dtype", func(inv *Inventory) {
 			inv.Tensors["model.layers.0.mlp.experts.down_proj_blocks"] = SourceTensor{Name: "model.layers.0.mlp.experts.down_proj_blocks", Dtype: "BF16", Shape: []int32{2, 16, 1, 16}}
-		}, false},
+		}, true},
 		{"architecture only", func(inv *Inventory) {
 			clear(inv.Tensors)
 			inv.Tensors["model.layers.0.weight"] = SourceTensor{Name: "model.layers.0.weight", Dtype: "U32", Shape: []int32{16, 4}}
@@ -144,13 +162,9 @@ func TestClassifyGPTOSSNativeMXFP4TrustBoundary(t *testing.T) {
 			if _, err := Classify(inv, "mxfp4"); err == nil {
 				t.Fatal("unproven native preservation accepted")
 			}
-			if tt.checkNoRequest {
-				class, err := Classify(inv, "")
-				if err != nil {
-					t.Fatalf("no-request classification error = %v", err)
-				}
-				if class.Kind != SourcePrequantized || class.Quantize != "" {
-					t.Fatalf("no-request classification = %+v, want unlabelled prequantized source", class)
+			if tt.rejectNoRequest {
+				if _, err := Classify(inv, ""); err == nil {
+					t.Fatal("malformed no-request native source accepted")
 				}
 			}
 		})
@@ -405,6 +419,121 @@ func TestGPTOSSNativeGateUpSplitDequantizesLikeOriginal(t *testing.T) {
 				t.Fatalf("odd row %d col %d mismatch: whole=%v split=%v", i, j, wholeVals[(i*2+1)*32+j], oddVals[i*32+j])
 			}
 		}
+	}
+}
+
+func TestGPTOSSPackedMXFP4ValidationRejectsMalformedResources(t *testing.T) {
+	validBlocks := func(shape []int32, size int64) *st.TensorData {
+		return st.NewTensorDataFromReaderAt("gate_up_blocks", "U8", shape, bytes.NewReader(nil), size)
+	}
+	validScales := func(shape []int32, size int64) *st.TensorData {
+		return st.NewTensorDataFromReaderAt("gate_up_scales", "U8", shape, bytes.NewReader(nil), size)
+	}
+	for _, tt := range []struct {
+		name        string
+		blocks      *st.TensorData
+		scales      *st.TensorData
+		wantContain string
+	}{
+		{name: "zero dimension", blocks: validBlocks([]int32{1, 0, 1, 16}, 0), scales: validScales([]int32{1, 0, 1}, 0), wantContain: "positive"},
+		{name: "negative dimension", blocks: validBlocks([]int32{1, -2, 1, 16}, 0), scales: validScales([]int32{1, -2, 1}, 0), wantContain: "positive"},
+		{name: "block byte mismatch", blocks: validBlocks([]int32{1, 2, 1, 16}, 31), scales: validScales([]int32{1, 2, 1}, 2), wantContain: "byte size"},
+		{name: "scale byte mismatch", blocks: validBlocks([]int32{1, 2, 1, 16}, 32), scales: validScales([]int32{1, 2, 1}, 1), wantContain: "byte size"},
+		{
+			name:        "shape multiplication overflow",
+			blocks:      validBlocks([]int32{2147483647, 2147483647, 2147483647, 16}, 0),
+			scales:      validScales([]int32{2147483647, 2147483647, 2147483647}, 0),
+			wantContain: "overflow",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateGPTOSSPackedMXFP4Inputs("gate_up", tt.blocks, tt.scales)
+			if err == nil || !strings.Contains(err.Error(), tt.wantContain) {
+				t.Fatalf("validateGPTOSSPackedMXFP4Inputs() error = %v, want %q", err, tt.wantContain)
+			}
+		})
+	}
+}
+
+func TestGPTOSSGateUpTransformsShareOneSourceSplit(t *testing.T) {
+	blockData := make([]byte, 64)
+	scaleData := []byte{1, 2, 3, 4}
+	blocksReader := &countingReaderAt{data: blockData}
+	scalesReader := &countingReaderAt{data: scaleData}
+	sources := []*st.TensorData{
+		st.NewTensorDataFromReaderAt("gate_up_blocks", "U8", []int32{1, 4, 1, 16}, blocksReader, int64(len(blockData))),
+		st.NewTensorDataFromReaderAt("gate_up_scales", "U8", []int32{1, 4, 1}, scalesReader, int64(len(scaleData))),
+	}
+	cache := newByteTransformCache()
+	for _, transform := range []Transform{
+		TransformGPTOSSGateUpWeight,
+		TransformGPTOSSGateUpScale,
+		TransformGPTOSSUpWeight,
+		TransformGPTOSSUpScale,
+	} {
+		if _, err := applyByteTransform(TensorSpec{Name: string(transform), Transform: transform}, sources, cache); err != nil {
+			t.Fatalf("applyByteTransform(%s) error = %v", transform, err)
+		}
+	}
+	if blocksReader.bytesRead != len(blockData) || scalesReader.bytesRead != len(scaleData) {
+		t.Fatalf("source bytes read = blocks:%d scales:%d, want one split blocks:%d scales:%d", blocksReader.bytesRead, scalesReader.bytesRead, len(blockData), len(scaleData))
+	}
+}
+
+func TestGPTOSSGateUpTransformCacheIsBlobScopedAndCachesErrors(t *testing.T) {
+	shortBlocks := &countingReaderAt{data: []byte{1}}
+	scales := &countingReaderAt{data: []byte{1, 2, 3, 4}}
+	malformed := []*st.TensorData{
+		st.NewTensorDataFromReaderAt("gate_up_blocks", "U8", []int32{1, 4, 1, 16}, shortBlocks, 64),
+		st.NewTensorDataFromReaderAt("gate_up_scales", "U8", []int32{1, 4, 1}, scales, 4),
+	}
+	cache := newByteTransformCache()
+	for _, transform := range []Transform{TransformGPTOSSGateUpWeight, TransformGPTOSSUpWeight} {
+		if _, err := applyByteTransform(TensorSpec{Name: string(transform), Transform: transform}, malformed, cache); err == nil {
+			t.Fatalf("applyByteTransform(%s) succeeded for truncated source", transform)
+		}
+	}
+	if shortBlocks.bytesRead != len(shortBlocks.data) || scales.bytesRead != len(scales.data) {
+		t.Fatalf("cached error reread source: blocks=%d scales=%d", shortBlocks.bytesRead, scales.bytesRead)
+	}
+
+	validBlocks := &countingReaderAt{data: make([]byte, 64)}
+	validScales := &countingReaderAt{data: []byte{1, 2, 3, 4}}
+	valid := []*st.TensorData{
+		st.NewTensorDataFromReaderAt("gate_up_blocks", "U8", []int32{1, 4, 1, 16}, validBlocks, 64),
+		st.NewTensorDataFromReaderAt("gate_up_scales", "U8", []int32{1, 4, 1}, validScales, 4),
+	}
+	if _, err := applyByteTransform(
+		TensorSpec{Name: "gate", Transform: TransformGPTOSSGateUpWeight},
+		valid,
+		newByteTransformCache(),
+	); err != nil {
+		t.Fatalf("fresh blob cache reused stale error: %v", err)
+	}
+	if validBlocks.bytesRead != len(validBlocks.data) || validScales.bytesRead != len(validScales.data) {
+		t.Fatalf("fresh blob cache did not read current sources: blocks=%d scales=%d", validBlocks.bytesRead, validScales.bytesRead)
+	}
+}
+
+func TestGPTOSSGateUpBiasValidationRejectsMalformedResources(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		shape       []int32
+		size        int64
+		wantContain string
+	}{
+		{name: "zero dimension", shape: []int32{1, 0}, size: 0, wantContain: "positive"},
+		{name: "negative dimension", shape: []int32{1, -2}, size: 0, wantContain: "positive"},
+		{name: "byte mismatch", shape: []int32{1, 4}, size: 7, wantContain: "byte size"},
+		{name: "huge declared shape", shape: []int32{2147483647, 2147483646}, size: 0, wantContain: "byte size"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			td := st.NewTensorDataFromReaderAt("gate_up_bias", "BF16", tt.shape, bytes.NewReader(nil), tt.size)
+			_, err := splitGateUpBiasTensor(td)
+			if err == nil || !strings.Contains(err.Error(), tt.wantContain) {
+				t.Fatalf("splitGateUpBiasTensor() error = %v, want %q", err, tt.wantContain)
+			}
+		})
 	}
 }
 
