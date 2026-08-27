@@ -109,6 +109,27 @@ func TestLoadFromBytesWithConfigFiltersAddedTokenIDs(t *testing.T) {
 	}
 }
 
+func TestLoadFromBytesWithConfigAddedTokenIDLimitDoesNotFilterBaseVocabulary(t *testing.T) {
+	data := tokenizerJSON(`{"base":3}`, `[
+		{"id":1,"content":"added"},
+		{"id":3,"content":"filtered-added"}
+	]`)
+	tok, err := LoadFromBytesWithConfig(data, &TokenizerConfig{AddedTokenIDLimit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := tok.VocabSize(); got != 4 {
+		t.Fatalf("VocabSize() = %d, want 4", got)
+	}
+	if got := tok.Decode([]int32{3, 1}); got != "baseadded" {
+		t.Fatalf("Decode([3 1]) = %q, want %q", got, "baseadded")
+	}
+	if _, ok := tok.GetSpecialToken("filtered-added"); ok {
+		t.Fatal("added token at the limit was retained")
+	}
+}
+
 func TestLoadFromBytesWithConfigAddedTokenIDLimitDisabled(t *testing.T) {
 	data := tokenizerJSON(`{}`, `[{"id":-1,"content":"negative"}]`)
 	for name, config := range map[string]*TokenizerConfig{
