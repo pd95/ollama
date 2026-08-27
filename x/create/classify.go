@@ -55,6 +55,9 @@ func Classify(inv Inventory, requested string) (Classification, error) {
 		return Classification{Kind: SourceFloat, Quantize: requested}, nil
 
 	case SourcePrequantized:
+		if biasName, missing := missingGPTOSSNativeExpertBias(inv); missing {
+			return Classification{}, fmt.Errorf("incomplete GPT-OSS native MXFP4 checkpoint: required expert bias %q is missing", biasName)
+		}
 		effective := detectPrequantizedQuantization(inv)
 		if gptossNativeMXFP4Evidence(inv) {
 			effective = "mxfp4"
@@ -85,6 +88,22 @@ func Classify(inv Inventory, requested string) (Classification, error) {
 	}
 
 	return Classification{}, fmt.Errorf("could not classify source model in %s", inv.Dir)
+}
+
+func missingGPTOSSNativeExpertBias(inv Inventory) (string, bool) {
+	if inv.Config.Architecture() != "GptOssForCausalLM" {
+		return "", false
+	}
+	for _, name := range sortedTensorNames(inv) {
+		if !strings.Contains(name, ".experts.") || !strings.HasSuffix(name, "_blocks") {
+			continue
+		}
+		biasName := strings.TrimSuffix(name, "_blocks") + "_bias"
+		if !inv.Has(biasName) {
+			return biasName, true
+		}
+	}
+	return "", false
 }
 
 // detectPrequantizedQuantization reports a single quantization shared by the
