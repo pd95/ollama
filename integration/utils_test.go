@@ -104,8 +104,33 @@ func requireCapability(ctx context.Context, t *testing.T, client *api.Client, mo
 	if err != nil {
 		t.Fatalf("failed to show model %s: %v", modelName, err)
 	}
+	if !requiresAdvertisedCapability(cap) {
+		return
+	}
 	if len(resp.Capabilities) > 0 && !slices.Contains(resp.Capabilities, cap) {
 		t.Skipf("model %s does not have capability %q (has %v)", modelName, cap, resp.Capabilities)
+	}
+}
+
+func requiresAdvertisedCapability(cap model.Capability) bool {
+	return os.Getenv("OLLAMA_TEST_DIRECT_MEDIA") != "1" ||
+		(cap != model.CapabilityVision && cap != model.CapabilityAudio)
+}
+
+func TestDirectMediaCapabilityProbe(t *testing.T) {
+	t.Setenv("OLLAMA_TEST_DIRECT_MEDIA", "0")
+	if !requiresAdvertisedCapability(model.CapabilityVision) {
+		t.Fatal("strict mode must require advertised vision")
+	}
+	t.Setenv("OLLAMA_TEST_DIRECT_MEDIA", "1")
+	if requiresAdvertisedCapability(model.CapabilityVision) {
+		t.Fatal("direct media probe unexpectedly requires advertised vision")
+	}
+	if requiresAdvertisedCapability(model.CapabilityAudio) {
+		t.Fatal("direct media probe unexpectedly requires advertised audio")
+	}
+	if !requiresAdvertisedCapability(model.CapabilityTools) {
+		t.Fatal("direct media probe must not bypass unrelated capabilities")
 	}
 }
 
