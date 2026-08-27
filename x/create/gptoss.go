@@ -303,7 +303,12 @@ func (t *gptossImportTransform) planNativeExpertTensor(inv Inventory, blocksName
 
 	blocks := inv.Tensors[blocksName]
 	scales := inv.Tensors[scalesName]
-	sources := []string{blocksName, scalesName}
+	biasName := strings.TrimSuffix(blocksName, "_blocks") + "_bias"
+	if !inv.Has(biasName) {
+		return "", nil, nil, nil, false, fmt.Errorf("incomplete GPT-OSS native MXFP4 checkpoint: required expert bias %q is missing", biasName)
+	}
+	bias := inv.Tensors[biasName]
+	sources := []string{blocksName, scalesName, biasName}
 	// The native _blocks/_scales layout is the authoritative direct-expert
 	// contract. Classification accepts it even when config.json is missing or
 	// stale, so never let global or per-tensor affine metadata relabel the
@@ -318,16 +323,12 @@ func (t *gptossImportTransform) planNativeExpertTensor(inv Inventory, blocksName
 			{Name: upWeight, Sources: []SourceTensor{blocks, scales}, Transform: TransformGPTOSSUpWeight},
 			{Name: upWeight + ".scale", Sources: []SourceTensor{blocks, scales}, Transform: TransformGPTOSSUpScale},
 		}
-		if biasName := strings.TrimSuffix(blocksName, "_blocks") + "_bias"; inv.Has(biasName) {
-			bias := inv.Tensors[biasName]
-			gateBias := strings.Replace(outName, "gate_up_proj.weight", "gate_proj.bias", 1)
-			upBias := strings.Replace(outName, "gate_up_proj.weight", "up_proj.bias", 1)
-			tensors = append(tensors,
-				TensorSpec{Name: gateBias, Sources: []SourceTensor{bias}, Transform: TransformGPTOSSGateUpBias},
-				TensorSpec{Name: upBias, Sources: []SourceTensor{bias}, Transform: TransformGPTOSSUpBias},
-			)
-			sources = append(sources, biasName)
-		}
+		gateBias := strings.Replace(outName, "gate_up_proj.weight", "gate_proj.bias", 1)
+		upBias := strings.Replace(outName, "gate_up_proj.weight", "up_proj.bias", 1)
+		tensors = append(tensors,
+			TensorSpec{Name: gateBias, Sources: []SourceTensor{bias}, Transform: TransformGPTOSSGateUpBias},
+			TensorSpec{Name: upBias, Sources: []SourceTensor{bias}, Transform: TransformGPTOSSUpBias},
+		)
 		return group, tensors, metadata, sources, true, nil
 	}
 
@@ -335,10 +336,7 @@ func (t *gptossImportTransform) planNativeExpertTensor(inv Inventory, blocksName
 		{Name: outName, Sources: []SourceTensor{blocks, scales}, Transform: TransformGPTOSSPackedExpertWeight},
 		{Name: outName + ".scale", Sources: []SourceTensor{blocks, scales}, Transform: TransformGPTOSSPackedExpertScale},
 	}
-	if biasName := strings.TrimSuffix(blocksName, "_blocks") + "_bias"; inv.Has(biasName) {
-		tensors = append(tensors, TensorSpec{Name: strings.Replace(outName, ".weight", ".bias", 1), Sources: []SourceTensor{inv.Tensors[biasName]}})
-		sources = append(sources, biasName)
-	}
+	tensors = append(tensors, TensorSpec{Name: strings.Replace(outName, ".weight", ".bias", 1), Sources: []SourceTensor{bias}})
 	return group, tensors, metadata, sources, true, nil
 }
 
