@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -36,7 +37,7 @@ func createTestSafetensors(t *testing.T, path string, tensors map[string]struct 
 		header[name] = tensorInfo{
 			Dtype:       info.dtype,
 			Shape:       info.shape,
-			DataOffsets: [2]int{offset, offset + len(info.data)},
+			DataOffsets: [2]int64{int64(offset), int64(offset + len(info.data))},
 		}
 		allData = append(allData, info.data...)
 		offset += len(info.data)
@@ -100,6 +101,84 @@ func TestOpenForExtraction(t *testing.T) {
 	names := ext.ListTensors()
 	if len(names) != 1 || names[0] != "test_tensor" {
 		t.Errorf("ListTensors() = %v, want [test_tensor]", names)
+	}
+}
+
+func TestOpenForExtractionRejectsMalformedTensorHeaders(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		info        tensorInfo
+		data        []byte
+		wantContain string
+	}{
+		{name: "zero dimension", info: tensorInfo{Dtype: "U8", Shape: []int32{1, 0}, DataOffsets: [2]int64{0, 0}}, wantContain: "positive"},
+		{name: "negative offset", info: tensorInfo{Dtype: "U8", Shape: []int32{1}, DataOffsets: [2]int64{-1, 0}}, wantContain: "offsets"},
+		{name: "reversed offsets", info: tensorInfo{Dtype: "U8", Shape: []int32{1}, DataOffsets: [2]int64{2, 1}}, data: []byte{0, 0}, wantContain: "offsets"},
+		{name: "offset past payload", info: tensorInfo{Dtype: "U8", Shape: []int32{2}, DataOffsets: [2]int64{0, 2}}, data: []byte{0}, wantContain: "payload"},
+		{name: "dtype size mismatch", info: tensorInfo{Dtype: "U32", Shape: []int32{2}, DataOffsets: [2]int64{0, 4}}, data: make([]byte, 4), wantContain: "byte size"},
+		{name: "shape overflow", info: tensorInfo{Dtype: "U8", Shape: []int32{2147483647, 2147483647, 2147483647}, DataOffsets: [2]int64{0, 0}}, wantContain: "overflow"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "malformed.safetensors")
+			header, err := json.Marshal(map[string]tensorInfo{"weight": tt.info})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file bytes.Buffer
+			if err := binary.Write(&file, binary.LittleEndian, uint64(len(header))); err != nil {
+				t.Fatal(err)
+			}
+			file.Write(header)
+			file.Write(tt.data)
+			if err := os.WriteFile(path, file.Bytes(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			ext, err := OpenForExtraction(path)
+			if ext != nil {
+				ext.Close()
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantContain) {
+				t.Fatalf("OpenForExtraction() error = %v, want %q", err, tt.wantContain)
+			}
+		})
+	}
+}
+
+func TestOpenForExtractionRejectsHeaderBeyondFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "truncated-header.safetensors")
+	var file bytes.Buffer
+	if err := binary.Write(&file, binary.LittleEndian, uint64(1024)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, file.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenForExtraction(path); err == nil || !strings.Contains(err.Error(), "header size") {
+		t.Fatalf("OpenForExtraction() error = %v, want bounded header-size error", err)
+	}
+}
+
+func TestOpenForExtractionRejectsOverlappingTensorOffsets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "overlap.safetensors")
+	header, err := json.Marshal(map[string]tensorInfo{
+		"a": {Dtype: "U8", Shape: []int32{2}, DataOffsets: [2]int64{0, 2}},
+		"b": {Dtype: "U8", Shape: []int32{2}, DataOffsets: [2]int64{1, 3}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file bytes.Buffer
+	if err := binary.Write(&file, binary.LittleEndian, uint64(len(header))); err != nil {
+		t.Fatal(err)
+	}
+	file.Write(header)
+	file.Write([]byte{0, 0, 0})
+	if err := os.WriteFile(path, file.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenForExtraction(path); err == nil || !strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("OpenForExtraction() error = %v, want overlap error", err)
 	}
 }
 
@@ -368,7 +447,7 @@ func TestOpenForExtraction_MetadataIgnored(t *testing.T) {
 		"weight": tensorInfo{
 			Dtype:       "F32",
 			Shape:       []int32{2},
-			DataOffsets: [2]int{0, 8},
+			DataOffsets: [2]int64{0, 8},
 		},
 	}
 	headerJSON, _ := json.Marshal(header)

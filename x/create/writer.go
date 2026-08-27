@@ -38,6 +38,7 @@ func WriteBlobs(specs []BlobSpec, modelDir string, store BlobStore) ([]LayerInfo
 // writeBlob resolves each tensor's sources and produces the blob.
 func writeBlob(spec BlobSpec, src *sourceFiles, store BlobStore) (LayerInfo, error) {
 	needsMLX := blobNeedsMLX(spec)
+	transformCache := newByteTransformCache()
 	var (
 		tensors []*safetensors.TensorData
 		items   []quantizeItem
@@ -54,7 +55,7 @@ func writeBlob(spec BlobSpec, src *sourceFiles, store BlobStore) (LayerInfo, err
 			}
 			items = append(items, quantizeItem{name: ts.Name, quantize: ts.Quantize, reader: reader, decodeFP8: needsFP8Decode(ts.Transform)})
 		} else {
-			td, err := applyByteTransform(ts, sources)
+			td, err := applyByteTransform(ts, sources, transformCache)
 			if err != nil {
 				return LayerInfo{}, fmt.Errorf("blob %s: tensor %s: %w", spec.Name, ts.Name, err)
 			}

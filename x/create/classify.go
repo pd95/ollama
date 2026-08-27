@@ -58,12 +58,16 @@ func Classify(inv Inventory, requested string) (Classification, error) {
 		if biasName, missing := missingGPTOSSNativeExpertBias(inv); missing {
 			return Classification{}, fmt.Errorf("incomplete GPT-OSS native MXFP4 checkpoint: required expert bias %q is missing", biasName)
 		}
+		nativeMXFP4 := gptossNativeMXFP4Evidence(inv)
+		if gptossHasNativeExpertTensors(inv) && !nativeMXFP4 {
+			return Classification{}, fmt.Errorf("incomplete or malformed GPT-OSS native MXFP4 expert tensors")
+		}
 		effective := detectPrequantizedQuantization(inv)
-		if gptossNativeMXFP4Evidence(inv) {
+		if nativeMXFP4 {
 			effective = "mxfp4"
 		}
 		if requested != "" {
-			if effective == requested && gptossNativeMXFP4Evidence(inv) {
+			if effective == requested && nativeMXFP4 {
 				return Classification{Kind: SourcePrequantized, Quantize: effective}, nil
 			}
 			return Classification{}, fmt.Errorf("cannot requantize an already-quantized source model (requested %q): only bf16/fp16/fp32 sources can be quantized", requested)
@@ -88,6 +92,19 @@ func Classify(inv Inventory, requested string) (Classification, error) {
 	}
 
 	return Classification{}, fmt.Errorf("could not classify source model in %s", inv.Dir)
+}
+
+func gptossHasNativeExpertTensors(inv Inventory) bool {
+	if inv.Config.Architecture() != "GptOssForCausalLM" {
+		return false
+	}
+	for name := range inv.Tensors {
+		if strings.Contains(name, ".experts.") &&
+			(strings.HasSuffix(name, "_blocks") || strings.HasSuffix(name, "_scales") || strings.HasSuffix(name, "_bias")) {
+			return true
+		}
+	}
+	return false
 }
 
 func missingGPTOSSNativeExpertBias(inv Inventory) (string, bool) {

@@ -376,7 +376,57 @@ func validateGPTOSSPackedMXFP4Inputs(name string, blocks, scales *safetensors.Te
 	if blocks.Shape[3] != 16 {
 		return fmt.Errorf("gpt-oss expert blocks %q trailing shape = %v, want [... 16]", blocks.Name, blocks.Shape)
 	}
+	for i, dim := range blocks.Shape {
+		if dim <= 0 {
+			return fmt.Errorf("gpt-oss expert blocks %q dimension %d must be positive, got %d", blocks.Name, i, dim)
+		}
+	}
+	for i, dim := range scales.Shape {
+		if dim <= 0 {
+			return fmt.Errorf("gpt-oss expert scales %q dimension %d must be positive, got %d", scales.Name, i, dim)
+		}
+	}
+	blockBytes, err := checkedGPTOSSProduct("expert block byte size", blocks.Shape[0], blocks.Shape[1], blocks.Shape[2], blocks.Shape[3])
+	if err != nil {
+		return fmt.Errorf("gpt-oss expert blocks %q: %w", blocks.Name, err)
+	}
+	scaleBytes, err := checkedGPTOSSProduct("expert scale byte size", scales.Shape[0], scales.Shape[1], scales.Shape[2])
+	if err != nil {
+		return fmt.Errorf("gpt-oss expert scales %q: %w", scales.Name, err)
+	}
+	if blocks.Size != int64(blockBytes) {
+		return fmt.Errorf("gpt-oss expert blocks %q byte size = %d, want %d from shape %v", blocks.Name, blocks.Size, blockBytes, blocks.Shape)
+	}
+	if scales.Size != int64(scaleBytes) {
+		return fmt.Errorf("gpt-oss expert scales %q byte size = %d, want %d from shape %v", scales.Name, scales.Size, scaleBytes, scales.Shape)
+	}
+	if blocks.Shape[2] > (1<<31-1)/32 {
+		return fmt.Errorf("gpt-oss expert tensor %q output shape overflow for %d groups", name, blocks.Shape[2])
+	}
 	return nil
+}
+
+func checkedGPTOSSProduct(label string, factors ...int32) (int, error) {
+	ints := make([]int, len(factors))
+	for i, factor := range factors {
+		ints[i] = int(factor)
+	}
+	return checkedGPTOSSIntProduct(label, ints...)
+}
+
+func checkedGPTOSSIntProduct(label string, factors ...int) (int, error) {
+	product := uint64(1)
+	maxInt := uint64(^uint(0) >> 1)
+	for _, factor := range factors {
+		if factor <= 0 {
+			return 0, fmt.Errorf("%s requires positive dimensions, got %v", label, factors)
+		}
+		if product > maxInt/uint64(factor) {
+			return 0, fmt.Errorf("%s overflow for dimensions %v", label, factors)
+		}
+		product *= uint64(factor)
+	}
+	return int(product), nil
 }
 
 func preservePackedExpertProjection(name string, blocks, scales *safetensors.TensorData) ([]*safetensors.TensorData, error) {
@@ -479,8 +529,12 @@ func preserveGPTOSSMXFP4Blocks(name string, source []byte, groups int) ([]byte, 
 	if groups <= 0 {
 		return nil, fmt.Errorf("gpt-oss expert blocks %q group count must be positive, got %d", name, groups)
 	}
-	if len(source)%(groups*16) != 0 {
-		return nil, fmt.Errorf("gpt-oss expert blocks %q byte length = %d, want multiple of row bytes %d", name, len(source), groups*16)
+	rowBytes, err := checkedGPTOSSIntProduct("expert block row byte size", groups, 16)
+	if err != nil {
+		return nil, fmt.Errorf("gpt-oss expert blocks %q: %w", name, err)
+	}
+	if len(source)%rowBytes != 0 {
+		return nil, fmt.Errorf("gpt-oss expert blocks %q byte length = %d, want multiple of row bytes %d", name, len(source), rowBytes)
 	}
 
 	out := make([]byte, len(source))
@@ -501,26 +555,8 @@ func decodeGPTOSSMXFP4Scale(scale byte) float32 {
 }
 
 func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.TensorData) ([]float32, []int32, error) {
-	if blocks == nil || scales == nil {
-		return nil, nil, fmt.Errorf("gpt-oss expert tensor %q requires blocks and scales", name)
-	}
-	if blocks.Dtype != "U8" {
-		return nil, nil, fmt.Errorf("gpt-oss expert blocks %q dtype = %q, want U8", blocks.Name, blocks.Dtype)
-	}
-	if scales.Dtype != "U8" {
-		return nil, nil, fmt.Errorf("gpt-oss expert scales %q dtype = %q, want U8", scales.Name, scales.Dtype)
-	}
-	if len(blocks.Shape) != 4 {
-		return nil, nil, fmt.Errorf("gpt-oss expert blocks %q shape = %v, want [experts out groups 16]", blocks.Name, blocks.Shape)
-	}
-	if len(scales.Shape) != 3 {
-		return nil, nil, fmt.Errorf("gpt-oss expert scales %q shape = %v, want [experts out groups]", scales.Name, scales.Shape)
-	}
-	if blocks.Shape[0] != scales.Shape[0] || blocks.Shape[1] != scales.Shape[1] || blocks.Shape[2] != scales.Shape[2] {
-		return nil, nil, fmt.Errorf("gpt-oss expert tensor %q shape mismatch: blocks=%v scales=%v", name, blocks.Shape, scales.Shape)
-	}
-	if blocks.Shape[3] != 16 {
-		return nil, nil, fmt.Errorf("gpt-oss expert blocks %q trailing shape = %v, want [... 16]", blocks.Name, blocks.Shape)
+	if err := validateGPTOSSPackedMXFP4Inputs(name, blocks, scales); err != nil {
+		return nil, nil, err
 	}
 
 	blockBytes, err := io.ReadAll(blocks.Reader())
@@ -532,15 +568,21 @@ func decodeGPTOSSMXFP4TensorValues(name string, blocks, scales *safetensors.Tens
 		return nil, nil, fmt.Errorf("read gpt-oss expert scales %q: %w", scales.Name, err)
 	}
 
-	groupCount := int(blocks.Shape[0] * blocks.Shape[1] * blocks.Shape[2])
-	if len(blockBytes) != groupCount*16 {
-		return nil, nil, fmt.Errorf("gpt-oss expert blocks %q byte length = %d, want %d", blocks.Name, len(blockBytes), groupCount*16)
+	groupCount, err := checkedGPTOSSProduct("expert group count", blocks.Shape[0], blocks.Shape[1], blocks.Shape[2])
+	if err != nil {
+		return nil, nil, fmt.Errorf("gpt-oss expert tensor %q: %w", name, err)
 	}
-	if len(scaleBytes) != groupCount {
-		return nil, nil, fmt.Errorf("gpt-oss expert scales %q byte length = %d, want %d", scales.Name, len(scaleBytes), groupCount)
+	if len(blockBytes) != int(blocks.Size) {
+		return nil, nil, fmt.Errorf("gpt-oss expert blocks %q byte length = %d, want %d", blocks.Name, len(blockBytes), blocks.Size)
 	}
-
-	values := make([]float32, groupCount*32)
+	if len(scaleBytes) != int(scales.Size) {
+		return nil, nil, fmt.Errorf("gpt-oss expert scales %q byte length = %d, want %d", scales.Name, len(scaleBytes), scales.Size)
+	}
+	valueCount, err := checkedGPTOSSProduct("dequantized expert value count", blocks.Shape[0], blocks.Shape[1], blocks.Shape[2], 32)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gpt-oss expert tensor %q: %w", name, err)
+	}
+	values := make([]float32, valueCount)
 	for i := range groupCount {
 		src := blockBytes[i*16 : (i+1)*16]
 
@@ -580,13 +622,25 @@ func dequantizeGPTOSSMXFP4Tensor(name string, blocks, scales *safetensors.Tensor
 
 func splitGateUpBiasTensor(td *safetensors.TensorData) ([]*safetensors.TensorData, error) {
 	if td == nil {
-		return nil, nil
+		return nil, fmt.Errorf("gpt-oss gate/up expert bias is required")
 	}
 	if td.Dtype != "BF16" {
 		return nil, fmt.Errorf("gpt-oss expert tensor %q dtype = %q, want BF16", td.Name, td.Dtype)
 	}
 	if len(td.Shape) != 2 {
 		return nil, fmt.Errorf("gpt-oss expert tensor %q shape = %v, want [experts out]", td.Name, td.Shape)
+	}
+	for i, dim := range td.Shape {
+		if dim <= 0 {
+			return nil, fmt.Errorf("gpt-oss expert tensor %q dimension %d must be positive, got %d", td.Name, i, dim)
+		}
+	}
+	biasBytes, err := checkedGPTOSSProduct("expert bias byte size", td.Shape[0], td.Shape[1], 2)
+	if err != nil {
+		return nil, fmt.Errorf("gpt-oss expert tensor %q: %w", td.Name, err)
+	}
+	if td.Size != int64(biasBytes) {
+		return nil, fmt.Errorf("gpt-oss expert tensor %q byte size = %d, want %d from shape %v", td.Name, td.Size, biasBytes, td.Shape)
 	}
 	experts, outDim := int(td.Shape[0]), int(td.Shape[1])
 	if outDim%2 != 0 {
@@ -601,6 +655,9 @@ func splitGateUpBiasTensor(td *safetensors.TensorData) ([]*safetensors.TensorDat
 	values, err := DecodeFloatTensor(td.Dtype, raw)
 	if err != nil {
 		return nil, fmt.Errorf("decode gpt-oss expert tensor %q: %w", td.Name, err)
+	}
+	if len(values) != experts*outDim {
+		return nil, fmt.Errorf("gpt-oss expert tensor %q decoded values = %d, want %d", td.Name, len(values), experts*outDim)
 	}
 
 	gateVals := make([]float32, experts*mid)

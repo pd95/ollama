@@ -12,10 +12,12 @@ import (
 
 // tensorInfo holds tensor metadata from safetensors headers.
 type tensorInfo struct {
-	Dtype       string  `json:"dtype"`
-	Shape       []int32 `json:"shape"`
-	DataOffsets [2]int  `json:"data_offsets"`
+	Dtype       string   `json:"dtype"`
+	Shape       []int32  `json:"shape"`
+	DataOffsets [2]int64 `json:"data_offsets"`
 }
+
+const maxSafetensorsHeaderSize = 100 << 20
 
 // TensorExtractor extracts individual tensors from a safetensors file.
 // It provides io.Reader interfaces for each tensor's raw data, enabling
@@ -64,7 +66,7 @@ func (td *TensorData) safetensorsHeader() []byte {
 		td.Name: tensorInfo{
 			Dtype:       td.Dtype,
 			Shape:       td.Shape,
-			DataOffsets: [2]int{0, int(td.Size)},
+			DataOffsets: [2]int64{0, td.Size},
 		},
 	}
 	headerJSON, _ := json.Marshal(header)
@@ -155,14 +157,14 @@ func BuildPackedSafetensorsReader(tensors []*TensorData) io.Reader {
 func BuildPackedSafetensorsReaderWithMetadata(tensors []*TensorData, metadata map[string]string) io.Reader {
 	// Build the header with sequential data offsets
 	header := make(map[string]any, len(tensors)+1)
-	var offset int
+	var offset int64
 	for _, td := range tensors {
 		header[td.Name] = tensorInfo{
 			Dtype:       td.Dtype,
 			Shape:       td.Shape,
-			DataOffsets: [2]int{offset, offset + int(td.Size)},
+			DataOffsets: [2]int64{offset, offset + td.Size},
 		}
-		offset += int(td.Size)
+		offset += td.Size
 	}
 	if len(metadata) > 0 {
 		header["__metadata__"] = metadata
@@ -203,9 +205,18 @@ func OpenForExtraction(path string) (*TensorExtractor, error) {
 		f.Close()
 		return nil, fmt.Errorf("failed to read header size: %w", err)
 	}
+	stat, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+	if headerSize > maxSafetensorsHeaderSize || headerSize > uint64(max(0, stat.Size()-8)) {
+		f.Close()
+		return nil, fmt.Errorf("invalid safetensors header size %d for file size %d", headerSize, stat.Size())
+	}
 
 	headerBytes := make([]byte, headerSize)
-	if _, err := f.Read(headerBytes); err != nil {
+	if _, err := io.ReadFull(f, headerBytes); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("failed to read header: %w", err)
 	}
@@ -217,12 +228,94 @@ func OpenForExtraction(path string) (*TensorExtractor, error) {
 	}
 
 	delete(header, "__metadata__")
+	dataOffset := int64(8 + headerSize)
+	payloadSize := stat.Size() - dataOffset
+	names := make([]string, 0, len(header))
+	for name := range header {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		info := header[name]
+		if err := validateTensorInfo(name, info, payloadSize); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
+	type tensorSpan struct {
+		name       string
+		start, end int64
+	}
+	spans := make([]tensorSpan, 0, len(names))
+	for _, name := range names {
+		info := header[name]
+		spans = append(spans, tensorSpan{name: name, start: info.DataOffsets[0], end: info.DataOffsets[1]})
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start != spans[j].start {
+			return spans[i].start < spans[j].start
+		}
+		return spans[i].name < spans[j].name
+	})
+	for i := 1; i < len(spans); i++ {
+		if spans[i].start < spans[i-1].end {
+			f.Close()
+			return nil, fmt.Errorf("tensor %q data offsets overlap tensor %q", spans[i].name, spans[i-1].name)
+		}
+	}
 
 	return &TensorExtractor{
 		file:       f,
-		dataOffset: 8 + int64(headerSize), // 8 bytes for header size + header content
+		dataOffset: dataOffset,
 		header:     header,
 	}, nil
+}
+
+func validateTensorInfo(name string, info tensorInfo, payloadSize int64) error {
+	start, end := info.DataOffsets[0], info.DataOffsets[1]
+	if start < 0 || end < start {
+		return fmt.Errorf("tensor %q has invalid data offsets [%d %d]", name, start, end)
+	}
+	if end > payloadSize {
+		return fmt.Errorf("tensor %q data offsets [%d %d] exceed payload size %d", name, start, end, payloadSize)
+	}
+	width, ok := safetensorsDtypeWidth(info.Dtype)
+	if !ok {
+		return fmt.Errorf("tensor %q has unsupported dtype %q", name, info.Dtype)
+	}
+	elements := uint64(1)
+	for i, dim := range info.Shape {
+		if dim <= 0 {
+			return fmt.Errorf("tensor %q shape dimension %d must be positive, got %d", name, i, dim)
+		}
+		if elements > uint64(^uint64(0))/uint64(dim) {
+			return fmt.Errorf("tensor %q shape multiplication overflow for %v", name, info.Shape)
+		}
+		elements *= uint64(dim)
+	}
+	if elements > uint64(^uint64(0))/uint64(width) || elements*uint64(width) > uint64(^uint64(0)>>1) {
+		return fmt.Errorf("tensor %q byte size overflow for dtype %s shape %v", name, info.Dtype, info.Shape)
+	}
+	want := int64(elements * uint64(width))
+	if got := end - start; got != want {
+		return fmt.Errorf("tensor %q byte size = %d, want %d for dtype %s shape %v", name, got, want, info.Dtype, info.Shape)
+	}
+	return nil
+}
+
+func safetensorsDtypeWidth(dtype string) (int64, bool) {
+	switch dtype {
+	case "BOOL", "U8", "I8", "F8_E4M3", "F8_E4M3FN", "F8_E5M2", "F8_E5M2FNUZ":
+		return 1, true
+	case "U16", "I16", "F16", "BF16":
+		return 2, true
+	case "U32", "I32", "F32":
+		return 4, true
+	case "U64", "I64", "F64":
+		return 8, true
+	default:
+		return 0, false
+	}
 }
 
 // GetTensor returns tensor metadata and a reader for extracting a single tensor.
@@ -232,8 +325,8 @@ func (te *TensorExtractor) GetTensor(name string) (*TensorData, error) {
 		return nil, fmt.Errorf("tensor %q not found", name)
 	}
 
-	start := te.dataOffset + int64(info.DataOffsets[0])
-	size := int64(info.DataOffsets[1] - info.DataOffsets[0])
+	start := te.dataOffset + info.DataOffsets[0]
+	size := info.DataOffsets[1] - info.DataOffsets[0]
 
 	return &TensorData{
 		Name:   name,
