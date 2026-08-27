@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -2935,6 +2936,145 @@ func TestChatFormatWithThinkFalse(t *testing.T) {
 				t.Errorf("expected first completion format to match the request format, got %q", string(requests[0].Format))
 			}
 		})
+	}
+}
+
+func TestChatApertusToolsAndFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mock := &mockRunner{}
+	s := newServerWithMockRunner(t, mock)
+	_, digest := createBinFile(t, ggml.KV{
+		"general.architecture":          "llama",
+		"llama.block_count":             uint32(1),
+		"llama.context_length":          uint32(8192),
+		"llama.embedding_length":        uint32(4096),
+		"llama.attention.head_count":    uint32(32),
+		"llama.attention.head_count_kv": uint32(8),
+		"tokenizer.ggml.tokens":         []string{""},
+		"tokenizer.ggml.scores":         []float32{0},
+		"tokenizer.ggml.token_type":     []int32{0},
+	}, []*ggml.Tensor{
+		{Name: "token_embd.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.attn_norm.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.ffn_down.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.ffn_gate.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.ffn_up.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.ffn_norm.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.attn_k.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.attn_output.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.attn_q.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.attn_v.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "output.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+	})
+
+	modelName := "test-apertus-tools-and-format"
+	w := createRequest(t, s.CreateHandler, api.CreateRequest{
+		Model:    modelName,
+		Files:    map[string]string{"file.gguf": digest},
+		Parser:   "apertus",
+		Template: `{{- range .Messages }}{{ .Role }}: {{ .Content }}{{ end }}`,
+		Stream:   &stream,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	tool := api.Tool{Type: "function", Function: api.ToolFunction{
+		Name: "get_weather",
+		Parameters: api.ToolFunctionParameters{
+			Type: "object",
+			Properties: testPropsMap(map[string]api.ToolProperty{
+				"city": {Type: api.PropertyType{"string"}},
+			}),
+		},
+	}}
+
+	responses := []struct {
+		name     string
+		format   json.RawMessage
+		response string
+	}{
+		{
+			name:     "object",
+			format:   json.RawMessage(`{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}`),
+			response: `{"answer":"forty-two"}`,
+		},
+		{
+			name:     "array",
+			format:   json.RawMessage(`{"type":"array","items":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}}`),
+			response: `[{"answer":"forty-two"}]`,
+		},
+	}
+
+	for _, tt := range responses {
+		for _, streaming := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tt.name, streaming), func(t *testing.T) {
+				completionCount := 0
+				var forwardedFormat json.RawMessage
+				mock.CompletionFn = func(ctx context.Context, req llm.CompletionRequest, fn func(llm.CompletionResponse)) error {
+					completionCount++
+					forwardedFormat = append(forwardedFormat[:0], req.Format...)
+					for i := range len(tt.response) {
+						fn(llm.CompletionResponse{Content: tt.response[i : i+1]})
+					}
+					fn(llm.CompletionResponse{
+						Done:               true,
+						DoneReason:         llm.DoneReasonStop,
+						PromptEvalCount:    1,
+						PromptEvalDuration: 1,
+						EvalCount:          1,
+						EvalDuration:       1,
+					})
+					return nil
+				}
+
+				think := false
+				w := createRequest(t, s.ChatHandler, api.ChatRequest{
+					Model:    modelName,
+					Messages: []api.Message{{Role: "user", Content: "Respond in the requested format."}},
+					Tools:    []api.Tool{tool},
+					Think:    &api.ThinkValue{Value: think},
+					Stream:   &streaming,
+					Format:   tt.format,
+				})
+				if w.Code != http.StatusOK {
+					t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+				}
+				if completionCount != 1 {
+					t.Fatalf("completion calls=%d, want 1", completionCount)
+				}
+				if !bytes.Equal(forwardedFormat, tt.format) {
+					t.Fatalf("forwarded format=%q, want %q", forwardedFormat, tt.format)
+				}
+
+				decoder := json.NewDecoder(w.Body)
+				var content strings.Builder
+				var events []api.ChatResponse
+				for {
+					var event api.ChatResponse
+					if err := decoder.Decode(&event); err == io.EOF {
+						break
+					} else if err != nil {
+						t.Fatal(err)
+					}
+					events = append(events, event)
+					content.WriteString(event.Message.Content)
+					if len(event.Message.ToolCalls) != 0 {
+						t.Fatalf("unexpected tool calls: %#v", event.Message.ToolCalls)
+					}
+				}
+				if len(events) != 1 {
+					t.Fatalf("response events=%d, want 1", len(events))
+				}
+				if content.String() != tt.response {
+					t.Fatalf("content=%q, want %q", content.String(), tt.response)
+				}
+				if !events[0].Done {
+					t.Fatal("response was not terminal")
+				}
+			})
+		}
 	}
 }
 
