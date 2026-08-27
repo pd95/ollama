@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 )
@@ -288,12 +289,12 @@ func validateTensorInfo(name string, info tensorInfo, payloadSize int64) error {
 		if dim <= 0 {
 			return fmt.Errorf("tensor %q shape dimension %d must be positive, got %d", name, i, dim)
 		}
-		if elements > uint64(^uint64(0))/uint64(dim) {
+		if elements > math.MaxUint64/uint64(dim) {
 			return fmt.Errorf("tensor %q shape multiplication overflow for %v", name, info.Shape)
 		}
 		elements *= uint64(dim)
 	}
-	if elements > uint64(^uint64(0))/uint64(width) || elements*uint64(width) > uint64(^uint64(0)>>1) {
+	if elements > math.MaxUint64/uint64(width) || elements*uint64(width) > math.MaxInt64 {
 		return fmt.Errorf("tensor %q byte size overflow for dtype %s shape %v", name, info.Dtype, info.Shape)
 	}
 	want := int64(elements * uint64(width))
