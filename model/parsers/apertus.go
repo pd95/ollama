@@ -40,9 +40,14 @@ type ApertusParser struct {
 	callIndex   int
 	pendingBare bool
 	thinking    bool
+	format      bool
 }
 
 func (p *ApertusParser) Init(tools []api.Tool, lastMessage *api.Message, thinkValue *api.ThinkValue) []api.Tool {
+	return p.InitWithFormat(tools, lastMessage, thinkValue, nil)
+}
+
+func (p *ApertusParser) InitWithFormat(tools []api.Tool, lastMessage *api.Message, thinkValue *api.ThinkValue, format json.RawMessage) []api.Tool {
 	p.state = apertusContent
 	p.acc.Reset()
 	p.allowedTool = make(map[string]struct{}, len(tools))
@@ -50,6 +55,7 @@ func (p *ApertusParser) Init(tools []api.Tool, lastMessage *api.Message, thinkVa
 	p.callIndex = 0
 	p.pendingBare = false
 	p.thinking = thinkValue != nil && thinkValue.Bool()
+	p.format = apertusResponseFormatActive(format)
 	for _, tool := range tools {
 		name := tool.Function.Name
 		if !apertusIdentifier(name) {
@@ -63,6 +69,13 @@ func (p *ApertusParser) Init(tools []api.Tool, lastMessage *api.Message, thinkVa
 		p.allowedTool[name] = struct{}{}
 	}
 	return tools
+}
+
+func apertusResponseFormatActive(format json.RawMessage) bool {
+	if len(format) == 0 || bytes.Equal(format, []byte("null")) || bytes.Equal(format, []byte(`""`)) {
+		return false
+	}
+	return bytes.Equal(format, []byte(`"json"`)) || format[0] == '{' && json.Valid(format)
 }
 
 func (p *ApertusParser) Add(s string, done bool) (content, thinking string, calls []api.ToolCall, err error) {
@@ -109,6 +122,11 @@ func (p *ApertusParser) Add(s string, done bool) (content, thinking string, call
 						p.acc.Reset()
 						p.pendingBare = false
 						return out.String(), thought.String(), parsed, nil
+					} else if p.format && json.Valid([]byte(cleaned)) {
+						p.acc.Reset()
+						p.pendingBare = false
+						out.WriteString(cleaned)
+						return out.String(), thought.String(), calls, nil
 					} else if !isSoftApertusToolParseError(parseErr) {
 						return "", "", nil, parseErr
 					}
@@ -237,7 +255,7 @@ func (p *ApertusParser) pendingFragmentWouldExceed(s string) bool {
 	if idx := strings.Index(probe, apertusToolOpenTag); idx >= 0 {
 		return p.acc.Len()+len(s)-idx-len(apertusToolOpenTag) > maxApertusToolCallBytes
 	}
-	return apertusPendingBarePrefix(probe) && p.acc.Len()+len(s) > maxApertusToolCallBytes
+	return (apertusPendingBarePrefix(probe) || p.looksLikeToolCallStart(probe)) && p.acc.Len()+len(s) > maxApertusToolCallBytes
 }
 
 func apertusPendingBarePrefix(s string) bool {
@@ -301,9 +319,9 @@ func (p *ApertusParser) parseToolCalls(raw string) ([]api.ToolCall, error) {
 				}
 			}
 		}
-		calls = append(calls, api.ToolCall{Function: api.ToolCallFunction{Index: p.callIndex, Name: name, Arguments: args}})
-		p.callIndex++
+		calls = append(calls, api.ToolCall{Function: api.ToolCallFunction{Index: p.callIndex + len(calls), Name: name, Arguments: args}})
 	}
+	p.callIndex += len(calls)
 	return calls, nil
 }
 
@@ -359,7 +377,13 @@ func (p *ApertusParser) looksLikeToolCall(s string) bool {
 
 func (p *ApertusParser) looksLikeToolCallStart(s string) bool {
 	s = strings.TrimSpace(s)
-	return len(p.allowedTool) > 0 && s != "" && (strings.HasPrefix("[{", s) || strings.HasPrefix("{", s) || strings.HasPrefix(s, "[{") || strings.HasPrefix(s, "{"))
+	if len(p.allowedTool) == 0 || s == "" {
+		return false
+	}
+	if p.format && (strings.HasPrefix(s, "[") || strings.HasPrefix(s, "{")) {
+		return true
+	}
+	return strings.HasPrefix("[{", s) || strings.HasPrefix("{", s) || strings.HasPrefix(s, "[{") || strings.HasPrefix(s, "{")
 }
 
 func apertusIdentifier(s string) bool {
