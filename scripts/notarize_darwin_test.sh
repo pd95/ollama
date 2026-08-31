@@ -90,12 +90,13 @@ cat >"$FAKE_BIN/codesign" <<'EOF'
 set -euo pipefail
 target="${@: -1}"
 if [[ " $* " == *" -d "* ]]; then
-  printf '%s\n' 'Authority=Developer ID Application: Test' 'Identifier=com.electron.ollama' 'TeamIdentifier=TESTTEAM' 'CDHash=0123456789abcdef' >&2
+  printf '%s\n' 'Authority=Developer ID Application: Test' 'Identifier=com.electron.ollama' 'TeamIdentifier=TESTTEAM' 'Timestamp=2026-08-31 at 15:00:00' 'Runtime Version=26.4.0' 'CDHash=0123456789abcdef' >&2
   exit 0
 fi
 if [[ " $* " == *" --verify "* ]]; then
   printf 'codesign:verify:%s\n' "$target" >>"$TRACE"
   [[ "${FAKE_CODESIGN_FAIL:-0}" != 1 ]]
+  [[ "$target" != "${FAKE_CODESIGN_FAIL_TARGET:-}" ]]
   exit
 fi
 printf 'codesign:sign:%s\n' "$target" >>"$TRACE"
@@ -108,6 +109,9 @@ if [[ "$1" == -x ]]; then
   destination="${@: -1}"
   mkdir -p "$destination"
   cp -R "$TEST_DIST/Ollama.app" "$destination/Ollama.app"
+  if [[ -n "${FAKE_EXTRACT_METALLIB_SUBSTITUTE:-}" ]]; then
+    printf 'substituted\n' >"$destination/Ollama.app/Contents/Resources/mlx_metal_${FAKE_EXTRACT_METALLIB_SUBSTITUTE}/mlx.metallib"
+  fi
 else
   destination="${@: -1}"
   printf 'zip:%s\n' "$TEST_CASE" >"$destination"
@@ -204,12 +208,20 @@ init_case() {
   STATE_ROOT="$TEST_DIST/notarization"
   FAKE_STATUS_DIR="$CASE_ROOT/status"
   TRACE="$CASE_ROOT/trace.log"
-  mkdir -p "$TEST_DIST/Ollama.app/Contents" "$FAKE_STATUS_DIR"
+  mkdir -p "$TEST_DIST/Ollama.app/Contents/Resources/mlx_metal_v3" "$TEST_DIST/Ollama.app/Contents/Resources/mlx_metal_v4" "$TEST_DIST/Ollama.app/Contents/Frameworks/Squirrel.framework/Versions/A" "$TEST_DIST/Ollama.app/Contents/MacOS" "$FAKE_STATUS_DIR"
   printf 'CFBundleShortVersionString=0.31.2\nCFBundleVersion=7cb13ca-test\n' >"$TEST_DIST/Ollama.app/Contents/Info.plist"
   printf 'zip:original\n' >"$TEST_DIST/Ollama-darwin.zip"
+  touch "$TEST_DIST/Ollama.app/Contents/Resources/ollama" "$TEST_DIST/Ollama.app/Contents/Resources/llama-server" "$TEST_DIST/Ollama.app/Contents/Resources/llama-quantize" "$TEST_DIST/Ollama.app/Contents/Resources/mlx_metal_v3/libmlx.dylib" "$TEST_DIST/Ollama.app/Contents/Frameworks/Squirrel.framework/Versions/A/Squirrel" "$TEST_DIST/Ollama.app/Contents/MacOS/Ollama"
+  printf 'v3 payload\n' >"$TEST_DIST/Ollama.app/Contents/Resources/mlx_metal_v3/mlx.metallib"
+  printf 'v4 payload\n' >"$TEST_DIST/Ollama.app/Contents/Resources/mlx_metal_v4/mlx.metallib"
+  PRE_SIGN_BUNDLE="$CASE_ROOT/pre-sign"; mkdir -p "$PRE_SIGN_BUNDLE"
+  printf '%s\n' '{"status":"pre_sign_pass","acceptance":"pre_sign_only"}' >"$PRE_SIGN_BUNDLE/status.json"
+  printf '%s\n' '{"candidate":"fixed"}' >"$PRE_SIGN_BUNDLE/gate-inputs.json"
+  SIGNING_RECEIPT="$CASE_ROOT/signed-receipt.json"
+  jq -n --arg gate_inputs_file_sha256 "$(sha256sum "$PRE_SIGN_BUNDLE/gate-inputs.json" | awk '{print $1}')" --arg gate_status_file_sha256 "$(sha256sum "$PRE_SIGN_BUNDLE/status.json" | awk '{print $1}')" '{equivalent:true,differences:[],developer_id_authority:"Developer ID Application: Test",gate_inputs_file_sha256:$gate_inputs_file_sha256,gate_status_file_sha256:$gate_status_file_sha256}' >"$SIGNING_RECEIPT"
   : >"$TRACE"
-  export TEST_CASE TEST_DIST FAKE_STATUS_DIR TRACE FAKE_BIN
-  unset FAKE_NO_ID_STAGE FAKE_SUBMIT_NONZERO_STAGE FAKE_INFO_UNAVAILABLE_STAGE FAKE_WAIT_RC FAKE_APP_NAME FAKE_DMG_NAME FAKE_CODESIGN_FAIL FAKE_UPLOAD_UNCONFIRMED_STAGE MLX_REPLACE_NOTARIZATION_ID MLX_NOTARY_NO_S3_ACCELERATION
+  export TEST_CASE TEST_DIST FAKE_STATUS_DIR TRACE FAKE_BIN PRE_SIGN_BUNDLE SIGNING_RECEIPT
+  unset FAKE_NO_ID_STAGE FAKE_SUBMIT_NONZERO_STAGE FAKE_INFO_UNAVAILABLE_STAGE FAKE_WAIT_RC FAKE_APP_NAME FAKE_DMG_NAME FAKE_CODESIGN_FAIL FAKE_CODESIGN_FAIL_TARGET FAKE_EXTRACT_METALLIB_SUBSTITUTE FAKE_UPLOAD_UNCONFIRMED_STAGE MLX_REPLACE_NOTARIZATION_ID MLX_NOTARY_NO_S3_ACCELERATION
 }
 
 run_helper() {
@@ -228,7 +240,7 @@ run_helper() {
       --release-version 0.31.2-7cb13ca-test \
       --app-version 0.31.2 \
       --app-build-version 7cb13ca-test \
-      --timeout 1s "$@"
+      --timeout 1s --signing-receipt "$SIGNING_RECEIPT" --pre-sign-bundle "$PRE_SIGN_BUNDLE" "$@"
 }
 
 state_file() {
@@ -247,6 +259,58 @@ assert_contains "$TRACE" 'notarytool:submit:dmg'
 assert_contains "$(state_file)" 'appUploadStatus=Confirmed'
 assert_contains "$(state_file)" 'dmgUploadStatus=Confirmed'
 pass 'immediate app and DMG acceptance completes'
+
+init_case fresh_archive_preflight
+run_helper --preflight-archive --artifact-dir "$CASE_ROOT/preflight" >"$CASE_ROOT/output" 2>&1
+[[ -f "$CASE_ROOT/preflight/Ollama-darwin.fresh.zip" ]] || fail 'fresh archive preflight did not create archive'
+assert_not_contains_tree "$CASE_ROOT/preflight" 'zip:original'
+if grep -F 'notarytool:submit:' "$TRACE" >/dev/null; then fail 'preflight contacted Apple submission service'; fi
+pass 'fresh archive preflight never reuses stale ZIP or contacts Apple'
+
+init_case unsigned_macho_rejected
+export FAKE_CODESIGN_FAIL_TARGET="$TEST_DIST/Ollama.app/Contents/MacOS/Ollama"
+set +e
+run_helper --preflight-archive --artifact-dir "$CASE_ROOT/preflight" >"$CASE_ROOT/output" 2>&1
+rc=$?
+set -e
+[[ "$rc" == 1 ]] || fail 'unsigned Mach-O target was accepted'
+[[ ! -e "$CASE_ROOT/preflight/Ollama-darwin.fresh.zip" ]] || fail 'unsigned Mach-O target created archive'
+if grep -F 'notarytool:submit:' "$TRACE" >/dev/null; then fail 'unsigned Mach-O preflight contacted Apple'; fi
+pass 'unsigned Mach-O target fails before archive creation'
+
+init_case missing_metallib_rejected
+rm "$TEST_DIST/Ollama.app/Contents/Resources/mlx_metal_v4/mlx.metallib"
+set +e
+run_helper --preflight-archive --artifact-dir "$CASE_ROOT/preflight" >"$CASE_ROOT/output" 2>&1
+rc=$?
+set -e
+[[ "$rc" == 1 ]] || fail 'missing Metal library was accepted'
+assert_contains "$CASE_ROOT/output" 'missing required Metal library payload'
+[[ ! -e "$CASE_ROOT/preflight/Ollama-darwin.fresh.zip" ]] || fail 'missing Metal library created archive'
+pass 'missing Metal library fails before archive creation'
+
+init_case substituted_metallib_rejected
+export FAKE_EXTRACT_METALLIB_SUBSTITUTE=v3
+set +e
+run_helper --preflight-archive --artifact-dir "$CASE_ROOT/preflight" >"$CASE_ROOT/output" 2>&1
+rc=$?
+set -e
+[[ "$rc" == 1 ]] || fail 'substituted extracted Metal library was accepted'
+assert_contains "$CASE_ROOT/output" 'Metal library payload hash mismatch after archive extraction'
+[[ -f "$CASE_ROOT/preflight/Ollama-darwin.fresh.zip" ]] || fail 'substituted Metal library did not reach extraction binding'
+if grep -F 'notarytool:submit:' "$TRACE" >/dev/null; then fail 'substituted Metal library preflight contacted Apple'; fi
+pass 'substituted extracted Metal library fails archive binding'
+
+init_case preflight_binding_substitution
+sed -i 's/true/false/' "$SIGNING_RECEIPT"
+set +e
+run_helper --preflight-archive --artifact-dir "$CASE_ROOT/preflight" >"$CASE_ROOT/output" 2>&1
+rc=$?
+set -e
+[[ "$rc" == 1 ]] || fail 'invalid signing receipt was not rejected'
+assert_contains "$CASE_ROOT/output" 'signed receipt is not equivalent'
+[[ ! -e "$CASE_ROOT/preflight/Ollama-darwin.fresh.zip" ]] || fail 'invalid binding created preflight archive'
+pass 'preflight rejects substituted signing receipt before archive creation'
 
 init_case alternate_notarytool
 printf 'Accepted\n' >"$FAKE_STATUS_DIR/app.status"
@@ -357,6 +421,29 @@ set -e
 [[ "$(grep -c 'notarytool:submit:app' "$TRACE")" == 1 ]] || fail 'duplicate app submission was created'
 assert_contains "$CASE_ROOT/second" 'refusing to create a duplicate submission'
 pass 'matching nonterminal state prevents duplicate submission'
+
+init_case legacy_empty_preflight_rotation
+mkdir -p "$STATE_ROOT/0.31.2-7cb13ca-test"
+printf 'releaseRevision=7cb13cae\nreleaseVersion=0.31.2-7cb13ca-test\nappVersion=0.31.2\nappBuildVersion=7cb13ca-test\n' >"$(state_file)"
+printf 'Accepted\n' >"$FAKE_STATUS_DIR/app.status"
+printf 'Accepted\n' >"$FAKE_STATUS_DIR/dmg.status"
+run_helper >"$CASE_ROOT/output" 2>&1
+compgen -G "$STATE_ROOT/0.31.2-7cb13ca-test.preflight.*" >/dev/null || fail 'legacy empty preflight state was not rotated'
+assert_contains "$CASE_ROOT/output" 'rotated non-submission preflight state'
+[[ "$(grep -c 'notarytool:submit:app' "$TRACE")" == 1 ]] || fail 'legacy empty preflight state did not begin exactly one fresh fake submission'
+pass 'legacy empty preflight state rotates without resume or duplicate logic'
+
+init_case malformed_empty_preflight_rejected
+mkdir -p "$STATE_ROOT/0.31.2-7cb13ca-test"
+printf 'releaseRevision=7cb13cae\nreleaseVersion=0.31.2-7cb13ca-test\nappVersion=0.31.2\nappBuildVersion=7cb13ca-test\nappArtifactPath=/bad\n' >"$(state_file)"
+set +e
+run_helper >"$CASE_ROOT/output" 2>&1
+rc=$?
+set -e
+[[ "$rc" == 1 ]] || fail 'malformed empty preflight state was accepted'
+assert_contains "$CASE_ROOT/output" 'invalid local preflight state: empty stage has submission, artifact, or hash fields'
+if grep -F 'notarytool:submit:' "$TRACE" >/dev/null; then fail 'malformed empty preflight state contacted Apple'; fi
+pass 'malformed empty preflight state fails locally without resume guidance'
 
 init_case explicit_replacement
 printf 'In Progress\nIn Progress\n' >"$FAKE_STATUS_DIR/app.status"

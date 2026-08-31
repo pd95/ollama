@@ -12,6 +12,10 @@ RELEASE_VERSION=""
 APP_VERSION=""
 APP_BUILD_VERSION=""
 RESUME_ID=""
+PREFLIGHT_ARCHIVE=0
+PREFLIGHT_DIR=""
+SIGNING_RECEIPT=""
+PRE_SIGN_BUNDLE=""
 REPLACE_SUBMISSION_ID="${MLX_REPLACE_NOTARIZATION_ID:-}"
 NO_S3_ACCELERATION="${MLX_NOTARY_NO_S3_ACCELERATION:-0}"
 NOTARY_DEVELOPER_DIR="${MLX_NOTARY_DEVELOPER_DIR:-}"
@@ -24,17 +28,54 @@ INFO_STATUS=""
 INFO_NAME=""
 INFO_CREATED_DATE=""
 TEMP_PATHS=""
+METALLIB_RELATIVE_PATHS=(
+  "Contents/Resources/mlx_metal_v3/mlx.metallib"
+  "Contents/Resources/mlx_metal_v4/mlx.metallib"
+)
 
 EX_TEMPFAIL=75
 
 usage() {
   cat <<'EOF'
 Usage: ./scripts/notarize_darwin.sh --release-revision REV --release-version VERSION \
-  --app-version VERSION --app-build-version VERSION [--timeout DURATION] [--resume SUBMISSION_ID]
+    --app-version VERSION --app-build-version VERSION [--timeout DURATION] [--resume SUBMISSION_ID]
+    --preflight-archive --artifact-dir DIR --signing-receipt FILE --pre-sign-bundle DIR
 
 Without --resume, submit the signed app ZIP and continue through DMG notarization.
 With --resume, continue an existing app-ZIP or DMG submission without rebuilding or resubmitting it.
 EOF
+}
+
+require_release_signature() {
+  local target="$1" details authority team
+  codesign --verify --strict --verbose=4 "$target"
+  details="$(codesign -d --verbose=4 "$target" 2>&1)"
+  authority="$(printf '%s\n' "$details" | sed -nE 's/^Authority=(Developer ID Application:.*)$/\1/p' | head -n1)"
+  team="$(printf '%s\n' "$details" | sed -nE 's/^TeamIdentifier=(.+)$/\1/p' | head -n1)"
+  [[ -n "$authority" && -n "$team" ]] || die "missing Developer ID authority or TeamIdentifier: $target"
+  printf '%s\n' "$details" | grep -q '^Timestamp=' || die "missing secure timestamp: $target"
+  { printf '%s\n' "$details" | grep -q '^Runtime Version=' || printf '%s\n' "$details" | grep -q 'flags=.*runtime'; } || die "missing hardened runtime: $target"
+}
+
+verify_metallib_data() {
+  local app="$1" actual expected relative
+  for relative in "${METALLIB_RELATIVE_PATHS[@]}"; do
+    [[ -f "$app/$relative" ]] || die "missing required Metal library payload: $app/$relative"
+  done
+  actual="$(cd "$app" && find Contents/Resources -type f -name '*.metallib' -print | LC_ALL=C sort)"
+  expected="$(printf '%s\n' "${METALLIB_RELATIVE_PATHS[@]}")"
+  [[ "$actual" == "$expected" ]] || die "unexpected Metal library payload path/count in $app"
+}
+
+verify_metallib_archive_binding() {
+  local source_app="$1" extracted_app="$2" relative source_hash extracted_hash
+  verify_metallib_data "$source_app"
+  verify_metallib_data "$extracted_app"
+  for relative in "${METALLIB_RELATIVE_PATHS[@]}"; do
+    source_hash="$(sha256_file "$source_app/$relative")"
+    extracted_hash="$(sha256_file "$extracted_app/$relative")"
+    [[ "$source_hash" == "$extracted_hash" ]] || die "Metal library payload hash mismatch after archive extraction: $relative"
+  done
 }
 
 die() {
@@ -216,6 +257,8 @@ fetch_invalid_log() {
 
 report_state() {
   local stage="$1" submission_id="$2" artifact hash status_value upload_status
+  [[ "$stage" == app || "$stage" == dmg ]] || die "invalid local preflight state: non-submission stage '$stage' has no resumable Apple submission"
+  [[ -n "$submission_id" ]] || die "invalid local preflight state: $stage stage is missing its Apple submission ID"
   artifact="$(state_get "${stage}ArtifactPath")"
   hash="$(state_get "${stage}ArtifactSHA256")"
   status_value="$(state_get "${stage}LastStatus")"
@@ -270,10 +313,39 @@ verify_app_bundle() {
   [[ -d "$app" ]] || die "Ollama.app is missing: $app"
   codesign --verify --deep --strict --verbose=2 "$app"
   codesign -d --verbose=4 "$app" 2>&1 | grep -F 'Authority=Developer ID Application:' >/dev/null || die "Ollama.app is not signed with a Developer ID Application identity: $app"
+  local target
+  while IFS= read -r target; do require_release_signature "$target"; done < <(
+    printf '%s\n' "$app" "$app/Contents/Resources/ollama" "$app/Contents/Resources/llama-server" "$app/Contents/Resources/llama-quantize" "$app/Contents/Frameworks/Squirrel.framework/Versions/A/Squirrel" "$app/Contents/Frameworks/Squirrel.framework" "$app/Contents/MacOS/Ollama"
+    find "$app/Contents/Resources" -type f \( -name '*.so' -o -name '*.dylib' \) -print | sort
+  )
+  verify_metallib_data "$app"
   actual="$(plist_get_file "$app/Contents/Info.plist" CFBundleShortVersionString)"
   [[ "$actual" == "$APP_VERSION" ]] || die "Ollama.app version mismatch: expected '$APP_VERSION', got '$actual'"
   actual="$(plist_get_file "$app/Contents/Info.plist" CFBundleVersion)"
   [[ "$actual" == "$APP_BUILD_VERSION" ]] || die "Ollama.app build version mismatch: expected '$APP_BUILD_VERSION', got '$actual'"
+}
+
+verify_signing_bindings() {
+  [[ -f "$SIGNING_RECEIPT" && -f "$PRE_SIGN_BUNDLE/status.json" && -f "$PRE_SIGN_BUNDLE/gate-inputs.json" ]] || die "missing signed receipt or pre-sign bundle"
+  jq -e '(.equivalent == true) and ((.differences|length) == 0) and (.developer_id_authority|startswith("Developer ID Application:"))' "$SIGNING_RECEIPT" >/dev/null || die "signed receipt is not equivalent Developer-ID evidence"
+  jq -e '.status == "pre_sign_pass" and .acceptance == "pre_sign_only"' "$PRE_SIGN_BUNDLE/status.json" >/dev/null || die "pre-sign status is not pass"
+  [[ "$(shasum -a 256 "$PRE_SIGN_BUNDLE/gate-inputs.json" | awk '{print $1}')" == "$(jq -r .gate_inputs_file_sha256 "$SIGNING_RECEIPT")" ]] || die "pre-sign inputs hash mismatch"
+  [[ "$(shasum -a 256 "$PRE_SIGN_BUNDLE/status.json" | awk '{print $1}')" == "$(jq -r .gate_status_file_sha256 "$SIGNING_RECEIPT")" ]] || die "pre-sign status hash mismatch"
+}
+
+fresh_archive_preflight() {
+  local output="$1" app="$DIST_DIR/Ollama.app" extract extracted
+  [[ ! -e "$output" ]] || die "refusing existing fresh archive path: $output"
+  verify_signing_bindings
+  verify_app_bundle "$app"
+  ditto -c -k --norsrc --keepParent "$app" "$output"
+  [[ -s "$output" && "$output" -nt "$app" ]] || die "fresh archive was not created after current app"
+  extract="$(mktemp -d "${TMPDIR:-/tmp}/ollama-notary-fresh.XXXXXX")"; TEMP_PATHS="$TEMP_PATHS $extract"
+  ditto -x -k "$output" "$extract"; extracted="$extract/Ollama.app"
+  verify_app_bundle "$extracted"
+  verify_metallib_archive_binding "$app" "$extracted"
+  [[ "$(signature_identity "$app")" == "$(signature_identity "$extracted")" ]] || die "fresh archive signature identity mismatch"
+  printf '%s\n' "fresh archive SHA-256: $(sha256_file "$output")"
 }
 
 signature_identity() {
@@ -499,10 +571,31 @@ resume_submission() {
 }
 
 rotate_existing_state_for_new_build() {
-  local stage last_status submission_id rotated
+  local stage last_status submission_id artifact hash upload_status rotated
   [[ -f "$STATE_FILE" ]] || return 0
   state_validate_release
   stage="$(state_get activeStage)"
+  if [[ -z "$stage" ]]; then
+    submission_id="$(state_get appSubmissionID)$(state_get dmgSubmissionID)"
+    artifact="$(state_get appArtifactPath)$(state_get dmgArtifactPath)"
+    hash="$(state_get appArtifactSHA256)$(state_get dmgArtifactSHA256)"
+    [[ -z "$submission_id$artifact$hash" ]] || die "invalid local preflight state: empty stage has submission, artifact, or hash fields"
+    state_set activeStage preflight
+    state_set preflightStatus local_preflight_incomplete_legacy
+    stage=preflight
+  fi
+  if [[ "$stage" == preflight ]]; then
+    submission_id="$(state_get appSubmissionID)$(state_get dmgSubmissionID)"
+    artifact="$(state_get appArtifactPath)$(state_get dmgArtifactPath)"
+    hash="$(state_get appArtifactSHA256)$(state_get dmgArtifactSHA256)"
+    upload_status="$(state_get appUploadStatus)$(state_get dmgUploadStatus)"
+    [[ -z "$submission_id$artifact$hash$upload_status" ]] || die "invalid local preflight state: preflight state contains Apple submission, artifact, hash, or upload fields"
+    rotated="$STATE_DIR.preflight.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    mv "$STATE_DIR" "$rotated"
+    status "rotated non-submission preflight state to $rotated"
+    return 0
+  fi
+  [[ "$stage" == app || "$stage" == dmg || "$stage" == complete ]] || die "invalid local preflight state: unknown active stage '$stage'"
   if [[ "$stage" == complete ]]; then
     last_status=Accepted
   else
@@ -531,11 +624,12 @@ rotate_existing_state_for_new_build() {
 }
 
 start_new_submission() {
-  local source_zip="$DIST_DIR/Ollama-darwin.zip"
-  [[ -f "$source_zip" ]] || die "app ZIP is missing: $source_zip"
-  verify_app_bundle "$DIST_DIR/Ollama.app"
   rotate_existing_state_for_new_build
   state_initialize
+  state_set activeStage preflight
+  state_set preflightStatus local_preflight_incomplete
+  local source_zip="$STATE_DIR/Ollama-darwin.fresh.zip"
+  fresh_archive_preflight "$source_zip"
   preserve_artifact "$source_zip" "$STATE_DIR/Ollama-darwin.submitted.zip" app
   submit_artifact app "$(state_get appArtifactPath)"
   continue_after_app_acceptance
@@ -549,6 +643,10 @@ while [[ $# -gt 0 ]]; do
     --app-build-version) APP_BUILD_VERSION="${2:-}"; shift 2 ;;
     --timeout) TIMEOUT="${2:-}"; shift 2 ;;
     --resume) RESUME_ID="${2:-}"; shift 2 ;;
+    --preflight-archive) PREFLIGHT_ARCHIVE=1; shift ;;
+    --artifact-dir) PREFLIGHT_DIR="${2:-}"; shift 2 ;;
+    --signing-receipt) SIGNING_RECEIPT="${2:-}"; shift 2 ;;
+    --pre-sign-bundle) PRE_SIGN_BUNDLE="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac
@@ -557,6 +655,19 @@ done
 [[ "$(uname -s)" == Darwin || "${MLX_NOTARIZATION_TESTING:-0}" == 1 ]] || die "Darwin notarization must run on macOS"
 [[ -n "$RELEASE_REVISION" && -n "$RELEASE_VERSION" && -n "$APP_VERSION" && -n "$APP_BUILD_VERSION" ]] || { usage >&2; die "release and app identity arguments are required"; }
 [[ -n "$TIMEOUT" ]] || die "notary timeout must not be empty"
+if [[ "$PREFLIGHT_ARCHIVE" == 1 ]]; then
+  [[ -n "$PREFLIGHT_DIR" && -n "$SIGNING_RECEIPT" && -n "$PRE_SIGN_BUNDLE" ]] || die "preflight requires artifact dir, signed receipt, and pre-sign bundle"
+  case "$PREFLIGHT_DIR" in /*) ;; *) PREFLIGHT_DIR="$REPO_DIR/../$PREFLIGHT_DIR";; esac
+  case "$SIGNING_RECEIPT" in /*) ;; *) SIGNING_RECEIPT="$REPO_DIR/../$SIGNING_RECEIPT";; esac
+  case "$PRE_SIGN_BUNDLE" in /*) ;; *) PRE_SIGN_BUNDLE="$REPO_DIR/../$PRE_SIGN_BUNDLE";; esac
+  if [[ "${MLX_NOTARIZATION_TESTING:-0}" == 1 ]]; then
+    [[ ! -e "$PREFLIGHT_DIR" ]] || die "preflight artifact dir must be new"
+  else
+    [[ "$PREFLIGHT_DIR" == "$REPO_DIR/../tmp/"* && ! -e "$PREFLIGHT_DIR" ]] || die "preflight artifact dir must be new below tmp"
+  fi
+  mkdir -p "$PREFLIGHT_DIR"; fresh_archive_preflight "$PREFLIGHT_DIR/Ollama-darwin.fresh.zip"
+  exit 0
+fi
 for name in APPLE_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_PASSWORD; do
   [[ -n "${!name:-}" ]] || die "missing macOS signing environment variable: $name"
 done
