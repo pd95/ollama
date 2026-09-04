@@ -3,6 +3,8 @@ package mlx
 import (
 	"math"
 	"testing"
+
+	"github.com/ollama/ollama/x/internal/mlxthreadtest"
 )
 
 func TestCheckedMoESpan(t *testing.T) {
@@ -96,8 +98,7 @@ func validateMoEExpertIDsForTest(expertIDs *Array, experts int) bool {
 }
 
 func TestValidateMoEInputs(t *testing.T) {
-	skipIfNoMLX(t)
-	withMLXThread(t, func() {
+	withMLXThread(t, func(t *mlxthreadtest.T) {
 		valid := newMoETestInputs([]uint32{1})
 		if _, ok := validateMoEGateUpInputs(valid.input, valid.weight, valid.scales, valid.bias, valid.upWeight, valid.upScales, valid.upBias, valid.expertIDs, 4, 32, 1); !ok {
 			t.Fatal("valid gate/up inputs rejected")
@@ -180,18 +181,15 @@ func TestValidateMoEInputs(t *testing.T) {
 				return ok
 			}},
 		} {
-			t.Run(tt.name, func(t *testing.T) {
-				if tt.fn() {
-					t.Fatal("malformed inputs accepted")
-				}
-			})
+			if tt.fn() {
+				t.Fatalf("%s: malformed inputs accepted", tt.name)
+			}
 		}
 	})
 }
 
 func TestMoEFusedBoundsGuardMixedSelectors(t *testing.T) {
-	skipIfNoMLX(t)
-	withMLXThread(t, func() {
+	withMLXThread(t, func(t *mlxthreadtest.T) {
 		if !MetalIsAvailable() {
 			t.Skip("Metal is not available")
 		}
@@ -223,7 +221,7 @@ func TestMoEFusedBoundsGuardMixedSelectors(t *testing.T) {
 	})
 }
 
-func assertMoEGuardedRows(t *testing.T, got *Array, rows int, wantNonzero []bool) {
+func assertMoEGuardedRows(t *mlxthreadtest.T, got *Array, rows int, wantNonzero []bool) {
 	t.Helper()
 	wantShape := []int{len(wantNonzero), 1, rows}
 	if dims := got.Dims(); len(dims) != len(wantShape) {
