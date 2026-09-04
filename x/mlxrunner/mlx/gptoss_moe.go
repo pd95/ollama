@@ -304,22 +304,20 @@ if (tid * 2 < nSg) {
 `
 
 func initMoESwiGLUKernel() {
-	inputs, freeInputs, ok := cStringVector([]string{
+	inputs, freeInputs, err := cStringVector([]string{
 		"input", "gate_w", "gate_s", "gate_b",
 		"up_w", "up_s", "up_b",
 		"expert_ids", "swiglu_params",
 	})
-	if !ok {
+	if err != nil {
 		moeSwiGLUDisabled = true
-		freeInputs()
 		return
 	}
 	defer freeInputs()
 
-	outputs, freeOutputs, ok := cStringVector([]string{"output"})
-	if !ok {
+	outputs, freeOutputs, err := cStringVector([]string{"output"})
+	if err != nil {
 		moeSwiGLUDisabled = true
-		freeOutputs()
 		return
 	}
 	defer freeOutputs()
@@ -583,20 +581,18 @@ if (simd_is_first()) {
 `
 
 func initMoEDownKernel() {
-	inputs, freeInputs, ok := cStringVector([]string{
+	inputs, freeInputs, err := cStringVector([]string{
 		"input", "down_w", "down_s", "down_b", "expert_ids",
 	})
-	if !ok {
+	if err != nil {
 		moeDownDisabled = true
-		freeInputs()
 		return
 	}
 	defer freeInputs()
 
-	outputs, freeOutputs, ok := cStringVector([]string{"output"})
-	if !ok {
+	outputs, freeOutputs, err := cStringVector([]string{"output"})
+	if err != nil {
 		moeDownDisabled = true
-		freeOutputs()
 		return
 	}
 	defer freeOutputs()
