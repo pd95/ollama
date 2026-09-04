@@ -32,7 +32,7 @@ func TestDecodeApertusExtensibleFloatWAV(t *testing.T) {
 	binary.LittleEndian.PutUint32(data[68:], math.Float32bits(0.25))
 	binary.LittleEndian.PutUint32(data[72:], math.Float32bits(-0.5))
 
-	got, err := decodeApertusWAV(context.Background(), data, 24000)
+	got, err := decodeApertusAudio(context.Background(), data, 24000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestDecodeApertusExtensibleFloatWAV(t *testing.T) {
 }
 
 func TestPreprocessApertusMP3(t *testing.T) {
-	encoded, err := os.ReadFile("../../mlxrunner/media/testdata/synthetic_silence.mp3.base64")
+	encoded, err := os.ReadFile("../../mlxrunner/model/audio/testdata/synthetic_silence.mp3.base64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestPreprocessApertusMP3(t *testing.T) {
 
 func TestPreprocessApertusMalformedMP3(t *testing.T) {
 	cfg := AudioTokenizerConfig{SamplingRate: 24000, UpsamplingRatios: []int32{6, 5, 5, 4}}
-	if _, err := preprocessApertusAudio(context.Background(), []byte("ID3not-an-mp3"), cfg); err == nil || !strings.Contains(err.Error(), "decode MP3") {
+	if _, err := preprocessApertusAudio(context.Background(), []byte("ID3not-an-mp3"), cfg); err == nil || !strings.Contains(err.Error(), "decode Apertus audio") {
 		t.Fatalf("malformed MP3 error = %v", err)
 	}
 }

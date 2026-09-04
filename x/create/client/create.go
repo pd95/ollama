@@ -28,7 +28,6 @@ import (
 	"github.com/ollama/ollama/x/create"
 	imagemanifest "github.com/ollama/ollama/x/imagegen/manifest"
 	apertusmetadata "github.com/ollama/ollama/x/models/apertus/metadata"
-	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
 	"github.com/ollama/ollama/x/quant"
 )
 
@@ -605,9 +604,7 @@ func detectCapabilities(modelDir string) modelCapabilities {
 	}
 	vision := cfg.VisionConfig != nil || cfg.HasVision
 	audio := cfg.AudioConfig != nil || cfg.SoundConfig != nil
-	if isGemma4ModelConfig(cfg.Architectures, cfg.ModelType) {
-		vision, audio = gemma4ModelDirMediaCapabilities(modelDir)
-	} else if isApertus1p5ModelConfig(cfg.Architectures, cfg.ModelType) {
+	if isApertus1p5ModelConfig(cfg.Architectures, cfg.ModelType) {
 		media := detectApertus1p5MediaCapabilities(modelDir)
 		vision, audio = media.vision, media.audio
 	}

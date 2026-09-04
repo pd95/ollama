@@ -2,25 +2,20 @@ package apertus
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"slices"
 	"strings"
 
-	"github.com/ollama/ollama/llm"
-	mlxmedia "github.com/ollama/ollama/x/mlxrunner/media"
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
+	"github.com/ollama/ollama/x/mlxrunner/model/audio"
 	"github.com/ollama/ollama/x/models/nn"
 )
 
 const (
-	maxApertusAudioBytes      = 32 << 20
-	maxApertusAudioChannels   = 8
-	minApertusAudioSampleRate = 8_000
-	maxApertusAudioSampleRate = 192_000
-	maxApertusAudioSamples    = 24_000 * 600
+	maxApertusAudioBytes   = 32 << 20
+	maxApertusAudioSamples = 24_000 * 600
 )
 
 type AudioTokenizerConfig struct {
@@ -322,18 +317,7 @@ type apertusAudioInput struct {
 }
 
 func preprocessApertusAudio(ctx context.Context, data []byte, cfg AudioTokenizerConfig) (*apertusAudioInput, error) {
-	var samples []float32
-	var err error
-	if format, ok := llm.AudioFormat(data); ok && format == "mp3" {
-		samples, err = mlxmedia.DecodeMP3(ctx, data, mlxmedia.MP3DecodeOptions{
-			TargetSampleRate: int(cfg.SamplingRate),
-			MaxInputBytes:    maxApertusAudioBytes,
-			MaxSamples:       maxApertusAudioSamples,
-			Overflow:         mlxmedia.AudioOverflowReject,
-		})
-	} else {
-		samples, err = decodeApertusWAV(ctx, data, int(cfg.SamplingRate))
-	}
+	samples, err := decodeApertusAudio(ctx, data, int(cfg.SamplingRate))
 	if err != nil {
 		return nil, err
 	}
@@ -355,124 +339,22 @@ func preprocessApertusAudio(ctx context.Context, data []byte, cfg AudioTokenizer
 	return &apertusAudioInput{samples: samples, codes: (len(samples) + cfg.hopLength() - 1) / cfg.hopLength()}, nil
 }
 
-func decodeApertusWAV(ctx context.Context, data []byte, targetRate int) ([]float32, error) {
+func decodeApertusAudio(ctx context.Context, data []byte, targetRate int) ([]float32, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(data) > maxApertusAudioBytes {
 		return nil, fmt.Errorf("Apertus audio is %d bytes, limit %d", len(data), maxApertusAudioBytes)
 	}
-	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
-		return nil, errors.New("Apertus audio must be a RIFF/WAVE file")
+	samples, rate, err := audio.Decode(data)
+	if err != nil {
+		return nil, fmt.Errorf("decode Apertus audio: %w", err)
 	}
-	var format, channels, bits, align uint16
-	var rate uint32
-	var pcm []byte
-	for off := uint64(12); off+8 <= uint64(len(data)); {
-		start := int(off)
-		size := uint64(binary.LittleEndian.Uint32(data[start+4 : start+8]))
-		begin, end := off+8, off+8+size
-		if end < begin || end > uint64(len(data)) {
-			return nil, errors.New("truncated Apertus WAV chunk")
-		}
-		chunk := data[int(begin):int(end)]
-		switch string(data[start : start+4]) {
-		case "fmt ":
-			if len(chunk) < 16 {
-				return nil, errors.New("Apertus WAV fmt chunk is too short")
-			}
-			format = binary.LittleEndian.Uint16(chunk)
-			channels = binary.LittleEndian.Uint16(chunk[2:])
-			rate = binary.LittleEndian.Uint32(chunk[4:])
-			align = binary.LittleEndian.Uint16(chunk[12:])
-			bits = binary.LittleEndian.Uint16(chunk[14:])
-			if format == 0xfffe {
-				if len(chunk) < 40 || binary.LittleEndian.Uint16(chunk[16:]) < 22 {
-					return nil, errors.New("Apertus extensible WAV fmt chunk is too short")
-				}
-				guid := chunk[24:40]
-				standardTail := []byte{0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
-				if !slices.Equal(guid[4:], standardTail) {
-					return nil, errors.New("unsupported Apertus extensible WAV subformat")
-				}
-				format = uint16(binary.LittleEndian.Uint32(guid[:4]))
-			}
-		case "data":
-			if pcm == nil {
-				pcm = chunk
-			}
-		}
-		off = end + size%2
-	}
-	if format == 0 || pcm == nil {
-		return nil, errors.New("Apertus WAV is missing fmt or data")
-	}
-	if channels == 0 || channels > maxApertusAudioChannels {
-		return nil, fmt.Errorf("unsupported Apertus WAV channels %d", channels)
-	}
-	if rate < minApertusAudioSampleRate || rate > maxApertusAudioSampleRate {
-		return nil, fmt.Errorf("unsupported Apertus WAV sample rate %d", rate)
-	}
-	valid := format == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32) || format == 3 && bits == 32
-	if !valid {
-		return nil, fmt.Errorf("unsupported Apertus WAV encoding format=%d bits=%d", format, bits)
-	}
-	bps := int(bits / 8)
-	frameBytes := int(channels) * bps
-	if int(align) != frameBytes || len(pcm)%frameBytes != 0 {
-		return nil, errors.New("invalid Apertus WAV block alignment")
-	}
-	frames := len(pcm) / frameBytes
-	if int64(frames)*int64(targetRate) > int64(maxApertusAudioSamples)*int64(rate) {
+	if int64(len(samples))*int64(targetRate) > int64(maxApertusAudioSamples)*int64(rate) {
 		return nil, fmt.Errorf("Apertus audio exceeds %d output samples", maxApertusAudioSamples)
 	}
-	source := make([]float32, frames)
-	for i := range frames {
-		if i&4095 == 0 {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-		}
-		var sum float64
-		for ch := range int(channels) {
-			o := (i*int(channels) + ch) * bps
-			switch {
-			case format == 1 && bits == 8:
-				sum += (float64(pcm[o]) - 128) / 128
-			case format == 1 && bits == 16:
-				sum += float64(int16(binary.LittleEndian.Uint16(pcm[o:o+2]))) / 32768
-			case format == 1 && bits == 24:
-				v := int32(pcm[o]) | int32(pcm[o+1])<<8 | int32(pcm[o+2])<<16
-				if v&0x800000 != 0 {
-					v |= ^int32(0xffffff)
-				}
-				sum += float64(v) / 8388608
-			case format == 1 && bits == 32:
-				sum += float64(int32(binary.LittleEndian.Uint32(pcm[o:o+4]))) / 2147483648
-			case format == 3 && bits == 32:
-				v := math.Float32frombits(binary.LittleEndian.Uint32(pcm[o : o+4]))
-				if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-					return nil, errors.New("Apertus WAV contains non-finite samples")
-				}
-				sum += float64(v)
-			}
-		}
-		source[i] = float32(sum / float64(channels))
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	if int(rate) == targetRate {
-		return source, nil
-	}
-	outLen := (len(source)*targetRate + int(rate) - 1) / int(rate)
-	out := make([]float32, outLen)
-	for i := range out {
-		pos := float64(i) * float64(rate) / float64(targetRate)
-		lo := int(pos)
-		if lo >= len(source)-1 {
-			out[i] = source[len(source)-1]
-			continue
-		}
-		frac := float32(pos - float64(lo))
-		out[i] = source[lo]*(1-frac) + source[lo+1]*frac
-	}
-	return out, nil
+	return audio.Resample(samples, rate, targetRate), nil
 }

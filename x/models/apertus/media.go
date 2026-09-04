@@ -39,7 +39,8 @@ type apertusMediaPayload struct {
 // cache-identity item per source segment. Image geometry is inspected for the
 // whole request before pixels are materialized so every image shares one
 // deterministic memory-budget decision.
-func (m *Model) PrepareMedia(ctx context.Context, segments []base.Segment) (*base.PreparedRequest, error) {
+func (m *Model) PrepareMedia(segments []base.Segment) (*base.PreparedRequest, error) {
+	ctx := context.Background()
 	if !isApertus1p5Config(*m.Config) {
 		return nil, errors.New("Apertus media is only supported by Apertus 1.5")
 	}
