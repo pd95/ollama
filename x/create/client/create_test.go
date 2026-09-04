@@ -13,8 +13,6 @@ import (
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
 	apertusmetadata "github.com/ollama/ollama/x/models/apertus/metadata"
-	gemma4metadata "github.com/ollama/ollama/x/models/gemma4/metadata"
-	"github.com/ollama/ollama/x/safetensors"
 )
 
 func TestModelfileConfig(t *testing.T) {

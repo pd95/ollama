@@ -136,7 +136,7 @@ func TestBatchMediaLifecycle(t *testing.T) {
 }
 
 func TestBatchMediaStagedLifecycle(t *testing.T) {
-	skipIfNoMLX(t)
+	mlxtest.SkipIfUnavailable(t)
 
 	encodeCalls, stagedCalls, cuts := 0, 0, 0
 	prepared := &base.PreparedItem{Range: [2]int{1, 3}, MediaData: []float32{1, 2}, Dims: []int{2}}
