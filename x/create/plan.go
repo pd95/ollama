@@ -111,6 +111,13 @@ func Plan(inv Inventory, class Classification, policy quantizePolicy) ([]BlobSpe
 		}
 		return specs, checkOutputCollisions(specs)
 	}
+	if inv.Config.Architecture() == "Apertus1p5ForConditionalGeneration" {
+		var err error
+		inv, err = apertus1p5RuntimeInventory(inv)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	var (
 		specs []BlobSpec
@@ -133,6 +140,33 @@ func Plan(inv Inventory, class Classification, policy quantizePolicy) ([]BlobSpe
 		return nil, err
 	}
 	return specs, nil
+}
+
+func apertus1p5RuntimeInventory(inv Inventory) (Inventory, error) {
+	filtered := Inventory{
+		Dir:       inv.Dir,
+		Config:    inv.Config,
+		RawConfig: inv.RawConfig,
+		Tensors:   make(map[string]SourceTensor),
+	}
+	for name, tensor := range inv.Tensors {
+		if isApertus1p5RuntimeTensor(name) {
+			filtered.Tensors[name] = tensor
+		}
+	}
+	if len(filtered.Tensors) == 0 {
+		return Inventory{}, fmt.Errorf("apertus 1.5 planner found no runtime tensors")
+	}
+	for _, name := range []string{
+		"model.language_model.embed_tokens.weight",
+		"model.language_model.norm.weight",
+		"lm_head.weight",
+	} {
+		if _, ok := filtered.Tensors[name]; !ok {
+			return Inventory{}, fmt.Errorf("apertus 1.5 planner missing required tensor %s", name)
+		}
+	}
+	return filtered, nil
 }
 
 // checkOutputCollisions rejects a plan in which two source tensors normalized

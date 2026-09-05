@@ -5,6 +5,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
 	"github.com/ollama/ollama/x/mlxrunner/model"
 	"github.com/ollama/ollama/x/mlxrunner/model/base"
+	"github.com/ollama/ollama/x/tokenizer"
 )
 
 func TestRegistration(t *testing.T) {
@@ -19,7 +22,22 @@ func TestRegistration(t *testing.T) {
 		t.Skipf("MLX not available: %v", err)
 	}
 
-	root := minimalManifestRoot(t)
+	root := minimalManifestRoot(t, "ApertusForCausalLM")
+	got, err := base.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.(*Model); !ok {
+		t.Fatalf("base.New() returned %T, want *apertus.Model", got)
+	}
+}
+
+func TestApertus1p5Registration(t *testing.T) {
+	if err := mlx.CheckInit(); err != nil {
+		t.Skipf("MLX not available: %v", err)
+	}
+
+	root := minimalManifestRoot(t, "Apertus1p5ForConditionalGeneration")
 	got, err := base.New(root)
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +94,285 @@ func TestParseConfigApertus8B(t *testing.T) {
 	}
 	if cfg.RopeScaling.OriginalMaxPositionEmbeddings != 8192 {
 		t.Fatalf("OriginalMaxPositionEmbeddings = %d, want 8192", cfg.RopeScaling.OriginalMaxPositionEmbeddings)
+	}
+	if cfg.OutputVocabSize != cfg.VocabSize {
+		t.Fatalf("OutputVocabSize = %d, want VocabSize %d", cfg.OutputVocabSize, cfg.VocabSize)
+	}
+}
+
+func TestParseConfigApertus1p5Exact8B(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+		"architectures": ["Apertus1p5ForConditionalGeneration"],
+		"model_type": "apertus1p5",
+		"text_config": {
+			"attention_bias": false,
+			"dtype": "bfloat16",
+			"hidden_act": "xielu",
+			"hidden_size": 4096,
+			"intermediate_size": 21504,
+			"max_position_embeddings": 262144,
+			"mlp_bias": false,
+			"model_type": "apertus1p5_text",
+			"num_attention_heads": 32,
+			"num_hidden_layers": 32,
+			"num_key_value_heads": 8,
+			"output_vocab_size": 131072,
+			"post_norm": false,
+			"qk_norm": true,
+			"rms_norm_eps": 0.00001,
+			"rope_parameters": {
+				"factor": 32.0,
+				"high_freq_factor": 4.0,
+				"low_freq_factor": 1.0,
+				"original_max_position_embeddings": 8192,
+				"rope_theta": 4000000,
+				"rope_type": "llama3"
+			},
+			"tie_word_embeddings": false,
+			"vocab_size": 266752
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Architecture != "Apertus1p5ForConditionalGeneration" {
+		t.Fatalf("Architecture = %q", cfg.Architecture)
+	}
+	if cfg.ModelType != "apertus1p5_text" {
+		t.Fatalf("ModelType = %q", cfg.ModelType)
+	}
+	if cfg.VocabSize != 266752 || cfg.OutputVocabSize != 131072 {
+		t.Fatalf("vocab/output vocab = %d/%d, want 266752/131072", cfg.VocabSize, cfg.OutputVocabSize)
+	}
+	if cfg.MaxPositionEmbeddings != 262144 {
+		t.Fatalf("MaxPositionEmbeddings = %d, want 262144", cfg.MaxPositionEmbeddings)
+	}
+	if cfg.RopeTheta != 4000000 {
+		t.Fatalf("RopeTheta = %v, want 4000000", cfg.RopeTheta)
+	}
+	if cfg.RopeScaling.Factor != 32 {
+		t.Fatalf("RopeScaling.Factor = %v, want 32", cfg.RopeScaling.Factor)
+	}
+}
+
+func TestApertus1p5TokenizerAddedTokenLimit(t *testing.T) {
+	data := []byte(`{
+		"model": {
+			"type": "BPE",
+			"vocab": {"a": 0},
+			"merges": []
+		},
+		"added_tokens": [
+			{"id": -1, "content": "<|negative|>", "special": true},
+			{"id": 61, "content": "<|system_start|>", "special": true},
+			{"id": 73, "content": "<|tool_output_start|>", "special": true},
+			{"id": 131073, "content": "<|img_start|>", "special": true},
+			{"id": 262344, "content": "<|audio token 0|>", "special": true},
+			{"id": 266752, "content": "<|overflow|>", "special": true}
+		]
+	}`)
+
+	cfg := Config{
+		Architecture:    apertus1p5Architecture,
+		VocabSize:       266752,
+		OutputVocabSize: 131072,
+	}
+	tokConfig := tokenizerConfigForModel(cfg, nil)
+	if tokConfig.AddedTokenIDLimit != cfg.VocabSize {
+		t.Fatalf("AddedTokenIDLimit = %d, want input VocabSize %d", tokConfig.AddedTokenIDLimit, cfg.VocabSize)
+	}
+	tok, err := tokenizer.LoadFromBytesWithConfig(data, tokConfig)
+	if err != nil {
+		t.Fatalf("load bounded Apertus tokenizer: %v", err)
+	}
+
+	want := []struct {
+		id      int32
+		content string
+	}{
+		{id: 61, content: "<|system_start|>"},
+		{id: 73, content: "<|tool_output_start|>"},
+		{id: 131073, content: "<|img_start|>"},
+		{id: 262344, content: "<|audio token 0|>"},
+	}
+	for _, wantToken := range want {
+		id, ok := tok.GetSpecialToken(wantToken.content)
+		if !ok || id != wantToken.id {
+			t.Fatalf("GetSpecialToken(%q) = (%d, %v), want (%d, true)", wantToken.content, id, ok, wantToken.id)
+		}
+	}
+	for _, filtered := range []string{"<|negative|>", "<|overflow|>"} {
+		if id, ok := tok.GetSpecialToken(filtered); ok {
+			t.Fatalf("GetSpecialToken(%q) = (%d, true), want absent", filtered, id)
+		}
+	}
+
+	input := "a<|system_start|><|tool_output_start|><|img_start|><|audio token 0|>"
+	wantIDs := []int32{0, 61, 73, 131073, 262344}
+	if got := tok.Encode(input, false); !reflect.DeepEqual(got, wantIDs) {
+		t.Fatalf("Encode(%q) = %v, want %v", input, got, wantIDs)
+	}
+	if got := tok.Decode(wantIDs); got != input {
+		t.Fatalf("Decode(%v) = %q, want %q", wantIDs, got, input)
+	}
+}
+
+func TestAddedTokenIDLimitIsApertus1p5Only(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want int32
+	}{
+		{name: "Apertus 1.0", cfg: Config{Architecture: apertus1p0Architecture, VocabSize: 128}},
+		{name: "Apertus 1.1 Mini", cfg: Config{Architecture: apertus1p0Architecture, VocabSize: 131072, MaxPositionEmbeddings: 4096, RopeTheta: 500000}},
+		{name: "Apertus 1.5 uses input vocabulary", cfg: Config{Architecture: apertus1p5Architecture, VocabSize: 128, OutputVocabSize: 64}, want: 128},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tokenizerConfigForModel(tt.cfg, nil).AddedTokenIDLimit
+			if got != tt.want {
+				t.Fatalf("AddedTokenIDLimit = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseConfigApertus1p5Synthetic70B(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+		"architectures": ["Apertus1p5ForConditionalGeneration"],
+		"model_type": "apertus1p5",
+		"text_config": {
+			"dtype": "bfloat16",
+			"hidden_act": "xielu",
+			"hidden_size": 8192,
+			"intermediate_size": 43008,
+			"max_position_embeddings": 262144,
+			"model_type": "apertus1p5_text",
+			"num_attention_heads": 64,
+			"num_hidden_layers": 80,
+			"num_key_value_heads": 8,
+			"output_vocab_size": 131072,
+			"qk_norm": true,
+			"rms_norm_eps": 0.00001,
+			"rope_parameters": {
+				"factor": 32.0,
+				"high_freq_factor": 4.0,
+				"low_freq_factor": 1.0,
+				"original_max_position_embeddings": 8192,
+				"rope_theta": 4000000,
+				"rope_type": "llama3"
+			},
+			"vocab_size": 266752
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HiddenSize != 8192 || cfg.IntermediateSize != 43008 || cfg.NumHiddenLayers != 80 ||
+		cfg.NumAttentionHeads != 64 || cfg.NumKeyValueHeads != 8 || cfg.HeadDim != 128 {
+		t.Fatalf("70B dimensions were not preserved: %+v", cfg)
+	}
+	if cfg.VocabSize != 266752 || cfg.OutputVocabSize != 131072 || cfg.MaxPositionEmbeddings != 262144 {
+		t.Fatalf("70B composite vocabulary/context = %d/%d/%d", cfg.VocabSize, cfg.OutputVocabSize, cfg.MaxPositionEmbeddings)
+	}
+}
+
+func TestParseConfigApertus1p5RequiresRopeParameters(t *testing.T) {
+	_, err := parseConfig([]byte(`{
+		"architectures": ["Apertus1p5ForConditionalGeneration"],
+		"text_config": {
+			"hidden_size": 16,
+			"intermediate_size": 32,
+			"num_hidden_layers": 1,
+			"num_attention_heads": 4,
+			"num_key_value_heads": 2,
+			"max_position_embeddings": 64,
+			"hidden_act": "xielu",
+			"qk_norm": true,
+			"vocab_size": 128
+		}
+	}`))
+	if err == nil || !strings.Contains(err.Error(), "missing rope_parameters.rope_theta") {
+		t.Fatalf("parseConfig error = %v, want missing rope_parameters.rope_theta", err)
+	}
+}
+
+func TestApertus1p5MediaLoaderRequiresValidIndependentConfig(t *testing.T) {
+	tensors := map[string]*mlx.Array{
+		"model.vision_tokenizer.present": mlx.New("vision"),
+		"model.audio_tokenizer.present":  mlx.New("audio"),
+	}
+	vision := VisionTokenizerConfig{
+		AttnResolutions: []int32{16}, BaseChannels: 256, ChannelMultiplier: []int32{1, 1, 2, 2, 4},
+		CodebookSize: 131072, EmbedDim: 256, InChannels: 3, LatentChannels: 256,
+		NumResBlocks: 4, Resolution: 256,
+	}
+	audio := AudioTokenizerConfig{
+		AudioChannels: 1, CodebookDim: 512, CodebookSize: 4096, Compress: 2,
+		DilationGrowthRate: 2, HiddenSize: 512, KernelSize: 7, LastKernelSize: 7,
+		NormType: "weight_norm", NumFilters: 32, NumLSTMLayers: 2, NumResidualLayers: 1,
+		PadMode: "reflect", ResidualKernelSize: 3, SamplingRate: 24000,
+		UpsamplingRatios: []int32{6, 5, 5, 4}, UseConvShortcut: true,
+	}
+	if err := vision.validate(); err != nil {
+		t.Fatalf("supported vision config rejected: %v", err)
+	}
+	if err := audio.validate(); err != nil {
+		t.Fatalf("supported audio config rejected: %v", err)
+	}
+	if !canValidateVisionTokenizer(tensors, vision) || !canValidateAudioTokenizer(tensors, audio) {
+		t.Fatal("supported independent media configs were suppressed")
+	}
+	if err := (VisionTokenizerConfig{}).validate(); err == nil {
+		t.Fatal("missing vision config accepted")
+	}
+	invalidVision := vision
+	invalidVision.Resolution = 512
+	if err := invalidVision.validate(); err == nil {
+		t.Fatal("invalid vision config accepted")
+	}
+	if canValidateVisionTokenizer(tensors, invalidVision) || !canValidateAudioTokenizer(tensors, audio) {
+		t.Fatal("invalid vision config did not suppress only vision")
+	}
+	if err := (AudioTokenizerConfig{}).validate(); err == nil {
+		t.Fatal("missing audio config accepted")
+	}
+	invalidAudio := audio
+	invalidAudio.SamplingRate = 16000
+	if err := invalidAudio.validate(); err == nil {
+		t.Fatal("invalid audio config accepted")
+	}
+	if canValidateAudioTokenizer(tensors, invalidAudio) || !canValidateVisionTokenizer(tensors, vision) {
+		t.Fatal("invalid audio config did not suppress only audio")
+	}
+}
+
+func TestParseConfigRejectsInvalidOutputVocab(t *testing.T) {
+	_, err := parseConfig([]byte(`{
+		"architectures": ["ApertusForCausalLM"],
+		"hidden_size": 16,
+		"intermediate_size": 32,
+		"num_hidden_layers": 1,
+		"num_attention_heads": 4,
+		"num_key_value_heads": 2,
+		"max_position_embeddings": 64,
+		"rope_theta": 12000000,
+		"rope_scaling": {
+			"factor": 8,
+			"high_freq_factor": 4,
+			"low_freq_factor": 1,
+			"original_max_position_embeddings": 8192,
+			"rope_type": "llama3"
+		},
+		"hidden_act": "xielu",
+		"qk_norm": true,
+		"rms_norm_eps": 1e-5,
+		"vocab_size": 128,
+		"output_vocab_size": 129
+	}`))
+	if err == nil || !strings.Contains(err.Error(), "invalid output_vocab_size") {
+		t.Fatalf("parseConfig error = %v, want invalid output_vocab_size", err)
 	}
 }
 
@@ -475,45 +772,110 @@ func TestCacheCount(t *testing.T) {
 
 func tinyConfig() *Config {
 	return &Config{
+		Architecture: apertus1p0Architecture, prefix: "model.",
 		HiddenSize: 16, IntermediateSize: 32, NumHiddenLayers: 1, NumAttentionHeads: 4,
-		NumKeyValueHeads: 2, VocabSize: 128, HeadDim: 4, QuantMode: "", TensorQuant: map[string]*model.TensorQuantInfo{},
+		NumKeyValueHeads: 2, VocabSize: 128, OutputVocabSize: 128, HeadDim: 4, QuantMode: "", TensorQuant: map[string]*model.TensorQuantInfo{},
 	}
 }
 
 func tinyDenseTensors(cfg *Config) map[string]*mlx.Array {
 	hidden, intermediate, vocab := int(cfg.HiddenSize), int(cfg.IntermediateSize), int(cfg.VocabSize)
+	outputVocab := int(cfg.OutputVocabSize)
+	prefix, err := tensorPrefixForArchitecture(cfg.Architecture)
+	if err != nil {
+		panic(err)
+	}
 	qOut, kvOut, headDim := int(cfg.NumAttentionHeads*cfg.HeadDim), int(cfg.NumKeyValueHeads*cfg.HeadDim), int(cfg.HeadDim)
 	tensors := map[string]*mlx.Array{
-		"model.embed_tokens.weight": mlx.Zeros(mlx.DTypeBFloat16, vocab, hidden),
-		"model.norm.weight":         mlx.Zeros(mlx.DTypeBFloat16, hidden),
-		"lm_head.weight":            mlx.Zeros(mlx.DTypeBFloat16, vocab, hidden),
+		prefix + "embed_tokens.weight": mlx.Zeros(mlx.DTypeBFloat16, vocab, hidden),
+		prefix + "norm.weight":         mlx.Zeros(mlx.DTypeBFloat16, hidden),
+		"lm_head.weight":               mlx.Zeros(mlx.DTypeBFloat16, outputVocab, hidden),
 	}
 	for i := range cfg.NumHiddenLayers {
-		prefix := fmt.Sprintf("model.layers.%d", i)
-		tensors[prefix+".attention_layernorm.weight"] = mlx.Zeros(mlx.DTypeBFloat16, hidden)
-		tensors[prefix+".feedforward_layernorm.weight"] = mlx.Zeros(mlx.DTypeBFloat16, hidden)
-		tensors[prefix+".self_attn.q_norm.weight"] = mlx.Zeros(mlx.DTypeBFloat16, headDim)
-		tensors[prefix+".self_attn.k_norm.weight"] = mlx.Zeros(mlx.DTypeBFloat16, headDim)
-		tensors[prefix+".self_attn.q_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, qOut, hidden)
-		tensors[prefix+".self_attn.k_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, kvOut, hidden)
-		tensors[prefix+".self_attn.v_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, kvOut, hidden)
-		tensors[prefix+".self_attn.o_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, hidden, hidden)
-		tensors[prefix+".mlp.up_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, intermediate, hidden)
-		tensors[prefix+".mlp.down_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, hidden, intermediate)
-		tensors[prefix+".mlp.act_fn.alpha_p"] = mlx.Zeros(mlx.DTypeBFloat16, 1)
-		tensors[prefix+".mlp.act_fn.alpha_n"] = mlx.Zeros(mlx.DTypeBFloat16, 1)
-		tensors[prefix+".mlp.act_fn.beta"] = mlx.Zeros(mlx.DTypeBFloat16)
-		tensors[prefix+".mlp.act_fn.eps"] = mlx.Zeros(mlx.DTypeBFloat16)
+		layerPrefix := fmt.Sprintf("%slayers.%d", prefix, i)
+		tensors[layerPrefix+".attention_layernorm.weight"] = mlx.Zeros(mlx.DTypeBFloat16, hidden)
+		tensors[layerPrefix+".feedforward_layernorm.weight"] = mlx.Zeros(mlx.DTypeBFloat16, hidden)
+		tensors[layerPrefix+".self_attn.q_norm.weight"] = mlx.Zeros(mlx.DTypeBFloat16, headDim)
+		tensors[layerPrefix+".self_attn.k_norm.weight"] = mlx.Zeros(mlx.DTypeBFloat16, headDim)
+		tensors[layerPrefix+".self_attn.q_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, qOut, hidden)
+		tensors[layerPrefix+".self_attn.k_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, kvOut, hidden)
+		tensors[layerPrefix+".self_attn.v_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, kvOut, hidden)
+		tensors[layerPrefix+".self_attn.o_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, hidden, hidden)
+		tensors[layerPrefix+".mlp.up_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, intermediate, hidden)
+		tensors[layerPrefix+".mlp.down_proj.weight"] = mlx.Zeros(mlx.DTypeBFloat16, hidden, intermediate)
+		tensors[layerPrefix+".mlp.act_fn.alpha_p"] = mlx.Zeros(mlx.DTypeBFloat16, 1)
+		tensors[layerPrefix+".mlp.act_fn.alpha_n"] = mlx.Zeros(mlx.DTypeBFloat16, 1)
+		tensors[layerPrefix+".mlp.act_fn.beta"] = mlx.Zeros(mlx.DTypeBFloat16)
+		tensors[layerPrefix+".mlp.act_fn.eps"] = mlx.Zeros(mlx.DTypeBFloat16)
 	}
 	return tensors
 }
 
-func minimalManifestRoot(t *testing.T) *model.Root {
+func TestTensorNamespaceSelectedByArchitecture(t *testing.T) {
+	if err := mlx.CheckInit(); err != nil {
+		t.Skipf("MLX not available: %v", err)
+	}
+
+	v1 := tinyConfig()
+	if err := validateTensors(tinyDenseTensors(v1), v1); err != nil {
+		t.Fatalf("valid Apertus 1.0 tensors rejected: %v", err)
+	}
+	v15 := *v1
+	v15.Architecture = apertus1p5Architecture
+	v15.prefix = "model.language_model."
+	v15.VocabSize = 256
+	v15.OutputVocabSize = 128
+	if err := validateTensors(tinyDenseTensors(&v15), &v15); err != nil {
+		t.Fatalf("valid Apertus 1.5 tensors rejected: %v", err)
+	}
+
+	t.Run("wrong namespace", func(t *testing.T) {
+		err := validateTensors(tinyDenseTensors(v1), &v15)
+		if err == nil || !strings.Contains(err.Error(), "unexpected Apertus 1.0 tensor namespace") {
+			t.Fatalf("validateTensors error = %v, want explicit wrong-namespace rejection", err)
+		}
+	})
+	t.Run("mixed namespace", func(t *testing.T) {
+		tensors := tinyDenseTensors(&v15)
+		tensors["model.norm.weight"] = mlx.Zeros(mlx.DTypeBFloat16, int(v15.HiddenSize))
+		err := validateTensors(tensors, &v15)
+		if err == nil || !strings.Contains(err.Error(), "unexpected Apertus 1.0 tensor namespace") {
+			t.Fatalf("validateTensors error = %v, want mixed-namespace rejection", err)
+		}
+	})
+	t.Run("missing selected namespace", func(t *testing.T) {
+		tensors := tinyDenseTensors(&v15)
+		delete(tensors, "model.language_model.norm.weight")
+		err := validateTensors(tensors, &v15)
+		if err == nil || !strings.Contains(err.Error(), `missing tensor "model.language_model.norm.weight"`) {
+			t.Fatalf("validateTensors error = %v, want selected-namespace missing tensor", err)
+		}
+	})
+	t.Run("output vocabulary", func(t *testing.T) {
+		tensors := tinyDenseTensors(&v15)
+		tensors["lm_head.weight"] = mlx.Zeros(mlx.DTypeBFloat16, int(v15.OutputVocabSize)+1, int(v15.HiddenSize))
+		if err := validateTensors(tensors, &v15); err == nil || !strings.Contains(err.Error(), "lm_head.weight") {
+			t.Fatalf("validateTensors error = %v, want output-vocabulary mismatch", err)
+		}
+	})
+	t.Run("explicit quantization mismatch", func(t *testing.T) {
+		tensors := tinyDenseTensors(&v15)
+		name := "model.language_model.layers.0.self_attn.q_proj.weight"
+		v15Quant := v15
+		v15Quant.TensorQuant = map[string]*model.TensorQuantInfo{name: {QuantType: "nvfp4", GroupSize: 16}}
+		err := validateTensors(tensors, &v15Quant)
+		if err == nil || !strings.Contains(err.Error(), "missing quantization companions") {
+			t.Fatalf("validateTensors error = %v, want explicit quantization mismatch", err)
+		}
+	})
+}
+
+func minimalManifestRoot(t *testing.T, architecture string) *model.Root {
 	t.Helper()
 
 	dir := t.TempDir()
-	configDigest := writeManifestBlob(t, dir, "config", []byte(`{
-		"architectures": ["ApertusForCausalLM"],
+	configJSON := `{
+		"architectures": [` + strconv.Quote(architecture) + `],
 		"model_type": "apertus",
 		"dtype": "bfloat16",
 		"hidden_size": 16,
@@ -538,7 +900,40 @@ func minimalManifestRoot(t *testing.T) *model.Root {
 		"tie_word_embeddings": false,
 		"rms_norm_eps": 1e-5,
 		"vocab_size": 3
-	}`))
+	}`
+	if architecture == "Apertus1p5ForConditionalGeneration" {
+		configJSON = `{
+			"architectures": ["Apertus1p5ForConditionalGeneration"],
+			"model_type": "apertus1p5",
+			"text_config": {
+				"dtype": "bfloat16",
+				"hidden_size": 16,
+				"intermediate_size": 32,
+				"num_hidden_layers": 1,
+				"num_attention_heads": 4,
+				"num_key_value_heads": 2,
+				"max_position_embeddings": 64,
+				"rope_parameters": {
+					"rope_theta": 4000000,
+					"factor": 32,
+					"high_freq_factor": 4,
+					"low_freq_factor": 1,
+					"original_max_position_embeddings": 8192,
+					"rope_type": "llama3"
+				},
+				"hidden_act": "xielu",
+				"qk_norm": true,
+				"post_norm": false,
+				"attention_bias": false,
+				"mlp_bias": false,
+				"tie_word_embeddings": false,
+				"rms_norm_eps": 1e-5,
+				"vocab_size": 6,
+				"output_vocab_size": 3
+			}
+		}`
+	}
+	configDigest := writeManifestBlob(t, dir, "config", []byte(configJSON))
 	tokenizerDigest := writeManifestBlob(t, dir, "tokenizer", []byte(`{
 		"model": {
 			"type": "BPE",
