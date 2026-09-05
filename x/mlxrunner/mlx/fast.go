@@ -4,11 +4,27 @@ package mlx
 import "C"
 
 import (
+	"fmt"
 	"unsafe"
 )
 
-func FastScaledDotProductAttention(q, k, v *Array, scale float32, mode string, mask *Array) *Array {
+func FastScaledDotProductAttention(q, k, v *Array, scale float32, mode string, mask *Array, sinkArr ...*Array) *Array {
 	sinks := New("")
+	if len(sinkArr) > 1 {
+		panic("mlx.FastScaledDotProductAttention: at most one sinks array is allowed")
+	}
+	if len(sinkArr) == 1 && sinkArr[0] != nil {
+		sinks = sinkArr[0]
+		if q == nil || !q.Valid() || sinks == nil || !sinks.Valid() {
+			panic("mlx.FastScaledDotProductAttention: query and sinks must be valid arrays")
+		}
+		if q.NumDims() != 4 {
+			panic(fmt.Sprintf("mlx.FastScaledDotProductAttention: query with sinks must have rank 4, got shape %v", q.Dims()))
+		}
+		if sinks.NumDims() != 1 || sinks.Dim(0) != q.Dim(1) || sinks.DType() != q.DType() {
+			panic(fmt.Sprintf("mlx.FastScaledDotProductAttention: sinks must have shape [heads]=[%d] and dtype %s for query %v, got shape %v dtype %s", q.Dim(1), q.DType(), q.Dims(), sinks.Dims(), sinks.DType()))
+		}
+	}
 	cMode := C.CString(mode)
 	defer C.free(unsafe.Pointer(cMode))
 
