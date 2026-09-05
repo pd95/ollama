@@ -2926,3 +2926,509 @@ func TestResponsesStreamConverter_FinalOutputKeepsStreamedItemOrder(t *testing.T
 		}
 	}
 }
+
+func customApplyPatchTool() ResponsesTool {
+	return ResponsesTool{
+		Type:   "custom",
+		Name:   "apply_patch",
+		Format: json.RawMessage(`{"type":"grammar","syntax":"lark","definition":"start: /.+/"}`),
+	}
+}
+
+func TestFromResponsesRequest_CustomApplyPatchPreservesInstructions(t *testing.T) {
+	description := "Use apply_patch to edit files. This is a FREEFORM tool; do not wrap the patch in JSON."
+	request := ResponsesRequest{Tools: []ResponsesTool{{
+		Type:        "custom",
+		Name:        "apply_patch",
+		Description: &description,
+		Format:      json.RawMessage(`{"type":"grammar","syntax":"lark","definition":"start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nupdate_hunk: \"*** Update File: \" filename LF\nend_patch: \"*** End Patch\" LF?\n"}`),
+	}}}
+
+	chat, err := FromResponsesRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Tools) != 1 {
+		t.Fatalf("tool count = %d, want 1: %#v", len(chat.Tools), chat.Tools)
+	}
+	if got, want := chat.Tools[0].Function.Description, description+"\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines."; got != want {
+		t.Fatalf("custom tool description = %q, want %q", got, want)
+	}
+
+	withExample := description + "\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines.\n\nExample complete input:\n*** Begin Patch\n*** Update File: path/to/file\n@@\n-old text\n+new text\n*** End Patch"
+	for _, model := range []string{"gemma4:12b-mlx", "qwen3:8b"} {
+		request.Model = model
+		chat, err = FromResponsesRequest(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := chat.Tools[0].Function.Description; got != withExample {
+			t.Fatalf("%s custom tool description = %q, want %q", model, got, withExample)
+		}
+	}
+	for _, model := range []string{"gptoss-mlx:20b-mxfp4", "gpt-oss:20b"} {
+		request.Model = model
+		chat, err = FromResponsesRequest(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := chat.Tools[0].Function.Description; got != description+"\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines." {
+			t.Fatalf("%s custom tool description = %q, want no example", model, got)
+		}
+	}
+
+	legacy, err := FromResponsesRequest(ResponsesRequest{Tools: []ResponsesTool{{Type: "custom", Name: "apply_patch"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := legacy.Tools[0].Function.Description, "Apply a patch to files. The input field must contain the complete raw patch text."; got != want {
+		t.Fatalf("legacy custom tool description = %q, want %q", got, want)
+	}
+
+	incompatible := "A different custom grammar"
+	chat, err = FromResponsesRequest(ResponsesRequest{Tools: []ResponsesTool{{
+		Type: "custom", Name: "apply_patch", Description: &incompatible,
+		Format: json.RawMessage(`{"type":"grammar","syntax":"lark","definition":"start: value\nvalue: /.+/"}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := chat.Tools[0].Function.Description; got != incompatible {
+		t.Fatalf("incompatible custom grammar changed description: %q", got)
+	}
+}
+
+func TestFromResponsesRequest_CustomApplyPatchSchemaGuidance(t *testing.T) {
+	request := ResponsesRequest{Tools: []ResponsesTool{{
+		Type:   "custom",
+		Name:   "apply_patch",
+		Format: json.RawMessage(`{"type":"grammar","syntax":"lark","definition":"start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nupdate_hunk: \"*** Update File: \" filename LF\nend_patch: \"*** End Patch\" LF?\n"}`),
+	}}}
+	for _, tt := range []struct {
+		name        string
+		model       string
+		wantExample bool
+	}{
+		{name: "non GPT OSS includes example", model: "gemma4:12b-mlx", wantExample: true},
+		{name: "GPT OSS omits example", model: "gpt-oss:20b", wantExample: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request.Model = tt.model
+			chat, err := FromResponsesRequest(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(chat.Tools[0].Function.Description, "Example complete input:"); got != tt.wantExample {
+				t.Fatalf("example presence = %v, want %v: %q", got, tt.wantExample, chat.Tools[0].Function.Description)
+			}
+			input, ok := chat.Tools[0].Function.Parameters.Properties.Get("input")
+			if !ok {
+				t.Fatal("missing apply_patch input schema")
+			}
+			if got, want := input.Description, "Complete raw patch text. Use the custom patch format guidance in this tool's description."; got != want {
+				t.Fatalf("input schema description = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func customApplyPatchCall(id, patch string) api.ToolCall {
+	return api.ToolCall{
+		ID: id,
+		Function: api.ToolCallFunction{
+			Name:      "apply_patch",
+			Arguments: testArgs(map[string]any{"input": patch}),
+		},
+	}
+}
+
+func TestFromResponsesRequest_CustomApplyPatchDeclarationAndHistory(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"
+	request := ResponsesRequest{
+		Tools: []ResponsesTool{
+			customApplyPatchTool(),
+			responsesFunction("get_weather"),
+			responsesNamespace("editor", responsesFunction("apply_patch")),
+			{Type: "web_search"},
+		},
+		Input: ResponsesInput{Items: []ResponsesInputItem{
+			ResponsesReasoningInput{EncryptedContent: "thinking"},
+			ResponsesCustomToolCall{Type: "custom_tool_call", CallID: "call_patch", Name: "apply_patch", Input: patch},
+			ResponsesCustomToolCallOutput{Type: "custom_tool_call_output", CallID: "call_patch", Output: "Done"},
+		}},
+	}
+
+	chat, err := FromResponsesRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Tools) != 4 {
+		t.Fatalf("tool count = %d, want 4: %#v", len(chat.Tools), chat.Tools)
+	}
+	wantNames := []string{"apply_patch", "get_weather", "editor__apply_patch", "web_search"}
+	for i, want := range wantNames {
+		if got := chat.Tools[i].Function.Name; got != want {
+			t.Fatalf("tool[%d].name = %q, want %q", i, got, want)
+		}
+	}
+	custom := chat.Tools[0]
+	input, ok := custom.Function.Parameters.Properties.Get("input")
+	if custom.Type != "function" || !ok || input.Type.String() != "string" || len(custom.Function.Parameters.Required) != 1 || custom.Function.Parameters.Required[0] != "input" {
+		t.Fatalf("custom schema = %#v", custom)
+	}
+	if len(chat.Messages) != 2 || chat.Messages[0].Thinking != "thinking" || len(chat.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("history messages = %#v", chat.Messages)
+	}
+	call := chat.Messages[0].ToolCalls[0]
+	gotInput, _ := call.Function.Arguments.Get("input")
+	if call.ID != "call_patch" || call.Function.Name != "apply_patch" || gotInput != patch {
+		t.Fatalf("history custom call = %#v", call)
+	}
+	if chat.Messages[1].Role != "tool" || chat.Messages[1].ToolCallID != "call_patch" || chat.Messages[1].Content != "Done" {
+		t.Fatalf("history custom output = %#v", chat.Messages[1])
+	}
+}
+
+func TestFromResponsesRequest_CustomApplyPatchCollisions(t *testing.T) {
+	functionDeclaration := responsesFunction("apply_patch")
+	customDeclaration := customApplyPatchTool()
+	functionHistory := ResponsesFunctionCall{Type: "function_call", CallID: "fc", Name: "apply_patch", Arguments: `{}`}
+	customHistory := ResponsesCustomToolCall{Type: "custom_tool_call", CallID: "ctc", Name: "apply_patch", Input: "patch"}
+
+	tests := []struct {
+		name  string
+		tools []ResponsesTool
+		items []ResponsesInputItem
+	}{
+		{name: "duplicate custom", tools: []ResponsesTool{customDeclaration, customDeclaration}},
+		{name: "nested custom", tools: []ResponsesTool{responsesNamespace("editor", customDeclaration)}},
+		{name: "unsupported declaration", tools: []ResponsesTool{{Type: "custom", Name: "shell"}}},
+		{name: "unsupported history", items: []ResponsesInputItem{ResponsesCustomToolCall{Type: "custom_tool_call", Name: "shell"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if chat, err := FromResponsesRequest(ResponsesRequest{Tools: test.tools, Input: ResponsesInput{Items: test.items}}); err == nil || chat != nil {
+				t.Fatalf("FromResponsesRequest() = (%#v, %v), want pre-dispatch rejection", chat, err)
+			}
+		})
+	}
+
+	accepted := []ResponsesRequest{
+		{Tools: []ResponsesTool{functionDeclaration, customDeclaration}},
+		{Tools: []ResponsesTool{customDeclaration, functionDeclaration}},
+		{Input: ResponsesInput{Items: []ResponsesInputItem{functionHistory, customHistory}}},
+		{Input: ResponsesInput{Items: []ResponsesInputItem{customHistory, functionHistory}}},
+		{Tools: []ResponsesTool{functionDeclaration}, Input: ResponsesInput{Items: []ResponsesInputItem{customHistory}}},
+		{Tools: []ResponsesTool{customDeclaration}, Input: ResponsesInput{Items: []ResponsesInputItem{functionHistory}}},
+		{Tools: []ResponsesTool{customDeclaration, responsesNamespace("editor", responsesFunction("apply_patch"))}},
+		{Tools: []ResponsesTool{responsesNamespace("editor", responsesFunction("apply_patch")), customDeclaration}},
+		{Tools: []ResponsesTool{customDeclaration}, Input: ResponsesInput{Items: []ResponsesInputItem{customHistory, ResponsesCustomToolCall{Type: "custom_tool_call", CallID: "ctc2", Name: "apply_patch"}}}},
+	}
+	for i, request := range accepted {
+		if _, err := FromResponsesRequest(request); err != nil {
+			t.Fatalf("accepted request[%d] rejected: %v", i, err)
+		}
+	}
+
+	chat, err := FromResponsesRequest(ResponsesRequest{Tools: []ResponsesTool{functionDeclaration, customDeclaration}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Tools) != 1 || chat.Tools[0].Function.Name != "apply_patch" {
+		t.Fatalf("mixed apply_patch tool identities = %#v", chat.Tools)
+	}
+
+	unrelated := responsesFunction("get_weather")
+	duplicateOrders := [][]ResponsesTool{
+		{customDeclaration, unrelated, customDeclaration, responsesFunction("other")},
+		{responsesFunction("other"), customDeclaration, unrelated, customDeclaration},
+	}
+	var duplicateError string
+	for i, tools := range duplicateOrders {
+		chat, err := FromResponsesRequest(ResponsesRequest{Tools: tools})
+		if err == nil || chat != nil {
+			t.Fatalf("duplicate order[%d] = (%#v, %v), want rejection", i, chat, err)
+		}
+		if i == 0 {
+			duplicateError = err.Error()
+		} else if err.Error() != duplicateError {
+			t.Fatalf("duplicate order errors differ:\nfirst: %s\nsecond: %s", duplicateError, err)
+		}
+	}
+}
+
+func TestFromResponsesRequest_CustomApplyPatchAdjacentAssistantMerge(t *testing.T) {
+	requestJSON := `{
+		"input": [
+			{"type":"custom_tool_call","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"patch prepared"}]},
+			{"type":"custom_tool_call_output","call_id":"call_patch","output":"Done"}
+		]
+	}`
+	var request ResponsesRequest
+	if err := json.Unmarshal([]byte(requestJSON), &request); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := FromResponsesRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Messages) != 2 || chat.Messages[0].Role != "assistant" || chat.Messages[0].Content != "patch prepared" || len(chat.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("adjacent assistant state = %#v", chat.Messages)
+	}
+	if chat.Messages[1].Role != "tool" || chat.Messages[1].ToolCallID != "call_patch" || chat.Messages[1].Content != "Done" {
+		t.Fatalf("custom output message = %#v", chat.Messages[1])
+	}
+}
+
+func TestFromResponsesRequest_RepeatedCustomApplyPatchHistoryPreservesCalls(t *testing.T) {
+	patches := []string{
+		"*** Begin Patch\n*** Add File: one.txt\n+one\n*** End Patch\n",
+		"*** Begin Patch\n*** Add File: two.txt\n+two\n*** End Patch\n\n",
+	}
+	request := ResponsesRequest{
+		Tools: []ResponsesTool{customApplyPatchTool()},
+		Input: ResponsesInput{Items: []ResponsesInputItem{
+			ResponsesCustomToolCall{Type: "custom_tool_call", CallID: "call_one", Name: "apply_patch", Input: patches[0]},
+			ResponsesCustomToolCall{Type: "custom_tool_call", CallID: "call_two", Name: "apply_patch", Input: patches[1]},
+		}},
+	}
+	chat, err := FromResponsesRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Messages) != 1 || len(chat.Messages[0].ToolCalls) != 2 {
+		t.Fatalf("repeated history messages = %#v", chat.Messages)
+	}
+	for i, call := range chat.Messages[0].ToolCalls {
+		input, ok := call.Function.Arguments.Get("input")
+		wantID := []string{"call_one", "call_two"}[i]
+		if call.ID != wantID || call.Function.Name != "apply_patch" || !ok || input != patches[i] {
+			t.Fatalf("history call[%d] = %#v input=%#v, want id=%q input=%q", i, call, input, wantID, patches[i])
+		}
+	}
+}
+
+func TestResponsesCustomApplyPatchNamespaceReverseOutputBothDeclarationOrders(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"
+	custom := customApplyPatchTool()
+	namespace := responsesNamespace("editor", responsesFunction("apply_patch"))
+	for _, test := range []struct {
+		name  string
+		tools []ResponsesTool
+	}{
+		{name: "custom then namespace", tools: []ResponsesTool{custom, namespace}},
+		{name: "namespace then custom", tools: []ResponsesTool{namespace, custom}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := ResponsesRequest{Tools: test.tools}
+			if _, err := FromResponsesRequest(request); err != nil {
+				t.Fatal(err)
+			}
+			items := ResponsesFunctionCallOutputItems(request, "fc_reverse_", []api.ToolCall{
+				customApplyPatchCall("call_custom", patch),
+				{ID: "call_namespaced", Function: api.ToolCallFunction{Name: "editor__apply_patch", Arguments: testArgs(map[string]any{"path": "file.txt"})}},
+			})
+			if len(items) != 2 {
+				t.Fatalf("output items = %#v", items)
+			}
+			if item := items[0]; item.ID != "ctc_reverse_0" || item.Type != "custom_tool_call" || item.CallID != "call_custom" || item.Name != "apply_patch" || item.Namespace != "" || item.Input != patch || item.Arguments != "" {
+				t.Fatalf("custom reverse item = %#v", item)
+			}
+			if item := items[1]; item.ID != "fc_reverse_1" || item.Type != "function_call" || item.CallID != "call_namespaced" || item.Name != "apply_patch" || item.Namespace != "editor" || item.Arguments != `{"path":"file.txt"}` || item.Input != "" {
+				t.Fatalf("namespace reverse item = %#v", item)
+			}
+		})
+	}
+}
+
+func TestResponsesCustomApplyPatchOutputClassification(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n\n"
+	request := ResponsesRequest{Tools: []ResponsesTool{
+		customApplyPatchTool(), responsesFunction("get_weather"), responsesNamespace("editor", responsesFunction("write")),
+	}}
+	items := ResponsesFunctionCallOutputItems(request, "fc_test_", []api.ToolCall{
+		customApplyPatchCall("call_patch", patch),
+		{ID: "call_flat", Function: api.ToolCallFunction{Name: "get_weather", Arguments: testArgs(map[string]any{"city": "SF"})}},
+		{ID: "call_ns", Function: api.ToolCallFunction{Name: "editor__write", Arguments: testArgs(map[string]any{"path": "a"})}},
+	})
+	if len(items) != 3 || items[0].Type != "custom_tool_call" || items[0].ID != "ctc_test_0" || items[0].CallID != "call_patch" || items[0].Name != "apply_patch" || items[0].Input != patch || items[0].Arguments != "" {
+		t.Fatalf("custom item = %#v", items)
+	}
+	if items[1].Type != "function_call" || items[1].Name != "get_weather" || items[1].Namespace != "" || items[2].Name != "write" || items[2].Namespace != "editor" {
+		t.Fatalf("mixed output identities = %#v", items)
+	}
+
+	malformed := []struct {
+		call          api.ToolCall
+		wantArguments string
+	}{
+		{call: api.ToolCall{ID: "missing", Function: api.ToolCallFunction{Name: "apply_patch", Arguments: testArgs(map[string]any{})}}, wantArguments: `{}`},
+		{call: api.ToolCall{ID: "number", Function: api.ToolCallFunction{Name: "apply_patch", Arguments: testArgs(map[string]any{"input": 1})}}, wantArguments: `{"input":1}`},
+		{call: customApplyPatchCall("prefix", "garbage\n"+patch), wantArguments: `{"input":"garbage\n*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n\n"}`},
+		{call: customApplyPatchCall("begin", "*** Begin Patch"), wantArguments: `{"input":"*** Begin Patch"}`},
+		{call: customApplyPatchCall("end", "*** Begin Patch\nx"), wantArguments: `{"input":"*** Begin Patch\nx"}`},
+		{call: customApplyPatchCall("trailing", "*** Begin Patch\nx\n*** End Patch\ngarbage"), wantArguments: `{"input":"*** Begin Patch\nx\n*** End Patch\ngarbage"}`},
+	}
+	for _, test := range malformed {
+		got := ResponsesFunctionCallOutputItems(request, "fc_bad_", []api.ToolCall{test.call})
+		if len(got) != 1 || got[0].Type != "function_call" || got[0].Arguments != test.wantArguments {
+			t.Fatalf("malformed %q output = %#v, want exact arguments %q", test.call.ID, got, test.wantArguments)
+		}
+	}
+}
+
+func TestResponsesStreamConverter_CustomApplyPatchFallbacks(t *testing.T) {
+	validPatch := "*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"
+	tests := []struct {
+		name    string
+		request ResponsesRequest
+		call    api.ToolCall
+		want    string
+	}{
+		{
+			name:    "malformed patch",
+			request: ResponsesRequest{Tools: []ResponsesTool{customApplyPatchTool()}},
+			call:    customApplyPatchCall("call_malformed", validPatch+"trailing garbage"),
+			want:    `{"input":"*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\ntrailing garbage"}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			converter := NewResponsesStreamConverter("resp_fallback", "msg_fallback", "test-model", test.request)
+			events := converter.Process(api.ChatResponse{Message: api.Message{ToolCalls: []api.ToolCall{test.call}}, Done: true})
+			wantArguments := test.want
+
+			var added, argumentDelta, argumentsDone, outputDone map[string]any
+			var terminal []any
+			wantEvents := []string{
+				"response.created",
+				"response.in_progress",
+				"response.output_item.added",
+				"response.function_call_arguments.delta",
+				"response.function_call_arguments.done",
+				"response.output_item.done",
+				"response.completed",
+			}
+			if len(events) != len(wantEvents) {
+				t.Fatalf("fallback event count = %d, want %d: %#v", len(events), len(wantEvents), events)
+			}
+			for i, event := range events {
+				if event.Event != wantEvents[i] {
+					t.Fatalf("fallback event[%d] = %q, want %q: %#v", i, event.Event, wantEvents[i], events)
+				}
+				data := event.Data.(map[string]any)
+				if strings.HasPrefix(event.Event, "response.custom_tool_call_input.") {
+					t.Fatalf("unexpected custom event %q: %#v", event.Event, data)
+				}
+				switch event.Event {
+				case "response.output_item.added":
+					item := data["item"].(map[string]any)
+					if item["type"] == "function_call" {
+						added = data
+					}
+				case "response.function_call_arguments.delta":
+					argumentDelta = data
+				case "response.function_call_arguments.done":
+					argumentsDone = data
+				case "response.output_item.done":
+					item := data["item"].(map[string]any)
+					if item["type"] == "function_call" {
+						outputDone = data
+					}
+				case "response.completed":
+					terminal = data["response"].(map[string]any)["output"].([]any)
+				}
+			}
+
+			if added == nil || argumentDelta == nil || argumentsDone == nil || outputDone == nil || len(terminal) != 1 {
+				t.Fatalf("incomplete function fallback lifecycle: added=%#v delta=%#v argsDone=%#v outputDone=%#v terminal=%#v", added, argumentDelta, argumentsDone, outputDone, terminal)
+			}
+			addedItem := added["item"].(map[string]any)
+			doneItem := outputDone["item"].(map[string]any)
+			terminalItem := terminal[0].(map[string]any)
+			if added["output_index"] != 0 || argumentDelta["output_index"] != 0 || argumentsDone["output_index"] != 0 || outputDone["output_index"] != 0 {
+				t.Fatalf("fallback indexes: added=%#v delta=%#v argsDone=%#v outputDone=%#v", added, argumentDelta, argumentsDone, outputDone)
+			}
+			if addedItem["id"] != argumentDelta["item_id"] || addedItem["id"] != argumentsDone["item_id"] || addedItem["id"] != doneItem["id"] || doneItem["id"] != terminalItem["id"] {
+				t.Fatalf("fallback item identity mismatch: added=%#v done=%#v terminal=%#v", addedItem, doneItem, terminalItem)
+			}
+			for label, item := range map[string]map[string]any{"added": addedItem, "output done": doneItem, "terminal": terminalItem} {
+				if item["type"] != "function_call" || item["call_id"] != test.call.ID || item["name"] != "apply_patch" {
+					t.Fatalf("fallback %s identity = %#v", label, item)
+				}
+				if _, ok := item["namespace"]; ok {
+					t.Fatalf("fallback %s invented namespace: %#v", label, item)
+				}
+				if _, ok := item["input"]; ok {
+					t.Fatalf("fallback %s invented custom input: %#v", label, item)
+				}
+			}
+			if addedItem["arguments"] != "" || argumentDelta["delta"] != wantArguments || argumentsDone["arguments"] != wantArguments || doneItem["arguments"] != wantArguments || terminalItem["arguments"] != wantArguments {
+				t.Fatalf("fallback arguments mismatch: added=%#v delta=%#v argsDone=%#v done=%#v terminal=%#v want=%q", addedItem, argumentDelta, argumentsDone, doneItem, terminalItem, wantArguments)
+			}
+		})
+	}
+}
+
+func TestResponsesStreamConverter_CustomApplyPatchMixedOrder(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"
+	request := ResponsesRequest{Tools: []ResponsesTool{
+		customApplyPatchTool(), responsesFunction("get_weather"), responsesNamespace("editor", responsesFunction("write")), {Type: "web_search"},
+	}}
+	converter := NewResponsesStreamConverter("resp_custom", "msg_custom", "test-model", request)
+	var events []ResponsesStreamEvent
+	events = append(events, converter.Process(api.ChatResponse{Message: api.Message{Thinking: "think"}})...)
+	search := ResponsesWebSearchCall{ID: "ws_1", Type: "web_search_call", Status: "completed", Action: &ResponsesWebSearchAction{Type: "search", Query: "q"}}
+	index, searchEvents := converter.StartWebSearchCall(search)
+	events = append(events, searchEvents...)
+	events = append(events, converter.FinishWebSearchCall(search, index)...)
+	events = append(events, converter.EmitFunctionCallItems([]api.ToolCall{
+		customApplyPatchCall("call_patch", patch),
+		{ID: "call_flat", Function: api.ToolCallFunction{Name: "get_weather", Arguments: testArgs(map[string]any{})}},
+		{ID: "call_ns", Function: api.ToolCallFunction{Name: "editor__write", Arguments: testArgs(map[string]any{})}},
+	})...)
+	events = append(events, converter.Process(api.ChatResponse{Done: true})...)
+
+	var customAdded, customDelta, customInputDone bool
+	doneByIndex := map[int]map[string]any{}
+	var final []any
+	for _, event := range events {
+		data := event.Data.(map[string]any)
+		switch event.Event {
+		case "response.output_item.added":
+			item := data["item"].(map[string]any)
+			customAdded = customAdded || item["type"] == "custom_tool_call" && item["input"] == ""
+		case "response.custom_tool_call_input.delta":
+			customDelta = data["delta"] == patch
+		case "response.custom_tool_call_input.done":
+			customInputDone = data["input"] == patch
+		case "response.output_item.done":
+			doneByIndex[data["output_index"].(int)] = data["item"].(map[string]any)
+		case "response.completed":
+			response := data["response"].(map[string]any)
+			final = response["output"].([]any)
+			tools := response["tools"].([]any)
+			if got := tools[0].(map[string]any)["format"].(json.RawMessage); string(got) != string(customApplyPatchTool().Format) {
+				t.Fatalf("custom format = %s", got)
+			}
+		}
+	}
+	if !customAdded || !customDelta || !customInputDone || len(final) != 5 {
+		t.Fatalf("custom stream lifecycle missing: added=%v delta=%v done=%v final=%#v", customAdded, customDelta, customInputDone, final)
+	}
+	wantTypes := []string{"reasoning", "web_search_call", "custom_tool_call", "function_call", "function_call"}
+	for i, raw := range final {
+		item := raw.(map[string]any)
+		if item["type"] != wantTypes[i] || item["id"] != doneByIndex[i]["id"] {
+			t.Fatalf("terminal[%d] = %#v, done = %#v", i, item, doneByIndex[i])
+		}
+	}
+	if final[2].(map[string]any)["call_id"] != "call_patch" || final[2].(map[string]any)["input"] != patch {
+		t.Fatalf("terminal custom item = %#v", final[2])
+	}
+	if final[4].(map[string]any)["name"] != "write" || final[4].(map[string]any)["namespace"] != "editor" {
+		t.Fatalf("terminal namespace item = %#v", final[4])
+	}
+}

@@ -228,6 +228,28 @@ func (o *ResponsesFunctionCallOutput) UnmarshalJSON(data []byte) error {
 
 func (ResponsesFunctionCallOutput) responsesInputItem() {}
 
+// ResponsesCustomToolCall represents an assistant custom/freeform tool call
+// in conversation history.
+type ResponsesCustomToolCall struct {
+	ID     string `json:"id,omitempty"`
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
+	Name   string `json:"name"`
+	Input  string `json:"input"`
+}
+
+func (ResponsesCustomToolCall) responsesInputItem() {}
+
+// ResponsesCustomToolCallOutput represents a custom/freeform tool result from
+// the client.
+type ResponsesCustomToolCallOutput struct {
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
+	Output string `json:"output"`
+}
+
+func (ResponsesCustomToolCallOutput) responsesInputItem() {}
+
 // ResponsesReasoningInput represents a reasoning item passed back as input.
 // This is used when the client sends previous reasoning back for context.
 type ResponsesReasoningInput struct {
@@ -271,6 +293,18 @@ func unmarshalResponsesInputItem(data []byte) (ResponsesInputItem, error) {
 		return fc, nil
 	case "function_call_output":
 		var output ResponsesFunctionCallOutput
+		if err := json.Unmarshal(data, &output); err != nil {
+			return nil, err
+		}
+		return output, nil
+	case "custom_tool_call":
+		var call ResponsesCustomToolCall
+		if err := json.Unmarshal(data, &call); err != nil {
+			return nil, err
+		}
+		return call, nil
+	case "custom_tool_call_output":
+		var output ResponsesCustomToolCallOutput
 		if err := json.Unmarshal(data, &output); err != nil {
 			return nil, err
 		}
@@ -354,7 +388,7 @@ type ResponsesText struct {
 // ResponsesTool represents a tool in the Responses API format.
 // Note: This differs from api.Tool which nests fields under "function".
 type ResponsesTool struct {
-	Type        string         `json:"type"` // "function", "namespace", or "web_search"
+	Type        string         `json:"type"` // "function", "namespace", "custom", or "web_search"
 	Name        string         `json:"name"`
 	Description *string        `json:"description"` // nullable but required
 	Strict      *bool          `json:"strict"`      // nullable but required
@@ -363,7 +397,8 @@ type ResponsesTool struct {
 	// Tools carries a "namespace" declaration's member functions. The
 	// Responses API groups related tools by domain under a namespace tool
 	// whose nested tools array holds the real function definitions.
-	Tools []ResponsesTool `json:"tools,omitempty"`
+	Tools  []ResponsesTool `json:"tools,omitempty"`
+	Format json.RawMessage `json:"format,omitempty"`
 }
 
 type ResponsesRequest struct {
@@ -462,7 +497,10 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 			// so the tool result immediately follows the call it answers.
 			var outputCallID string
 			if i+1 < len(r.Input.Items) {
-				if output, ok := r.Input.Items[i+1].(ResponsesFunctionCallOutput); ok {
+				switch output := r.Input.Items[i+1].(type) {
+				case ResponsesFunctionCallOutput:
+					outputCallID = output.CallID
+				case ResponsesCustomToolCallOutput:
 					outputCallID = output.CallID
 				}
 			}
@@ -502,7 +540,7 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 			toolCall := api.ToolCall{
 				ID: v.CallID,
 				Function: api.ToolCallFunction{
-					Name:      resolver.internalName(v.Namespace, v.Name),
+					Name:      resolver.internalName(responsesToolKindFunction, v.Namespace, v.Name),
 					Arguments: args,
 				},
 			}
@@ -540,6 +578,37 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 				Role:       "tool",
 				Content:    content,
 				Images:     images,
+				ToolCallID: v.CallID,
+			})
+		case ResponsesCustomToolCall:
+			args := api.NewToolCallFunctionArguments()
+			args.Set("input", v.Input)
+			toolCall := api.ToolCall{
+				ID: v.CallID,
+				Function: api.ToolCallFunction{
+					Name:      resolver.internalName(responsesToolKindCustom, "", v.Name),
+					Arguments: args,
+				},
+			}
+			if len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
+				lastMsg := &messages[len(messages)-1]
+				lastMsg.ToolCalls = append(lastMsg.ToolCalls, toolCall)
+				if pendingThinking != "" {
+					lastMsg.Thinking = pendingThinking
+					pendingThinking = ""
+				}
+			} else {
+				msg := api.Message{Role: "assistant", ToolCalls: []api.ToolCall{toolCall}}
+				if pendingThinking != "" {
+					msg.Thinking = pendingThinking
+					pendingThinking = ""
+				}
+				messages = append(messages, msg)
+			}
+		case ResponsesCustomToolCallOutput:
+			messages = append(messages, api.Message{
+				Role:       "tool",
+				Content:    v.Output,
 				ToolCallID: v.CallID,
 			})
 		case ResponsesWebSearchCall:
@@ -637,7 +706,15 @@ func WebSearchFunctionTool() api.Tool {
 	}
 }
 
+type responsesToolKind string
+
+const (
+	responsesToolKindFunction responsesToolKind = "function"
+	responsesToolKindCustom   responsesToolKind = "custom"
+)
+
 type responsesToolExternalName struct {
+	kind      responsesToolKind
 	namespace string
 	name      string
 }
@@ -661,27 +738,32 @@ type responsesNamespaceChild struct {
 }
 
 type responsesToolDeclaration struct {
+	kind        responsesToolKind
 	namespaceID uint64
 	name        string
 }
 
 type responsesToolResolver struct {
-	byExternal        map[responsesToolExternalName]responsesToolName
-	byInternal        map[string]responsesToolName
-	declarations      map[responsesToolDeclaration]struct{}
-	namespaceChildren map[responsesNamespaceChild]struct{}
-	nextNamespaceID   uint64
-	tools             []api.Tool
-	hasWebSearchTool  bool
+	byExternal          map[responsesToolExternalName]responsesToolName
+	byInternal          map[string]responsesToolName
+	declarations        map[responsesToolDeclaration]struct{}
+	namespaceChildren   map[responsesNamespaceChild]struct{}
+	nextNamespaceID     uint64
+	tools               []api.Tool
+	hasWebSearchTool    bool
+	hasCustomApplyPatch bool
+	applyPatchExample   bool
 }
 
 func newResponsesToolResolver(r ResponsesRequest) (*responsesToolResolver, error) {
 	resolver := &responsesToolResolver{
-		byExternal:        make(map[responsesToolExternalName]responsesToolName),
-		byInternal:        make(map[string]responsesToolName),
-		declarations:      make(map[responsesToolDeclaration]struct{}),
-		namespaceChildren: make(map[responsesNamespaceChild]struct{}),
-		hasWebSearchTool:  HasWebSearchTool(r.Tools),
+		byExternal:          make(map[responsesToolExternalName]responsesToolName),
+		byInternal:          make(map[string]responsesToolName),
+		declarations:        make(map[responsesToolDeclaration]struct{}),
+		namespaceChildren:   make(map[responsesNamespaceChild]struct{}),
+		hasWebSearchTool:    HasWebSearchTool(r.Tools),
+		hasCustomApplyPatch: hasCustomApplyPatch(r),
+		applyPatchExample:   applyPatchExampleForModel(r.Model),
 	}
 
 	for _, tool := range r.Tools {
@@ -693,14 +775,41 @@ func newResponsesToolResolver(r ResponsesRequest) (*responsesToolResolver, error
 	}
 
 	for _, item := range r.Input.Items {
-		if call, ok := item.(ResponsesFunctionCall); ok {
-			if _, err := resolver.register(call.Namespace, call.Name, nil, false); err != nil {
+		switch call := item.(type) {
+		case ResponsesFunctionCall:
+			if _, err := resolver.register(responsesToolKindFunction, call.Namespace, call.Name, nil, false); err != nil {
+				return nil, err
+			}
+		case ResponsesCustomToolCall:
+			if call.Name != "apply_patch" {
+				return nil, fmt.Errorf("unsupported responses custom tool call %q", call.Name)
+			}
+			if _, err := resolver.register(responsesToolKindCustom, "", call.Name, nil, false); err != nil {
 				return nil, err
 			}
 		}
 	}
 
 	return resolver, nil
+}
+
+func hasCustomApplyPatch(r ResponsesRequest) bool {
+	for _, tool := range r.Tools {
+		if tool.Type == "custom" && tool.Name == "apply_patch" {
+			return true
+		}
+	}
+	for _, item := range r.Input.Items {
+		if call, ok := item.(ResponsesCustomToolCall); ok && call.Name == "apply_patch" {
+			return true
+		}
+	}
+	return false
+}
+
+func applyPatchExampleForModel(model string) bool {
+	model = strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(strings.TrimSpace(model)))
+	return model != "" && !strings.HasPrefix(model, "gptoss")
 }
 
 func joinNamespaceToolName(namespace, name string) string {
@@ -761,13 +870,16 @@ func describeResponsesToolName(name responsesToolName) string {
 	if name.declared {
 		source = fmt.Sprintf(" declared at path %q", namespaceParts(name.declarationNode, name.external.name))
 	}
+	if name.external.kind == responsesToolKindCustom {
+		return fmt.Sprintf("custom tool %q%s", name.external.name, source)
+	}
 	if name.external.namespace == "" {
 		return fmt.Sprintf("flat function %q%s", name.external.name, source)
 	}
 	return fmt.Sprintf("namespace %q function %q%s", name.external.namespace, name.external.name, source)
 }
 
-func (r *responsesToolResolver) register(namespace, name string, declarationNode *responsesNamespaceNode, declaration bool) (responsesToolName, error) {
+func (r *responsesToolResolver) register(kind responsesToolKind, namespace, name string, declarationNode *responsesNamespaceNode, declaration bool) (responsesToolName, error) {
 	if name == "" {
 		return responsesToolName{}, fmt.Errorf("responses function name must not be empty")
 	}
@@ -775,10 +887,15 @@ func (r *responsesToolResolver) register(namespace, name string, declarationNode
 		return responsesToolName{}, fmt.Errorf("responses namespace %q function %q is already namespace-qualified", namespace, name)
 	}
 
-	external := responsesToolExternalName{namespace: namespace, name: name}
+	external := responsesToolExternalName{kind: kind, namespace: namespace, name: name}
 	internal := name
 	if namespace != "" {
 		internal = joinNamespaceToolName(namespace, name)
+	} else if kind == responsesToolKindFunction && name == "apply_patch" && r.hasCustomApplyPatch {
+		// Keep the custom tool's model-visible name stable for Codex. A client
+		// may also declare a flat function with that name; disambiguate only the
+		// model-facing function identity and map it back on Responses output.
+		internal = "apply_patch__function"
 	}
 	candidate := responsesToolName{external: external, internal: internal, declarationNode: declarationNode, declared: declaration}
 
@@ -787,7 +904,7 @@ func (r *responsesToolResolver) register(namespace, name string, declarationNode
 		if declarationNode != nil {
 			namespaceID = declarationNode.id
 		}
-		declarationID := responsesToolDeclaration{namespaceID: namespaceID, name: name}
+		declarationID := responsesToolDeclaration{kind: kind, namespaceID: namespaceID, name: name}
 		if _, ok := r.declarations[declarationID]; ok {
 			return responsesToolName{}, fmt.Errorf("duplicate responses tool declaration for %s", describeResponsesToolName(candidate))
 		}
@@ -812,8 +929,8 @@ func (r *responsesToolResolver) register(namespace, name string, declarationNode
 	return candidate, nil
 }
 
-func (r *responsesToolResolver) internalName(namespace, name string) string {
-	if resolved, ok := r.byExternal[responsesToolExternalName{namespace: namespace, name: name}]; ok {
+func (r *responsesToolResolver) internalName(kind responsesToolKind, namespace, name string) string {
+	if resolved, ok := r.byExternal[responsesToolExternalName{kind: kind, namespace: namespace, name: name}]; ok {
 		return resolved.internal
 	}
 	return name
@@ -826,6 +943,11 @@ func (r *responsesToolResolver) externalName(name string) (string, string) {
 	return name, ""
 }
 
+func (r *responsesToolResolver) customName(name string) (string, bool) {
+	resolved, ok := r.byInternal[name]
+	return resolved.external.name, ok && resolved.external.kind == responsesToolKindCustom
+}
+
 // convertTools expands one Responses declaration while registering every
 // model-visible function identity. Declaration expansion and identity
 // validation intentionally share this single recursive traversal.
@@ -833,14 +955,38 @@ func convertTools(t ResponsesTool, namespaceNode *responsesNamespaceNode, resolv
 	if t.Type == "web_search" && namespaceNode == nil {
 		return []api.Tool{WebSearchFunctionTool()}, nil
 	}
+	if t.Type == "custom" {
+		if namespaceNode != nil {
+			return nil, fmt.Errorf("responses custom tool %q must be top-level", t.Name)
+		}
+		if t.Name != "apply_patch" {
+			return nil, fmt.Errorf("unsupported responses custom tool %q", t.Name)
+		}
+		tool, err := convertTool(t, resolver.applyPatchExample)
+		if err != nil {
+			return nil, err
+		}
+		resolved, err := resolver.register(responsesToolKindCustom, "", t.Name, nil, true)
+		if err != nil {
+			return nil, err
+		}
+		tool.Function.Name = resolved.internal
+		return []api.Tool{tool}, nil
+	}
 
 	if t.Type != "namespace" {
-		tool, err := convertTool(t)
+		tool, err := convertTool(t, resolver.applyPatchExample)
 		if err != nil {
 			return nil, err
 		}
 		if t.Type != "function" {
 			return []api.Tool{tool}, nil
+		}
+		if resolver.hasCustomApplyPatch && namespaceNode == nil && t.Name == "apply_patch" {
+			// Codex may redundantly send a flat function declaration alongside
+			// its authoritative custom apply_patch tool. Only expose the custom
+			// tool to the model; otherwise tool selection becomes ambiguous.
+			return nil, nil
 		}
 
 		// The built-in tool retains upstream ownership of its private model name.
@@ -849,7 +995,7 @@ func convertTools(t ResponsesTool, namespaceNode *responsesNamespaceNode, resolv
 		}
 
 		namespace := qualifiedNamespace(namespaceNode)
-		resolved, err := resolver.register(namespace, t.Name, namespaceNode, true)
+		resolved, err := resolver.register(responsesToolKindFunction, namespace, t.Name, namespaceNode, true)
 		if err != nil {
 			return nil, err
 		}
@@ -884,7 +1030,17 @@ func convertTools(t ResponsesTool, namespaceNode *responsesNamespaceNode, resolv
 	return tools, nil
 }
 
-func convertTool(t ResponsesTool) (api.Tool, error) {
+func convertTool(t ResponsesTool, applyPatchExample bool) (api.Tool, error) {
+	if t.Type == "custom" && t.Name == "apply_patch" {
+		return api.Tool{
+			Type: "function",
+			Function: api.ToolFunction{
+				Name:        "apply_patch",
+				Description: applyPatchToolDescription(t, applyPatchExample),
+				Parameters:  applyPatchFunctionParameters(),
+			},
+		}, nil
+	}
 	// Convert parameters from map[string]any to api.ToolFunctionParameters
 	var params api.ToolFunctionParameters
 	if t.Parameters != nil {
@@ -911,6 +1067,67 @@ func convertTool(t ResponsesTool) (api.Tool, error) {
 			Parameters:  params,
 		},
 	}, nil
+}
+
+func applyPatchToolDescription(t ResponsesTool, includeExample bool) string {
+	description := "Apply a patch to files. The input field must contain the complete raw patch text."
+	if t.Description != nil && strings.TrimSpace(*t.Description) != "" {
+		description = *t.Description
+	}
+
+	if len(t.Format) == 0 || string(t.Format) == "null" {
+		return description
+	}
+
+	var format struct {
+		Type       string `json:"type"`
+		Syntax     string `json:"syntax"`
+		Definition string `json:"definition"`
+	}
+	if err := json.Unmarshal(t.Format, &format); err == nil &&
+		format.Type == "grammar" && format.Syntax == "lark" &&
+		strings.Contains(format.Definition, "*** Begin Patch") &&
+		strings.Contains(format.Definition, "*** Update File:") &&
+		strings.Contains(format.Definition, "*** End Patch") {
+		instructions := "\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines."
+		if includeExample {
+			instructions += "\n\nExample complete input:\n*** Begin Patch\n*** Update File: path/to/file\n@@\n-old text\n+new text\n*** End Patch"
+		}
+		return description + instructions
+	}
+
+	return description
+}
+
+func applyPatchFunctionParameters() api.ToolFunctionParameters {
+	properties := api.NewToolPropertiesMap()
+	properties.Set("input", api.ToolProperty{
+		Type:        api.PropertyType{"string"},
+		Description: "Complete raw patch text. Use the custom patch format guidance in this tool's description.",
+	})
+	return api.ToolFunctionParameters{
+		Type:       "object",
+		Required:   []string{"input"},
+		Properties: properties,
+	}
+}
+
+func applyPatchInput(toolCall api.ToolCall) (string, bool) {
+	if toolCall.Function.Name != "apply_patch" {
+		return "", false
+	}
+	input, ok := toolCall.Function.Arguments.Get("input")
+	if !ok {
+		return "", false
+	}
+	patch, ok := input.(string)
+	if !ok || !strings.HasPrefix(patch, "*** Begin Patch\n") {
+		return "", false
+	}
+	if !strings.HasSuffix(strings.TrimRight(patch, "\n"), "*** End Patch") {
+		return "", false
+	}
+	return patch, true
 }
 
 func convertInputMessage(m ResponsesInputMessage) (api.Message, error) {
@@ -1023,6 +1240,7 @@ type ResponsesOutputItem struct {
 	Name      string                    `json:"name,omitempty"`      // for function_call
 	Namespace string                    `json:"namespace,omitempty"` // for function_call
 	Arguments string                    `json:"arguments,omitempty"` // for function_call
+	Input     string                    `json:"input,omitempty"`     // for custom_tool_call
 	Action    *ResponsesWebSearchAction `json:"action,omitempty"`    // for web_search_call
 
 	// Reasoning fields
@@ -1225,6 +1443,21 @@ func ResponsesFunctionCallOutputItems(request ResponsesRequest, idPrefix string,
 	converted := ToToolCalls(toolCalls)
 	items := make([]ResponsesOutputItem, 0, len(converted))
 	for i, tc := range converted {
+		if resolver != nil {
+			if name, custom := resolver.customName(tc.Function.Name); custom {
+				if input, ok := applyPatchInput(toolCalls[i]); ok {
+					items = append(items, ResponsesOutputItem{
+						ID:     customToolCallItemID(idPrefix, i),
+						Type:   "custom_tool_call",
+						Status: "completed",
+						CallID: tc.ID,
+						Name:   name,
+						Input:  input,
+					})
+					continue
+				}
+			}
+		}
 		name, namespace := tc.Function.Name, ""
 		if resolver != nil {
 			name, namespace = resolver.externalName(tc.Function.Name)
@@ -1240,6 +1473,10 @@ func ResponsesFunctionCallOutputItems(request ResponsesRequest, idPrefix string,
 		})
 	}
 	return items
+}
+
+func customToolCallItemID(idPrefix string, index int) string {
+	return fmt.Sprintf("ctc_%s%d", strings.TrimPrefix(idPrefix, "fc_"), index)
 }
 
 // Streaming events: <https://platform.openai.com/docs/api-reference/responses-streaming>
@@ -1451,6 +1688,9 @@ func responsesToolsForStream(tools []ResponsesTool) []any {
 		if len(tool.Tools) > 0 {
 			value["tools"] = responsesToolsForStream(tool.Tools)
 		}
+		if tool.Format != nil {
+			value["format"] = tool.Format
+		}
 		converted = append(converted, value)
 	}
 	return converted
@@ -1552,6 +1792,37 @@ func (c *ResponsesStreamConverter) emitFunctionCallEvents(toolCalls []api.ToolCa
 
 	for i, tc := range converted {
 		outputIndex := c.outputIndex + i
+		if c.resolver != nil {
+			if name, custom := c.resolver.customName(tc.Function.Name); custom {
+				if input, ok := applyPatchInput(toolCalls[i]); ok {
+					itemID := fmt.Sprintf("ctc_%d_%d", rand.Intn(999999), i)
+					item := map[string]any{
+						"id": itemID, "type": "custom_tool_call", "status": "completed",
+						"call_id": tc.ID, "name": name, "input": input,
+					}
+					c.completedItems = append(c.completedItems, item)
+					events = append(events,
+						c.newEvent("response.output_item.added", map[string]any{
+							"output_index": outputIndex,
+							"item": map[string]any{
+								"id": itemID, "type": "custom_tool_call", "status": "in_progress",
+								"call_id": tc.ID, "name": name, "input": "",
+							},
+						}),
+						c.newEvent("response.custom_tool_call_input.delta", map[string]any{
+							"item_id": itemID, "output_index": outputIndex, "delta": input,
+						}),
+						c.newEvent("response.custom_tool_call_input.done", map[string]any{
+							"item_id": itemID, "output_index": outputIndex, "input": input,
+						}),
+						c.newEvent("response.output_item.done", map[string]any{
+							"output_index": outputIndex, "item": item,
+						}),
+					)
+					continue
+				}
+			}
+		}
 		fcItemID := fmt.Sprintf("fc_%d_%d", rand.Intn(999999), i)
 		name, namespace := tc.Function.Name, ""
 		if c.resolver != nil {
