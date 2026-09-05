@@ -364,7 +364,7 @@ func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 		capabilities = append(capabilities, "tools")
 	}
 
-	if caps.thinking || (builtinParser != nil && builtinParser.HasThinkingSupport()) {
+	if caps.thinking || (builtinParser != nil && builtinParser.HasThinkingSupport() && !isApertus1p0ModelDir(modelDir, parserName)) {
 		capabilities = append(capabilities, "thinking")
 	}
 
@@ -490,6 +490,9 @@ func inferModelFamily(modelDir string) string {
 		if isGPTOSSFamily(identifier) {
 			return "gptoss"
 		}
+		if isApertusFamily(identifier) {
+			return "apertus"
+		}
 	}
 
 	return ""
@@ -586,6 +589,38 @@ func detectCapabilities(modelDir string) modelCapabilities {
 	}
 }
 
+// isApertus1p0ModelDir recognizes the original text-only Apertus release.
+// Parser capability alone is insufficient because the legacy grammar can
+// parse inner spans for history compatibility even though the 1.0 checkpoint
+// itself was not trained to produce thinking output.
+func isApertus1p0ModelDir(modelDir, parserName string) bool {
+	if parserName != "apertus" {
+		return false
+	}
+
+	data, err := os.ReadFile(filepath.Join(modelDir, "config.json"))
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		Architectures []string `json:"architectures"`
+		ModelType     string   `json:"model_type"`
+		LLMConfig     struct {
+			ModelType string `json:"model_type"`
+		} `json:"llm_config"`
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return false
+	}
+
+	for _, identifier := range append(slices.Clone(cfg.Architectures), cfg.ModelType, cfg.LLMConfig.ModelType) {
+		if isApertusFamily(identifier) {
+			return true
+		}
+	}
+	return false
+}
+
 // readChatTemplate returns the model's chat template, preferring the
 // chat_template field of tokenizer_config.json and falling back to a standalone
 // chat_template.jinja. It returns "" when neither is present.
@@ -646,6 +681,15 @@ func isQwen4Family(s string) bool {
 func isGPTOSSFamily(s string) bool {
 	s = strings.ToLower(s)
 	return strings.Contains(s, "gptoss") || strings.Contains(s, "gpt_oss") || strings.Contains(s, "gpt-oss")
+}
+
+func isApertusFamily(s string) bool {
+	switch strings.ToLower(s) {
+	case "apertus", "apertusforcausallm":
+		return true
+	default:
+		return false
+	}
 }
 
 func qwen35RendererName(modelDir string) string {
@@ -728,6 +772,8 @@ func getParserName(modelDir string) string {
 func parserNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
+	case isApertusFamily(s):
+		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer"
 	case strings.Contains(s, "laguna"):
@@ -795,6 +841,8 @@ func getRendererName(modelDir string) string {
 func rendererNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
+	case isApertusFamily(s):
+		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer"
 	case strings.Contains(s, "laguna"):
