@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
@@ -21,6 +22,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/image/webp"
 
 	"github.com/ollama/ollama/fs/ggml"
 	"github.com/ollama/ollama/ml"
@@ -863,6 +866,11 @@ func TestLlamaServerCompletionContextShiftAvoidsOneTokenHeadroomRegression(t *te
 
 func TestLlamaServerCompletionWithMediaUsesRunnerMarker(t *testing.T) {
 	var capturedReq llamaServerCompletionRequest
+	webpData := testLlamaServerWebP(t)
+	converted, err := llamaServerMediaBytes(webpData)
+	if err != nil || http.DetectContentType(converted) != "image/png" {
+		t.Fatalf("convert WebP = %q, %v", http.DetectContentType(converted), err)
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
@@ -896,10 +904,10 @@ func TestLlamaServerCompletionWithMediaUsesRunnerMarker(t *testing.T) {
 	}
 
 	opts := api.DefaultOptions()
-	err := runner.Completion(t.Context(), CompletionRequest{
+	err = runner.Completion(t.Context(), CompletionRequest{
 		Prompt:  "look [img-7] now",
 		Options: &opts,
-		Media:   []MediaData{NewMediaData(7, []byte("media-bytes"))},
+		Media:   []MediaData{NewMediaData(7, webpData)},
 	}, func(cr CompletionResponse) {})
 	if err != nil {
 		t.Fatalf("Completion error: %v", err)
@@ -919,8 +927,22 @@ func TestLlamaServerCompletionWithMediaUsesRunnerMarker(t *testing.T) {
 	if len(data) != 1 {
 		t.Fatalf("multimodal_data len = %d, want 1", len(data))
 	}
-	if got, want := data[0], base64.StdEncoding.EncodeToString([]byte("media-bytes")); got != want {
+	if got, want := data[0], base64.StdEncoding.EncodeToString(converted); got != want {
 		t.Fatalf("multimodal_data[0] = %q, want %q", got, want)
+	}
+
+	overLimitWebP := append(append([]byte(nil), webpData...), make([]byte, 22<<20-len(webpData))...)
+	err = runner.Completion(t.Context(), CompletionRequest{
+		Prompt:  "look [img-0] [img-1] [img-2] now",
+		Options: &opts,
+		Media: []MediaData{
+			NewMediaData(0, overLimitWebP),
+			NewMediaData(1, overLimitWebP),
+			NewMediaData(2, overLimitWebP),
+		},
+	}, func(CompletionResponse) {})
+	if err == nil || !strings.Contains(err.Error(), "cumulative") {
+		t.Fatalf("completion cross-media raw limit error = %v", err)
 	}
 }
 
@@ -3634,7 +3656,7 @@ func TestLlamaServerChatMessageConvertsToolCalls(t *testing.T) {
 	args := api.NewToolCallFunctionArguments()
 	args.Set("command", "ls")
 
-	msg, err := llamaServerChatMessage(Message{
+	msg, _, err := llamaServerChatMessage(Message{
 		Role: "assistant",
 		ToolCalls: []api.ToolCall{{
 			ID: "call_1",
@@ -3670,7 +3692,7 @@ func TestLlamaServerChatMessageConvertsMediaParts(t *testing.T) {
 	wav := []byte("RIFF\x00\x00\x00\x00WAVE")
 	mp3 := []byte("ID3\x04\x00\x00")
 
-	msg, err := llamaServerChatMessage(Message{
+	msg, _, err := llamaServerChatMessage(Message{
 		Role:    "user",
 		Content: "describe these",
 		Media:   []MediaData{NewMediaData(0, png), NewMediaData(1, webp), NewMediaData(2, wav), NewMediaData(3, mp3)},
@@ -3708,6 +3730,104 @@ func TestLlamaServerChatMessageConvertsMediaParts(t *testing.T) {
 			t.Fatalf("expected base64 audio data for %s", want)
 		}
 	}
+}
+
+func TestLlamaServerChatRequestRejectsCumulativeMediaAcrossMessages(t *testing.T) {
+	data := make(api.ImageData, 22<<20)
+	copy(data, "ID3")
+	opts := api.DefaultOptions()
+	_, err := (&llamaServerRunner{}).llamaServerChatRequest(ChatRequest{
+		Options: &opts,
+		Messages: []api.Message{
+			{Role: "user", Images: []api.ImageData{data}},
+			{Role: "user", Images: []api.ImageData{data}},
+			{Role: "user", Images: []api.ImageData{data}},
+		},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "cumulative") {
+		t.Fatalf("cross-message media limit error = %v", err)
+	}
+}
+
+func TestLlamaServerChatMessageConvertsWebPToPNG(t *testing.T) {
+	webpData := testLlamaServerWebP(t)
+	msg, _, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, webpData)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := msg["content"].([]map[string]any)
+	imageURL := parts[0]["image_url"].(map[string]any)["url"].(string)
+	const prefix = "data:image/png;base64,"
+	if !strings.HasPrefix(imageURL, prefix) {
+		t.Fatalf("WebP URL = %q", imageURL[:min(len(imageURL), 64)])
+	}
+	pngData, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(imageURL, prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := png.Decode(bytes.NewReader(pngData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Bounds().Dx() <= 0 || img.Bounds().Dy() <= 0 {
+		t.Fatalf("converted bounds = %v", img.Bounds())
+	}
+	original, err := webp.Decode(bytes.NewReader(webpData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Bounds() != original.Bounds() {
+		t.Fatalf("converted bounds = %v, want %v", img.Bounds(), original.Bounds())
+	}
+	for y := img.Bounds().Min.Y; y < img.Bounds().Max.Y; y++ {
+		for x := img.Bounds().Min.X; x < img.Bounds().Max.X; x++ {
+			gr, gg, gb, ga := img.At(x, y).RGBA()
+			wr, wg, wb, wa := original.At(x, y).RGBA()
+			if gr != wr || gg != wg || gb != wb || ga != wa {
+				t.Fatalf("pixel (%d,%d) = (%d,%d,%d,%d), want (%d,%d,%d,%d)", x, y, gr, gg, gb, ga, wr, wg, wb, wa)
+			}
+		}
+	}
+
+	bad := append([]byte(nil), webpData[:20]...)
+	if _, _, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, bad)}}); err == nil || !strings.Contains(err.Error(), "WebP") {
+		t.Fatalf("malformed WebP error = %v", err)
+	}
+}
+
+func TestLlamaServerWebPRejectsLimits(t *testing.T) {
+	data := testLlamaServerWebP(t)
+	if len(data) < 25 || string(data[12:16]) != "VP8L" {
+		t.Fatalf("unexpected WebP fixture header")
+	}
+	const width, height = 4096, 4096
+	bits := uint32(width-1) | uint32(height-1)<<14
+	data[21] = byte(bits)
+	data[22] = byte(bits >> 8)
+	data[23] = byte(bits >> 16)
+	data[24] = byte(bits >> 24)
+	if _, err := llamaServerMediaBytes(data); err == nil || !strings.Contains(err.Error(), "dimensions") {
+		t.Fatalf("oversized WebP error = %v", err)
+	}
+	if _, err := addLlamaServerMediaBytes(maxLlamaServerMediaRequestBytes, 1); err == nil || !strings.Contains(err.Error(), "cumulative") {
+		t.Fatalf("cumulative media error = %v", err)
+	}
+	if got, err := addLlamaServerMediaBytes(maxLlamaServerMediaRequestBytes-1, 1); err != nil || got != maxLlamaServerMediaRequestBytes {
+		t.Fatalf("exact cumulative limit = %d, %v", got, err)
+	}
+	w := limitedBytesBuffer{max: 1}
+	if _, err := w.Write([]byte{1, 2}); err == nil || !strings.Contains(err.Error(), "PNG") {
+		t.Fatalf("PNG output limit error = %v", err)
+	}
+}
+
+func testLlamaServerWebP(t *testing.T) []byte {
+	t.Helper()
+	data, err := base64.StdEncoding.DecodeString("UklGRrIBAABXRUJQVlA4TKUBAAAvSsAYAA8w//M///MfeJAkbXvaSG7m8Q3GfYSBJekwQztm/IcZlgwnmWImn2BK7aFmBtnVir6q//8VOkFE/xm4baTIu8c48ArEo6+B3zFKYln3pqClSCKX0begFTAXFOLXHSyF8cCNcZEG4OywuA4KVVfJCiArU7GAgJI8+lJP/OKMT/fBAjevg1cYB7YVkFuWga2lyPi5I0HFy5YTpWIHg0RZpkniRVW9odHAKOwosWuOGdxIyn2OvaCDvhg/we6TwadPBPbqBV58MsLmMJ8yZnOWk8SRz4N+QoyPL+MnamzMvcE1rHNEr91F9GKZPVUcS9w7PhhH36suB9qPeYb/oLk6cuTiJ0wOK3m5h1cKjW6EVZCYMK7dxcKCBdgP9HkKr9gkAO2P8GKZGWVdIAatQa+1IDpt6qyorVwdy01xdW8Jkfk6xjEXmVQQ+HQdFr6OKhIN34dXWq0+0qr6EJSCeeVLH9+gvGTLyqM65PQ44ihzlTXxQKjKbAvshXgir7Lil9w4L2bvMycmjQcqXaMCO6BlY28i+FOLzbfI1vEqxAhotocAAA==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestFindLlamaServer(t *testing.T) {
