@@ -986,6 +986,10 @@ type responsesToolResolver struct {
 }
 
 func newResponsesToolResolver(r ResponsesRequest) (*responsesToolResolver, error) {
+	if err := rejectResponsesToolSearchCustomTools(r); err != nil {
+		return nil, err
+	}
+
 	hasHistoryCustom := false
 	for _, item := range r.Input.Items {
 		if call, ok := item.(ResponsesCustomToolCall); ok && call.Name == "apply_patch" {
@@ -1020,6 +1024,38 @@ func newResponsesToolResolver(r ResponsesRequest) (*responsesToolResolver, error
 	}
 	resolver.applyPatchExample = applyPatchExampleForModel(r.Model)
 	return resolver, nil
+}
+
+func rejectResponsesToolSearchCustomTools(r ResponsesRequest) error {
+	var rejectCustom func(ResponsesTool) error
+	rejectCustom = func(tool ResponsesTool) error {
+		if tool.Type == "custom" {
+			return fmt.Errorf("responses custom tool %q from tool_search_output is not supported", tool.Name)
+		}
+		for _, nested := range tool.Tools {
+			if err := rejectCustom(nested); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	for _, item := range r.Input.Items {
+		output, ok := item.(ResponsesToolSearchOutput)
+		if !ok {
+			continue
+		}
+		for _, raw := range output.Tools {
+			var tool ResponsesTool
+			if err := json.Unmarshal(raw, &tool); err != nil {
+				continue
+			}
+			if err := rejectCustom(tool); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func newResponsesToolResolverFromTools(tools []ResponsesTool) (*responsesToolResolver, error) {
