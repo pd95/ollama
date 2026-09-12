@@ -1428,6 +1428,33 @@ func TestResponsesCustomApplyPatchOutputAndFallback(t *testing.T) {
 	}
 }
 
+func TestResponsesCustomApplyPatchRejectsToolSearchDiscovery(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"
+	for _, tt := range []struct {
+		name string
+		tool json.RawMessage
+	}{
+		{name: "direct", tool: json.RawMessage(`{"type":"custom","name":"apply_patch"}`)},
+		{name: "nested", tool: json.RawMessage(`{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch"}]}`)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request := ResponsesRequest{Input: ResponsesInput{Items: []ResponsesInputItem{
+				ResponsesToolSearchOutput{Type: "tool_search_output", Tools: []json.RawMessage{tt.tool}},
+			}}}
+			if got, err := FromResponsesRequest(request); err == nil || got != nil || !strings.Contains(err.Error(), "tool_search_output") {
+				t.Fatalf("dynamic custom request = (%#v, %v), want rejection", got, err)
+			}
+
+			items := ResponsesFunctionCallOutputItems(request, "fc_test_", []api.ToolCall{
+				testCustomApplyPatchCall("call_patch", patch),
+			})
+			if len(items) != 1 || items[0].Type != "function_call" || items[0].Name != "apply_patch" {
+				t.Fatalf("dynamic custom fallback = %#v", items)
+			}
+		})
+	}
+}
+
 func TestResponsesStreamConverterCustomApplyPatchLifecycle(t *testing.T) {
 	patch := "*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"
 	converter := NewResponsesStreamConverter("resp", "msg", "test", ResponsesRequest{Tools: []ResponsesTool{testCustomApplyPatchTool()}})
