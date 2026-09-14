@@ -615,6 +615,49 @@ func TestNewManifestWriter_PopulatesGenerationDefaults(t *testing.T) {
 	check("repeat_last_n", float64(-1))
 }
 
+func TestNewManifestWriter_PopulatesGPTOSSFamily(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", t.TempDir())
+
+	modelDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(modelDir, "config.json"), []byte(`{
+		"architectures": ["GptOssForCausalLM"],
+		"model_type": "gpt_oss"
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CreateOptions{ModelName: "gptoss-family-test", ModelDir: modelDir}
+	writer := newManifestWriter(opts, []string{"completion", "tools", "thinking"}, "harmony", "")
+	if err := writer(opts.ModelName, create.LayerInfo{}, nil, create.Classification{Kind: create.SourcePrequantized, Quantize: "mxfp4"}); err != nil {
+		t.Fatalf("newManifestWriter() error = %v", err)
+	}
+
+	name := model.ParseName(opts.ModelName)
+	mf, err := manifest.ParseNamedManifest(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := manifest.BlobsPath(mf.Config.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg model.ConfigV2
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ModelFamily != "gptoss" {
+		t.Fatalf("ModelFamily = %q, want gptoss", cfg.ModelFamily)
+	}
+	if !slices.Equal(cfg.ModelFamilies, []string{"gptoss"}) {
+		t.Fatalf("ModelFamilies = %v, want [gptoss]", cfg.ModelFamilies)
+	}
+}
+
 func TestNewManifestWriter_PopulatesDraftMetadata(t *testing.T) {
 	t.Setenv("OLLAMA_MODELS", t.TempDir())
 
@@ -876,6 +919,21 @@ func TestGetParserName(t *testing.T) {
 			name:       "qwen3 via model_type",
 			configJSON: `{"model_type": "qwen3"}`,
 			want:       "qwen3",
+		},
+		{
+			name:       "gpt-oss architecture",
+			configJSON: `{"architectures":["GptOssForCausalLM"],"model_type":"gpt_oss"}`,
+			want:       "harmony",
+		},
+		{
+			name:       "gpt-oss model type",
+			configJSON: `{"model_type":"gpt-oss"}`,
+			want:       "harmony",
+		},
+		{
+			name:       "gpt-oss nested llm model type",
+			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"gpt_oss"}}`,
+			want:       "harmony",
 		},
 		{
 			name:       "laguna model",

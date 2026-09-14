@@ -428,6 +428,12 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 			}
 			configData.Draft = draft
 		}
+		if configData.ModelFamily == "" {
+			configData.ModelFamily = inferModelFamily(opts.ModelDir)
+		}
+		if configData.ModelFamily != "" && len(configData.ModelFamilies) == 0 {
+			configData.ModelFamilies = []string{configData.ModelFamily}
+		}
 		configJSON, err := json.Marshal(configData)
 		if err != nil {
 			return fmt.Errorf("failed to marshal config: %w", err)
@@ -461,6 +467,32 @@ func newManifestWriter(opts CreateOptions, capabilities []string, parserName, re
 
 		return manifest.WriteManifest(name, configLayer, manifestLayers)
 	}
+}
+
+func inferModelFamily(modelDir string) string {
+	data, err := os.ReadFile(filepath.Join(modelDir, "config.json"))
+	if err != nil {
+		return ""
+	}
+
+	var cfg struct {
+		Architectures []string `json:"architectures"`
+		ModelType     string   `json:"model_type"`
+		LLMConfig     struct {
+			ModelType string `json:"model_type"`
+		} `json:"llm_config"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+
+	for _, identifier := range append(cfg.Architectures, cfg.ModelType, cfg.LLMConfig.ModelType) {
+		if isGPTOSSFamily(identifier) {
+			return "gptoss"
+		}
+	}
+
+	return ""
 }
 
 func resolveParserName(mf *ModelfileConfig, inferred string) string {
@@ -611,6 +643,11 @@ func isQwen4Family(s string) bool {
 		strings.Contains(s, "qwen4_exp")
 }
 
+func isGPTOSSFamily(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "gptoss") || strings.Contains(s, "gpt_oss") || strings.Contains(s, "gpt-oss")
+}
+
 func qwen35RendererName(modelDir string) string {
 	template := readChatTemplate(modelDir)
 	if strings.Contains(template, "resolved_reasoning_effort") &&
@@ -697,6 +734,8 @@ func parserNameForIdentifier(modelDir, s string) string {
 		return lagunaRendererParserName(modelDir)
 	case strings.Contains(s, "cohere2moe") || strings.Contains(s, "cohere2_moe"):
 		return "cohere"
+	case isGPTOSSFamily(s):
+		return "harmony"
 	case strings.Contains(s, "glm4") || strings.Contains(s, "glm-4"):
 		return "glm-4.7"
 	case strings.Contains(s, "deepseek"):
