@@ -597,7 +597,7 @@ func TestMatrixQuantizationIdentitiesFailClosed(t *testing.T) {
 		t.Skipf("MLX not available: %v", err)
 	}
 	const name = "projection.weight"
-	for _, quantType := range []string{"int4", "int8", "nvfp4", "mxfp4", "mxfp8", "FP4", "Q8"} {
+	for _, quantType := range []string{"int2", "int3", "int4", "int5", "int6", "int8", "nvfp4", "mxfp4", "mxfp8", "FP4", "Q8"} {
 		t.Run("supported model "+quantType, func(t *testing.T) {
 			tensors, cfg := quantizedMatrix(name, quantType, 4, 64)
 			if err := validateMatrix(tensors, "projection", 4, 64, cfg, false); err != nil {
@@ -750,7 +750,10 @@ func quantizedMatrix(name, quantType string, out, input int) (map[string]*mlx.Ar
 	tensors := map[string]*mlx.Array{}
 	switch mode {
 	case "affine":
-		tensors[name] = mlx.Zeros(mlx.DTypeUint32, out, input/(32/bits))
+		if input*bits%32 != 0 {
+			panic("test affine input cannot be represented as packed U32 columns")
+		}
+		tensors[name] = mlx.Zeros(mlx.DTypeUint32, out, input*bits/32)
 		tensors[name+"_scale"] = mlx.Zeros(mlx.DTypeBFloat16, out, input/groupSize)
 		tensors[name+"_qbias"] = mlx.Zeros(mlx.DTypeBFloat16, out, input/groupSize)
 	case "nvfp4", "mxfp4":
@@ -979,4 +982,101 @@ func writeManifestBlob(t *testing.T, dir, name string, data []byte) string {
 		t.Fatal(err)
 	}
 	return digest
+}
+
+func TestParseConfigApertusMiniRopeAndTiedEmbeddings(t *testing.T) {
+	tests := []struct {
+		name      string
+		rope      string
+		tied      bool
+		wantType  string
+		wantScale float32
+	}{
+		{
+			name:      "default untied",
+			rope:      `{"rope_type":"default"}`,
+			wantType:  "default",
+			wantScale: 1,
+		},
+		{
+			name:      "missing scaling defaults to standard rope",
+			rope:      `{}`,
+			wantType:  "default",
+			wantScale: 1,
+		},
+		{
+			name:      "linear tied",
+			rope:      `{"rope_type":"linear","factor":2}`,
+			tied:      true,
+			wantType:  "linear",
+			wantScale: 0.5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseConfig([]byte(`{
+				"architectures":["ApertusForCausalLM"],
+				"model_type":"apertus",
+				"hidden_size":16,
+				"intermediate_size":32,
+				"num_hidden_layers":1,
+				"num_attention_heads":4,
+				"num_key_value_heads":2,
+				"max_position_embeddings":4096,
+				"rope_theta":500000,
+				"rms_norm_eps":0.000001,
+				"rope_scaling":` + tt.rope + `,
+				"hidden_act":"xielu",
+				"qk_norm":true,
+				"tie_word_embeddings":` + strconv.FormatBool(tt.tied) + `,
+				"vocab_size":131072
+			}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.ropeType(); got != tt.wantType {
+				t.Fatalf("ropeType() = %q, want %q", got, tt.wantType)
+			}
+			if cfg.RopeScale != tt.wantScale {
+				t.Fatalf("RopeScale = %v, want %v", cfg.RopeScale, tt.wantScale)
+			}
+			if cfg.TieWordEmbeddings != tt.tied {
+				t.Fatalf("TieWordEmbeddings = %v, want %v", cfg.TieWordEmbeddings, tt.tied)
+			}
+		})
+	}
+}
+
+func TestParseConfigRejectsInvalidMiniRope(t *testing.T) {
+	base := `{
+		"architectures":["ApertusForCausalLM"],
+		"hidden_size":16,
+		"intermediate_size":32,
+		"num_hidden_layers":1,
+		"num_attention_heads":4,
+		"num_key_value_heads":2,
+		"max_position_embeddings":4096,
+		"rope_theta":500000,
+		"rms_norm_eps":0.000001,
+		"rope_scaling":%s,
+		"hidden_act":"xielu",
+		"qk_norm":true,
+		"vocab_size":128
+	}`
+	for _, tt := range []struct {
+		name string
+		rope string
+		want string
+	}{
+		{name: "linear factor", rope: `{"rope_type":"linear","factor":0}`, want: "invalid linear rope scaling factor"},
+		{name: "unsupported type", rope: `{"rope_type":"yarn","factor":1}`, want: `unsupported rope scaling type "yarn"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseConfig([]byte(fmt.Sprintf(base, tt.rope)))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("parseConfig error = %v, want %q", err, tt.want)
+			}
+		})
+	}
 }

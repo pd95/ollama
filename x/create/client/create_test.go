@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -267,6 +268,19 @@ func TestCreateModel_InvalidDir(t *testing.T) {
 	}, nil)
 	if err == nil {
 		t.Error("expected error for nonexistent directory, got nil")
+	}
+}
+
+func TestCreateModelRejectsImportOnlyQuantizationTarget(t *testing.T) {
+	for _, quantize := range []string{"int2", "int3", "int5", "int6", "q6"} {
+		err := CreateModel(CreateOptions{
+			ModelName: "test-model",
+			ModelDir:  t.TempDir(),
+			Quantize:  quantize,
+		}, nil)
+		if err == nil || !strings.Contains(err.Error(), "unsupported --quantize") {
+			t.Errorf("--quantize %s error = %v, want unsupported", quantize, err)
+		}
 	}
 }
 
@@ -1318,4 +1332,144 @@ func TestGetLagunaRendererParserName(t *testing.T) {
 			}
 		})
 	}
+}
+func TestApertus1p1MiniDetectionAndCapabilities(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		instruct     bool
+		wantVariant  apertus1p1Variant
+		wantParser   string
+		wantRenderer string
+		wantCaps     []string
+	}{
+		{
+			name:        "base is completion only",
+			wantVariant: apertus1p1Base,
+			wantCaps:    []string{"completion"},
+		},
+		{
+			name:         "instruct uses mini grammar",
+			instruct:     true,
+			wantVariant:  apertus1p1Instruct,
+			wantParser:   "apertus1p1",
+			wantRenderer: "apertus1p1",
+			wantCaps:     []string{"completion", "tools", "thinking"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeApertus1p1Fixture(t, tt.instruct)
+			if got := detectApertus1p1Variant(dir); got != tt.wantVariant {
+				t.Fatalf("detectApertus1p1Variant() = %v, want %v", got, tt.wantVariant)
+			}
+			if got := getParserName(dir); got != tt.wantParser {
+				t.Fatalf("getParserName() = %q, want %q", got, tt.wantParser)
+			}
+			if got := getRendererName(dir); got != tt.wantRenderer {
+				t.Fatalf("getRendererName() = %q, want %q", got, tt.wantRenderer)
+			}
+			if got := inferSafetensorsCapabilities(dir, getParserName(dir)); !slices.Equal(got, tt.wantCaps) {
+				t.Fatalf("inferSafetensorsCapabilities() = %#v, want %#v", got, tt.wantCaps)
+			}
+		})
+	}
+}
+
+func TestApertus1p1DetectionRequiresCompleteSpecialTokenSignature(t *testing.T) {
+	dir := writeApertus1p1Fixture(t, true)
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), []byte(`{"added_tokens":[{"content":"<SPECIAL_61>"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectApertus1p1Variant(dir); got != apertus1p1Invalid {
+		t.Fatalf("detectApertus1p1Variant() = %v, want invalid Mini", got)
+	}
+	if got := getParserName(dir); got != "" {
+		t.Fatalf("getParserName() = %q, malformed Mini must not use legacy parser", got)
+	}
+	if got := getRendererName(dir); got != "" {
+		t.Fatalf("getRendererName() = %q, malformed Mini must not use legacy renderer", got)
+	}
+	if err := validateApertus1p1Metadata(dir); err == nil || !strings.Contains(err.Error(), "<SPECIAL_61> through <SPECIAL_72>") {
+		t.Fatalf("validateApertus1p1Metadata() error = %v, want actionable token-signature error", err)
+	}
+}
+
+func TestApertus1p1DetectionRejectsPresentInvalidTemplate(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		file string
+		data string
+	}{
+		{name: "empty standalone template", file: "chat_template.jinja"},
+		{name: "explicit empty tokenizer template", file: "tokenizer_config.json", data: `{"chat_template":""}`},
+		{name: "non-string tokenizer template", file: "tokenizer_config.json", data: `{"chat_template":{"default":"template"}}`},
+		{name: "malformed tokenizer config", file: "tokenizer_config.json", data: `{"chat_template":`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeApertus1p1Fixture(t, false)
+			if err := os.WriteFile(filepath.Join(dir, tt.file), []byte(tt.data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got := detectApertus1p1Variant(dir); got != apertus1p1Invalid {
+				t.Fatalf("detectApertus1p1Variant() = %v, want invalid Mini", got)
+			}
+			if err := validateApertus1p1Metadata(dir); err == nil {
+				t.Fatal("validateApertus1p1Metadata() error = nil, want malformed-template error")
+			}
+		})
+	}
+}
+
+func TestApertus1p1ResolvedVariantIsReusedWithoutMetadataRescan(t *testing.T) {
+	dir := writeApertus1p1Fixture(t, true)
+	variant := detectApertus1p1Variant(dir)
+	if variant != apertus1p1Instruct {
+		t.Fatalf("detectApertus1p1Variant() = %v, want instruct", variant)
+	}
+	for _, name := range []string{"config.json", "tokenizer.json", "chat_template.jinja"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := getParserNameForApertusVariant(dir, variant); got != "apertus1p1" {
+		t.Fatalf("getParserNameForApertusVariant() = %q, want apertus1p1", got)
+	}
+	if got := getRendererNameForApertusVariant(dir, variant); got != "apertus1p1" {
+		t.Fatalf("getRendererNameForApertusVariant() = %q, want apertus1p1", got)
+	}
+	if err := validateApertus1p1Variant(variant); err != nil {
+		t.Fatalf("validateApertus1p1Variant() error = %v", err)
+	}
+}
+
+func writeApertus1p1Fixture(t *testing.T, instruct bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	config := `{
+		"architectures":["ApertusForCausalLM"],
+		"model_type":"apertus",
+		"max_position_embeddings":4096,
+		"rope_theta":500000,
+		"rope_scaling":{"rope_type":"default"}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var tokens strings.Builder
+	tokens.WriteString(`{"added_tokens":[`)
+	for id := 61; id <= 72; id++ {
+		if id > 61 {
+			tokens.WriteString(",")
+		}
+		fmt.Fprintf(&tokens, `{"content":"<SPECIAL_%d>"}`, id)
+	}
+	tokens.WriteString("]}")
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), []byte(tokens.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if instruct {
+		if err := os.WriteFile(filepath.Join(dir, "chat_template.jinja"), []byte(tokens.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }
