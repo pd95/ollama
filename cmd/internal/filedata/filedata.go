@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/llm"
 )
 
 type File struct {
@@ -53,7 +54,7 @@ func NormalizePath(fp string) string {
 // extensions. Hoisted to package scope so the per-keystroke slash-completion
 // path (chat.slashInputIsMultimodalFile -> ExtractNames) doesn't recompile it
 // on every call.
-var fileExtractRe = regexp.MustCompile(`(?:file://\S+?\.(?i:jpg|jpeg|png|webp|wav)\b)|(?:(?:[a-zA-Z]:)?(?:\./|\.\\|/|\\)[\S\\ ]+?\.(?i:jpg|jpeg|png|webp|wav)\b)`)
+var fileExtractRe = regexp.MustCompile(`(?:file://\S+?\.(?i:jpg|jpeg|png|webp|wav|mp3)\b)|(?:(?:[a-zA-Z]:)?(?:\./|\.\\|/|\\)[\S\\ ]+?\.(?i:jpg|jpeg|png|webp|wav|mp3)\b)`)
 
 func ExtractNames(input string) []string {
 	return fileExtractRe.FindAllString(input, -1)
@@ -107,8 +108,9 @@ func GetData(filePath string) ([]byte, error) {
 	}
 
 	contentType := http.DetectContentType(buf)
-	allowedTypes := []string{"image/jpeg", "image/jpg", "image/png", "image/webp", "audio/wave"}
-	if !slices.Contains(allowedTypes, contentType) {
+	allowedTypes := []string{"image/jpeg", "image/jpg", "image/png", "image/webp", "audio/wave", "audio/mpeg", "audio/mp3"}
+	_, audioOK := llm.AudioFormat(buf)
+	if !audioOK && !slices.Contains(allowedTypes, contentType) {
 		return nil, fmt.Errorf("invalid file type: %s", contentType)
 	}
 
@@ -137,7 +139,7 @@ func GetData(filePath string) ([]byte, error) {
 }
 
 func Kind(path string) string {
-	if strings.EqualFold(filepath.Ext(path), ".wav") {
+	if ext := filepath.Ext(path); strings.EqualFold(ext, ".wav") || strings.EqualFold(ext, ".mp3") {
 		return "audio"
 	}
 	return "image"
