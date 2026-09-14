@@ -52,6 +52,7 @@ type OllamaCompactionPayload struct {
 	// StandaloneNames preserves Responses identities by retained-message index.
 	// Qualified native names alone cannot distinguish every namespace/member pair.
 	StandaloneNames map[int]compactionFunctionName `json:"standalone_names,omitempty"`
+	CustomCallIDs   map[string]bool                `json:"custom_call_ids,omitempty"`
 }
 
 type compactionFunctionName struct {
@@ -319,6 +320,21 @@ func payloadToResponsesItems(payload OllamaCompactionPayload) ([]json.RawMessage
 			return nil, fmt.Errorf("standalone name does not match retained message %d", index)
 		}
 	}
+	knownCalls := make(map[string]api.ToolCall)
+	for _, message := range payload.Retained {
+		for _, call := range message.ToolCalls {
+			knownCalls[call.ID] = call
+		}
+	}
+	for callID, custom := range payload.CustomCallIDs {
+		call, ok := knownCalls[callID]
+		if !custom || !ok {
+			return nil, fmt.Errorf("custom call identity does not match retained call %q", callID)
+		}
+		if _, valid := applyPatchInput(call); !valid {
+			return nil, fmt.Errorf("custom call %q is not a valid apply_patch call", callID)
+		}
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -342,7 +358,7 @@ func payloadToResponsesItems(payload OllamaCompactionPayload) ([]json.RawMessage
 	}
 	items = append(items, call, result)
 	for i, message := range payload.Retained {
-		converted, err := messageToResponsesItems(message, payload.StandaloneNames[i])
+		converted, err := messageToResponsesItems(message, payload.StandaloneNames[i], payload.CustomCallIDs)
 		if err != nil {
 			return nil, fmt.Errorf("invalid retained message: %w", err)
 		}
@@ -351,7 +367,7 @@ func payloadToResponsesItems(payload OllamaCompactionPayload) ([]json.RawMessage
 	return items, nil
 }
 
-func messageToResponsesItems(message api.Message, standaloneName compactionFunctionName) ([]json.RawMessage, error) {
+func messageToResponsesItems(message api.Message, standaloneName compactionFunctionName, customCallIDs map[string]bool) ([]json.RawMessage, error) {
 	var values []any
 	if message.Thinking != "" {
 		values = append(values, map[string]any{
@@ -385,6 +401,13 @@ func messageToResponsesItems(message api.Message, standaloneName compactionFunct
 				"type": "tool_search_output", "call_id": message.ToolCallID,
 				"execution": "client", "status": "completed", "tools": tools,
 			})
+		} else if customCallIDs[message.ToolCallID] {
+			if len(message.Images) > 0 {
+				return nil, errors.New("retained custom tool output cannot contain images")
+			}
+			values = append(values, map[string]any{
+				"type": "custom_tool_call_output", "call_id": message.ToolCallID, "output": message.Content,
+			})
 		} else {
 			output, err := responsesContentValue(message.Content, message.Images)
 			if err != nil {
@@ -411,6 +434,14 @@ func messageToResponsesItems(message api.Message, standaloneName compactionFunct
 			values = append(values, map[string]any{
 				"type": "tool_search_call", "call_id": call.ID,
 				"execution": "client", "status": "completed", "arguments": call.Function.Arguments,
+			})
+		} else if customCallIDs[call.ID] {
+			input, ok := applyPatchInput(call)
+			if !ok {
+				return nil, fmt.Errorf("retained custom call %q is not a valid apply_patch call", call.ID)
+			}
+			values = append(values, map[string]any{
+				"type": "custom_tool_call", "call_id": call.ID, "name": "apply_patch", "input": input,
 			})
 		} else {
 			arguments, err := json.Marshal(call.Function.Arguments)
@@ -540,6 +571,19 @@ func compactionMessage(item ResponsesInputItem) (api.Message, string, error) {
 			message.ToolName = qualifyNamespaceToolName(value.Namespace, value.Name)
 		}
 		return message, "function_call_output", nil
+	case ResponsesCustomToolCall:
+		if value.Name != "apply_patch" {
+			return api.Message{}, "", fmt.Errorf("unsupported responses custom tool call %q", value.Name)
+		}
+		arguments := api.NewToolCallFunctionArguments()
+		arguments.Set("input", value.Input)
+		call := api.ToolCall{ID: value.CallID, Function: api.ToolCallFunction{Name: value.Name, Arguments: arguments}}
+		if _, ok := applyPatchInput(call); !ok {
+			return api.Message{}, "", errors.New("invalid custom apply_patch input")
+		}
+		return api.Message{Role: "assistant", ToolCalls: []api.ToolCall{call}}, "custom_tool_call", nil
+	case ResponsesCustomToolCallOutput:
+		return api.Message{Role: "tool", Content: value.Output, ToolCallID: value.CallID}, "custom_tool_call_output", nil
 	case ResponsesToolSearchCall:
 		return api.Message{Role: "assistant", ToolCalls: []api.ToolCall{{
 			ID: value.CallID, Function: api.ToolCallFunction{Name: "tool_search", Arguments: value.Arguments},
@@ -604,6 +648,7 @@ func analyzeCompactionToolState(items []CompactionTranscriptItem) ([]compactionT
 	type pendingGroup struct {
 		callIndex   int
 		resultIndex int
+		custom      bool
 		group       compactionToolGroup
 	}
 	byCallID := make(map[string]*pendingGroup)
@@ -613,7 +658,7 @@ func analyzeCompactionToolState(items []CompactionTranscriptItem) ([]compactionT
 
 	for i, item := range items {
 		switch item.Type {
-		case "function_call":
+		case "function_call", "custom_tool_call":
 			call := item.Message.ToolCalls[0]
 			if call.ID == "" {
 				return nil, nil, fmt.Errorf("%s: function call is missing call_id", item.Ref)
@@ -625,10 +670,10 @@ func analyzeCompactionToolState(items []CompactionTranscriptItem) ([]compactionT
 			if _, exists := byCallID[call.ID]; exists {
 				return nil, nil, fmt.Errorf("%s: duplicate function call_id %q", item.Ref, call.ID)
 			}
-			group := &pendingGroup{callIndex: i, resultIndex: -1, group: compactionToolGroup{CallRef: item.Ref}}
+			group := &pendingGroup{callIndex: i, resultIndex: -1, custom: item.Type == "custom_tool_call", group: compactionToolGroup{CallRef: item.Ref}}
 			byCallID[call.ID] = group
 			ordered = append(ordered, group)
-		case "function_call_output":
+		case "function_call_output", "custom_tool_call_output":
 			callID := item.Message.ToolCallID
 			if callID == "" && item.StandaloneName != nil {
 				// Standalone outputs can carry the task instructions. Retain them
@@ -645,6 +690,9 @@ func analyzeCompactionToolState(items []CompactionTranscriptItem) ([]compactionT
 			}
 			if group.resultIndex >= 0 {
 				return nil, nil, fmt.Errorf("%s: duplicate function output for call %q", item.Ref, callID)
+			}
+			if group.custom != (item.Type == "custom_tool_call_output") {
+				return nil, nil, fmt.Errorf("%s: function call/output kinds differ for %q", item.Ref, callID)
 			}
 			group.resultIndex = i
 			group.group.ResultRef = item.Ref
@@ -750,7 +798,7 @@ func (p *ResponsesCompactionPlan) TrimForContextLimit() int {
 			continue
 		}
 		peer := peers[item.Ref]
-		if item.Type == "function_call" || item.Type == "function_call_output" {
+		if item.Type == "function_call" || item.Type == "function_call_output" || item.Type == "custom_tool_call" || item.Type == "custom_tool_call_output" {
 			// Prior summary pairs are intentionally absent from p.groups.
 			if peer == "" || protected[peer] {
 				continue
@@ -913,6 +961,7 @@ func (p *ResponsesCompactionPlan) Complete(body []byte) (ResponsesCompactionResu
 
 	retained := make([]api.Message, 0, len(selected))
 	var standaloneNames map[int]compactionFunctionName
+	customCallIDs := make(map[string]bool)
 	for _, item := range p.items {
 		if _, ok := selected[item.Ref]; ok {
 			if item.StandaloneName != nil {
@@ -921,12 +970,16 @@ func (p *ResponsesCompactionPlan) Complete(body []byte) (ResponsesCompactionResu
 				}
 				standaloneNames[len(retained)] = *item.StandaloneName
 			}
+			if item.Type == "custom_tool_call" {
+				customCallIDs[item.Message.ToolCalls[0].ID] = true
+			}
 			retained = append(retained, item.Message)
 		}
 	}
 	payload := OllamaCompactionPayload{
 		Type: OllamaCompactionPayloadType, Version: OllamaCompactionPayloadVersion, Summary: selection.Summary, Retained: retained,
 		StandaloneNames: standaloneNames,
+		CustomCallIDs:   customCallIDs,
 	}
 	if p.omittedItems > 0 {
 		payload.Summary = fmt.Sprintf(compactionOmissionNotice, p.omittedItems) + "\n\n" + payload.Summary
