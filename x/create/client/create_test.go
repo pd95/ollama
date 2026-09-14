@@ -12,6 +12,7 @@ import (
 	"github.com/ollama/ollama/parser"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
+	apertusmetadata "github.com/ollama/ollama/x/models/apertus/metadata"
 )
 
 func TestModelfileConfig(t *testing.T) {
@@ -38,6 +39,48 @@ func TestModelfileConfig(t *testing.T) {
 	}
 	if config.Renderer != "qwen3" {
 		t.Errorf("Renderer = %q, want %q", config.Renderer, "qwen3")
+	}
+}
+
+func TestApertus1p5MediaCapabilitiesUseCanonicalInventory(t *testing.T) {
+	inv := create.Inventory{
+		RawConfig: json.RawMessage(`{
+			"architectures":["Apertus1p5ForConditionalGeneration"],
+			"model_type":"apertus_1_5",
+			"image_token_id":131079,
+			"audio_token_id":131085,
+			"image_token_offset":131272,
+			"audio_token_offset":262344,
+			"vision_tokenizer_config":{"codebook_size":131072,"embed_dim":256,"in_channels":3,"channel_multiplier":[1,1,2,2,4]},
+			"audio_tokenizer_config":{"codebook_size":4096,"codebook_dim":512,"audio_channels":1,"sampling_rate":24000,"upsampling_ratios":[6,5,5,4]}
+		}`),
+		Tensors: make(map[string]create.SourceTensor),
+	}
+	for _, name := range apertusmetadata.VisionRequiredTensorNames() {
+		inv.Tensors[name] = create.SourceTensor{Name: name, Dtype: "F32", Shape: []int32{1}}
+	}
+	for _, name := range apertusmetadata.AudioRequiredTensorNames() {
+		inv.Tensors[name] = create.SourceTensor{Name: name, Dtype: "F32", Shape: []int32{1}}
+	}
+	inv.Tensors["model.audio_tokenizer.quantizer.codebook.embed"] = create.SourceTensor{
+		Name: "model.audio_tokenizer.quantizer.codebook.embed", Dtype: "F32", Shape: []int32{4096, 512},
+	}
+
+	if got := apertus1p5MediaCapabilities(inv); !got.vision || !got.audio {
+		t.Fatalf("valid canonical inventory capabilities = %+v, want vision and audio", got)
+	}
+	delete(inv.Tensors, "model.vision_tokenizer.quant_conv.weight")
+	if got := apertus1p5MediaCapabilities(inv); got.vision || !got.audio {
+		t.Fatalf("incomplete vision inventory capabilities = %+v, want audio only", got)
+	}
+	inv.Tensors["model.vision_tokenizer.quant_conv.weight"] = create.SourceTensor{
+		Name: "model.vision_tokenizer.quant_conv.weight", Dtype: "F32", Shape: []int32{1},
+	}
+	codebook := inv.Tensors["model.audio_tokenizer.quantizer.codebook.embed"]
+	codebook.Shape = []int32{512, 4096}
+	inv.Tensors[codebook.Name] = codebook
+	if got := apertus1p5MediaCapabilities(inv); !got.vision || got.audio {
+		t.Fatalf("malformed audio inventory capabilities = %+v, want vision only", got)
 	}
 }
 
@@ -1076,6 +1119,21 @@ func TestGetParserName(t *testing.T) {
 			want:       "nemotron-3-nano",
 		},
 		{
+			name:       "apertus model",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       "apertus",
+		},
+		{
+			name:       "apertus 1.5 model",
+			configJSON: `{"architectures": ["Apertus1p5ForConditionalGeneration"], "model_type": "apertus_1_5"}`,
+			want:       "apertus",
+		},
+		{
+			name:       "apertus nested llm config",
+			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"apertus"}}`,
+			want:       "apertus",
+		},
+		{
 			name:       "no config",
 			configJSON: `{}`,
 			want:       "",
@@ -1169,6 +1227,26 @@ func TestGetRendererName(t *testing.T) {
 			name:       "nemotron nested llm config",
 			configJSON: `{"model_type": "nemotron_h_omni", "llm_config": {"model_type": "nemotron_h"}}`,
 			want:       "nemotron-3-nano",
+		},
+		{
+			name:       "apertus model",
+			configJSON: `{"architectures": ["ApertusForCausalLM"], "model_type": "apertus"}`,
+			want:       "apertus",
+		},
+		{
+			name:       "apertus 1.5 model",
+			configJSON: `{"architectures": ["Apertus1p5ForConditionalGeneration"], "model_type": "apertus_1_5"}`,
+			want:       "apertus1p5",
+		},
+		{
+			name:       "apertus 1.5 nested llm config",
+			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"apertus-1.5"}}`,
+			want:       "apertus1p5",
+		},
+		{
+			name:       "apertus nested llm config",
+			configJSON: `{"model_type":"wrapper","llm_config":{"model_type":"apertus"}}`,
+			want:       "apertus",
 		},
 	}
 

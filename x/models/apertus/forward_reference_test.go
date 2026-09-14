@@ -201,7 +201,7 @@ func runForwardReference(t *testing.T, refPath, modelName string) {
 	h = m.Norm.Forward(h, m.RMSNormEps)
 	compareReference(t, "model.norm", h, ref["model.norm"], 0.997)
 	if ref["logits"] != nil {
-		logits := mlx.Reshape(m.LMHead.Forward(h), B, L, m.VocabSize)
+		logits := mlx.Reshape(m.LMHead.Forward(h), B, L, m.OutputVocabSize)
 		compareReference(t, "logits", logits, ref["logits"], 0.997)
 		compareLogitArgmax(t, "logits", logits, ref["logits"])
 	}
@@ -325,7 +325,7 @@ func runForwardCacheReference(t *testing.T, refPath, modelName string) {
 	h = m.Norm.Forward(h, m.RMSNormEps)
 	compareReference(t, "model.norm", h, ref["model.norm"], 0.997)
 	if ref["logits"] != nil {
-		logits := mlx.Reshape(m.LMHead.Forward(h), 1, decodeLen, m.VocabSize)
+		logits := mlx.Reshape(m.LMHead.Forward(h), 1, decodeLen, m.OutputVocabSize)
 		compareReference(t, "logits", logits, ref["logits"], 0.997)
 		compareLogitArgmax(t, "logits", logits, ref["logits"])
 	}
@@ -421,8 +421,14 @@ func loadReferenceFiltered(t *testing.T, path string, keep map[string]bool) map[
 
 	out := make(map[string]*mlx.Array)
 	for name, arr := range mlx.Load(path) {
-		if keep[name] {
-			out[name] = arr
+		key := name
+		if suffix, ok := strings.CutPrefix(name, "model.language_model."); ok {
+			key = "model." + suffix
+		} else if name == "lm_head" {
+			key = "logits"
+		}
+		if keep[key] {
+			out[key] = arr
 		}
 	}
 	if len(out) == 0 {

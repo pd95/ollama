@@ -27,6 +27,7 @@ import (
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/x/create"
 	imagemanifest "github.com/ollama/ollama/x/imagegen/manifest"
+	apertusmetadata "github.com/ollama/ollama/x/models/apertus/metadata"
 	"github.com/ollama/ollama/x/quant"
 )
 
@@ -345,7 +346,6 @@ func readHFGenerationDefaults(modelDir string) (model.GenerationDefaults, error)
 
 func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 	capabilities := []string{"completion"}
-
 	caps := detectCapabilities(modelDir)
 	if caps.vision {
 		capabilities = append(capabilities, "vision")
@@ -369,6 +369,28 @@ func inferSafetensorsCapabilities(modelDir, parserName string) []string {
 	}
 
 	return capabilities
+}
+
+func detectApertus1p5MediaCapabilities(modelDir string) modelCapabilities {
+	inv, err := create.ReadInventory(modelDir)
+	if err != nil {
+		return modelCapabilities{}
+	}
+	return apertus1p5MediaCapabilities(inv)
+}
+
+func apertus1p5MediaCapabilities(inv create.Inventory) modelCapabilities {
+	cfg, err := apertusmetadata.ParseConfig(inv.RawConfig)
+	if err != nil {
+		return modelCapabilities{}
+	}
+	descriptors := make(map[string]apertusmetadata.TensorDescriptor, len(inv.Tensors))
+	for name, tensor := range inv.Tensors {
+		descriptors[name] = apertusmetadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
+	}
+	vision := apertusmetadata.ValidateVisionInventory(cfg, descriptors) == nil
+	audio := apertusmetadata.ValidateAudioInventory(cfg, descriptors) == nil
+	return modelCapabilities{vision: vision, audio: audio}
 }
 
 // newLayerCreator returns a LayerCreator callback for creating config/JSON layers.
@@ -580,13 +602,29 @@ func detectCapabilities(modelDir string) modelCapabilities {
 	if data, err := os.ReadFile(filepath.Join(modelDir, "config.json")); err == nil {
 		_ = json.Unmarshal(data, &cfg)
 	}
+	vision := cfg.VisionConfig != nil || cfg.HasVision
+	audio := cfg.AudioConfig != nil || cfg.SoundConfig != nil
+	if isApertus1p5ModelConfig(cfg.Architectures, cfg.ModelType) {
+		media := detectApertus1p5MediaCapabilities(modelDir)
+		vision, audio = media.vision, media.audio
+	}
 
 	return modelCapabilities{
-		vision: cfg.VisionConfig != nil || cfg.HasVision,
-		audio:  cfg.AudioConfig != nil || cfg.SoundConfig != nil,
+		vision: vision,
+		audio:  audio,
 		thinking: chatTemplateHasThinkingSupport(readChatTemplate(modelDir)) ||
 			alwaysSupportsThinking(cfg.Architectures, cfg.ModelType),
 	}
+}
+
+func isApertus1p5ModelConfig(architectures []string, modelType string) bool {
+	for _, value := range append(architectures, modelType) {
+		value = strings.ToLower(value)
+		if strings.Contains(value, "apertus1p5") || strings.Contains(value, "apertus-1.5") || strings.Contains(value, "apertus_1_5") {
+			return true
+		}
+	}
+	return false
 }
 
 // isApertus1p0ModelDir recognizes the original text-only Apertus release.
@@ -692,6 +730,11 @@ func isApertusFamily(s string) bool {
 	}
 }
 
+func isApertus1p5Family(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "apertus1p5") || strings.Contains(s, "apertus-1.5") || strings.Contains(s, "apertus_1_5")
+}
+
 func qwen35RendererName(modelDir string) string {
 	template := readChatTemplate(modelDir)
 	if strings.Contains(template, "resolved_reasoning_effort") &&
@@ -772,7 +815,7 @@ func getParserName(modelDir string) string {
 func parserNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
-	case isApertusFamily(s):
+	case isApertusFamily(s) || isApertus1p5Family(s):
 		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer"
@@ -841,6 +884,8 @@ func getRendererName(modelDir string) string {
 func rendererNameForIdentifier(modelDir, s string) string {
 	s = strings.ToLower(s)
 	switch {
+	case isApertus1p5Family(s):
+		return "apertus1p5"
 	case isApertusFamily(s):
 		return "apertus"
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
