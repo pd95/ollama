@@ -1,6 +1,7 @@
 package create
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,18 +24,32 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 	if err != nil {
 		return model.ConfigV2{}, err
 	}
-
-	parserName, err := parserNameForConfig(modelDir, cfg, chatTemplate)
-	if err != nil {
+	apertusVariant := detectApertus1p1Variant(modelDir, cfg)
+	if err := validateApertus1p1Variant(apertusVariant); err != nil {
 		return model.ConfigV2{}, err
+	}
+
+	var parserName string
+	if apertusVariant == apertus1p1Instruct {
+		parserName = "apertus1p1"
+	} else if apertusVariant != apertus1p1Base {
+		parserName, err = parserNameForConfig(modelDir, cfg, chatTemplate)
+		if err != nil {
+			return model.ConfigV2{}, err
+		}
 	}
 	if parserOverride != "" {
 		parserName = parserOverride
 	}
 
-	rendererName, err := rendererNameForConfig(modelDir, cfg, chatTemplate)
-	if err != nil {
-		return model.ConfigV2{}, err
+	var rendererName string
+	if apertusVariant == apertus1p1Instruct {
+		rendererName = "apertus1p1"
+	} else if apertusVariant != apertus1p1Base {
+		rendererName, err = rendererNameForConfig(modelDir, cfg, chatTemplate)
+		if err != nil {
+			return model.ConfigV2{}, err
+		}
 	}
 	if rendererOverride != "" {
 		rendererName = rendererOverride
@@ -231,6 +246,85 @@ func isApertusFamily(s string) bool {
 func isApertus1p5Family(s string) bool {
 	s = strings.ToLower(s)
 	return strings.Contains(s, "apertus1p5") || strings.Contains(s, "apertus-1.5") || strings.Contains(s, "apertus_1_5")
+}
+
+type apertus1p1Variant uint8
+
+const (
+	apertus1p1NotMini apertus1p1Variant = iota
+	apertus1p1Base
+	apertus1p1Instruct
+	apertus1p1Invalid
+)
+
+func validateApertus1p1Variant(variant apertus1p1Variant) error {
+	if variant == apertus1p1Invalid {
+		return fmt.Errorf("apertus v1.1 Mini metadata is incomplete: tokenizer.json and any chat template must contain <SPECIAL_61> through <SPECIAL_72>")
+	}
+	return nil
+}
+
+func detectApertus1p1Variant(modelDir string, cfg sourceModelConfig) apertus1p1Variant {
+	isApertus := false
+	for _, id := range sourceConfigIdentifiers(cfg) {
+		if isApertusFamily(id) {
+			isApertus = true
+			break
+		}
+	}
+	ropeType := cfg.RopeScaling.RopeType
+	if ropeType == "" {
+		ropeType = cfg.RopeScaling.Type
+	}
+	if ropeType == "" {
+		ropeType = "default"
+	}
+	if !isApertus || cfg.MaxPositionEmbeddings != 4096 || cfg.RopeTheta != 500000 ||
+		(!strings.EqualFold(ropeType, "default") && !strings.EqualFold(ropeType, "linear")) {
+		return apertus1p1NotMini
+	}
+
+	tokenizerData, err := os.ReadFile(filepath.Join(modelDir, "tokenizer.json"))
+	if err != nil || !hasApertus1p1SpecialTokenSignature(string(tokenizerData)) {
+		return apertus1p1Invalid
+	}
+	template, present := readApertus1p1ChatTemplate(modelDir)
+	if !present {
+		return apertus1p1Base
+	}
+	if !hasApertus1p1SpecialTokenSignature(template) {
+		return apertus1p1Invalid
+	}
+	return apertus1p1Instruct
+}
+
+func readApertus1p1ChatTemplate(modelDir string) (string, bool) {
+	if data, err := os.ReadFile(filepath.Join(modelDir, "tokenizer_config.json")); err == nil {
+		var cfg map[string]json.RawMessage
+		if json.Unmarshal(data, &cfg) != nil {
+			return "", true
+		}
+		if raw, ok := cfg["chat_template"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			var template string
+			if json.Unmarshal(raw, &template) != nil {
+				return "", true
+			}
+			return template, true
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(modelDir, "chat_template.jinja")); err == nil {
+		return string(data), true
+	}
+	return "", false
+}
+
+func hasApertus1p1SpecialTokenSignature(value string) bool {
+	for id := 61; id <= 72; id++ {
+		if !strings.Contains(value, fmt.Sprintf("<SPECIAL_%d>", id)) {
+			return false
+		}
+	}
+	return true
 }
 
 func isApertus1p0SourceConfig(cfg sourceModelConfig, parserName string) bool {

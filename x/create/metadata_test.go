@@ -2,9 +2,11 @@ package create
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ollama/ollama/types/model"
@@ -315,6 +317,107 @@ func TestInferSafetensorsConfigApertusFamily(t *testing.T) {
 	if want := []string{"completion", "tools"}; !slices.Equal(config.Capabilities, want) {
 		t.Fatalf("capabilities = %v, want %v", config.Capabilities, want)
 	}
+}
+
+func TestInferSafetensorsConfigApertus1p1Mini(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		instruct   bool
+		wantParser string
+		wantCaps   []string
+	}{
+		{name: "base is completion only", wantCaps: []string{"completion"}},
+		{name: "instruct uses mini grammar", instruct: true, wantParser: "apertus1p1", wantCaps: []string{"completion", "tools", "thinking"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeApertus1p1Fixture(t, tt.instruct)
+			config := inferConfigForTest(t, dir, "", "")
+			if config.Parser != tt.wantParser || config.Renderer != tt.wantParser {
+				t.Fatalf("parser/renderer = %q/%q, want %q/%q", config.Parser, config.Renderer, tt.wantParser, tt.wantParser)
+			}
+			if !slices.Equal(config.Capabilities, tt.wantCaps) {
+				t.Fatalf("capabilities = %v, want %v", config.Capabilities, tt.wantCaps)
+			}
+		})
+	}
+}
+
+func TestInferSafetensorsConfigRejectsIncompleteApertus1p1Metadata(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{
+			name: "incomplete tokenizer signature",
+			mutate: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), []byte(`{"added_tokens":[{"content":"<SPECIAL_61>"}]}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "empty standalone template",
+			mutate: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "chat_template.jinja"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "explicit empty tokenizer template",
+			mutate: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "tokenizer_config.json"), []byte(`{"chat_template":""}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeApertus1p1Fixture(t, false)
+			tt.mutate(t, dir)
+			cfg, _, err := readSourceModelConfig(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = inferSafetensorsConfig(dir, cfg, "", "")
+			if err == nil || !strings.Contains(err.Error(), "<SPECIAL_61> through <SPECIAL_72>") {
+				t.Fatalf("error = %v, want Mini token-signature rejection", err)
+			}
+		})
+	}
+}
+
+func writeApertus1p1Fixture(t *testing.T, instruct bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	config := `{
+		"architectures":["ApertusForCausalLM"],
+		"model_type":"apertus",
+		"max_position_embeddings":4096,
+		"rope_theta":500000,
+		"rope_scaling":{"rope_type":"default"}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var tokens strings.Builder
+	tokens.WriteString(`{"added_tokens":[`)
+	for id := 61; id <= 72; id++ {
+		if id > 61 {
+			tokens.WriteByte(',')
+		}
+		fmt.Fprintf(&tokens, `{"content":"<SPECIAL_%d>"}`, id)
+	}
+	tokens.WriteString("]}")
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), []byte(tokens.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if instruct {
+		if err := os.WriteFile(filepath.Join(dir, "chat_template.jinja"), []byte(tokens.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }
 
 func TestInferSafetensorsCapabilitiesFromParser(t *testing.T) {
