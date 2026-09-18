@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	modelparsers "github.com/ollama/ollama/model/parsers"
 	"github.com/ollama/ollama/thinking"
 	"github.com/ollama/ollama/types/model"
+	apertusmetadata "github.com/ollama/ollama/x/models/apertus/metadata"
 )
 
 // inferSafetensorsConfig derives the manifest config shared by local and
@@ -39,6 +41,20 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 	}
 
 	capabilities := inferSafetensorsCapabilitiesFromConfig(cfg, chatTemplate, parserName)
+	if sourceConfigHasApertus1p5(cfg) {
+		vision, audio := false, false
+		if inv, err := ReadInventory(modelDir); err == nil {
+			vision, audio = apertus1p5MediaCapabilities(inv)
+		}
+		capabilities = []string{"completion"}
+		if vision {
+			capabilities = append(capabilities, "vision")
+		}
+		if audio {
+			capabilities = append(capabilities, "audio")
+		}
+		capabilities = append(capabilities, "tools", "thinking")
+	}
 	modelFamily := inferModelFamilyFromConfig(cfg)
 	generationDefaults, err := readHFGenerationDefaults(modelDir)
 	if err != nil {
@@ -65,7 +81,7 @@ func modelFamilies(family string) []string {
 
 func inferModelFamilyFromConfig(cfg sourceModelConfig) string {
 	for _, id := range sourceConfigIdentifiers(cfg) {
-		if isApertusFamily(id) {
+		if isApertusFamily(id) || isApertus1p5Family(id) {
 			return "apertus"
 		}
 		if isGPTOSSFamily(id) {
@@ -143,6 +159,28 @@ func inferSafetensorsCapabilitiesFromConfig(cfg sourceModelConfig, chatTemplate,
 	return capabilities
 }
 
+func sourceConfigHasApertus1p5(cfg sourceModelConfig) bool {
+	for _, id := range sourceConfigIdentifiers(cfg) {
+		if isApertus1p5Family(id) {
+			return true
+		}
+	}
+	return false
+}
+
+func apertus1p5MediaCapabilities(inv Inventory) (vision, audio bool) {
+	cfg, err := apertusmetadata.ParseConfig(inv.RawConfig)
+	if err != nil {
+		return false, false
+	}
+	descriptors := make(map[string]apertusmetadata.TensorDescriptor, len(inv.Tensors))
+	for name, tensor := range inv.Tensors {
+		descriptors[name] = apertusmetadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
+	}
+	return apertusmetadata.ValidateVisionInventory(cfg, descriptors) == nil,
+		apertusmetadata.ValidateAudioInventory(cfg, descriptors) == nil
+}
+
 type modelCapabilities struct {
 	vision   bool
 	audio    bool
@@ -188,6 +226,11 @@ func isGPTOSSFamily(s string) bool {
 func isApertusFamily(s string) bool {
 	s = strings.ToLower(s)
 	return s == "apertus" || s == "apertusforcausallm"
+}
+
+func isApertus1p5Family(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "apertus1p5") || strings.Contains(s, "apertus-1.5") || strings.Contains(s, "apertus_1_5")
 }
 
 func isApertus1p0SourceConfig(cfg sourceModelConfig, parserName string) bool {
@@ -263,7 +306,7 @@ func parserNameForConfig(modelDir string, cfg sourceModelConfig, chatTemplate st
 func parserNameForIdentifier(modelDir, s, chatTemplate string) (string, error) {
 	s = strings.ToLower(s)
 	switch {
-	case isApertusFamily(s):
+	case isApertusFamily(s), isApertus1p5Family(s):
 		return "apertus", nil
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer", nil
@@ -303,6 +346,8 @@ func rendererNameForConfig(modelDir string, cfg sourceModelConfig, chatTemplate 
 func rendererNameForIdentifier(modelDir, s, chatTemplate string) (string, error) {
 	s = strings.ToLower(s)
 	switch {
+	case isApertus1p5Family(s):
+		return "apertus1p5", nil
 	case isApertusFamily(s):
 		return "apertus", nil
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
