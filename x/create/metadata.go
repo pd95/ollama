@@ -65,6 +65,9 @@ func modelFamilies(family string) []string {
 
 func inferModelFamilyFromConfig(cfg sourceModelConfig) string {
 	for _, id := range sourceConfigIdentifiers(cfg) {
+		if isApertusFamily(id) {
+			return "apertus"
+		}
 		if isGPTOSSFamily(id) {
 			return "gptoss"
 		}
@@ -133,7 +136,7 @@ func inferSafetensorsCapabilitiesFromConfig(cfg sourceModelConfig, chatTemplate,
 	if builtinParser != nil && builtinParser.HasToolSupport() {
 		capabilities = append(capabilities, "tools")
 	}
-	if caps.thinking || (builtinParser != nil && builtinParser.HasThinkingSupport()) {
+	if caps.thinking || (builtinParser != nil && builtinParser.HasThinkingSupport() && !isApertus1p0SourceConfig(cfg, parserName)) {
 		capabilities = append(capabilities, "thinking")
 	}
 
@@ -180,6 +183,23 @@ func isQwen4Family(s string) bool {
 func isGPTOSSFamily(s string) bool {
 	s = strings.ToLower(s)
 	return strings.Contains(s, "gptoss") || strings.Contains(s, "gpt_oss") || strings.Contains(s, "gpt-oss")
+}
+
+func isApertusFamily(s string) bool {
+	s = strings.ToLower(s)
+	return s == "apertus" || s == "apertusforcausallm"
+}
+
+func isApertus1p0SourceConfig(cfg sourceModelConfig, parserName string) bool {
+	if parserName != "apertus" {
+		return false
+	}
+	for _, id := range sourceConfigIdentifiers(cfg) {
+		if isApertusFamily(id) {
+			return true
+		}
+	}
+	return false
 }
 
 func qwen35RendererNameFromTemplate(chatTemplate string) string {
@@ -243,6 +263,8 @@ func parserNameForConfig(modelDir string, cfg sourceModelConfig, chatTemplate st
 func parserNameForIdentifier(modelDir, s, chatTemplate string) (string, error) {
 	s = strings.ToLower(s)
 	switch {
+	case isApertusFamily(s):
+		return "apertus", nil
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer", nil
 	case strings.Contains(s, "laguna"):
@@ -281,6 +303,8 @@ func rendererNameForConfig(modelDir string, cfg sourceModelConfig, chatTemplate 
 func rendererNameForIdentifier(modelDir, s, chatTemplate string) (string, error) {
 	s = strings.ToLower(s)
 	switch {
+	case isApertusFamily(s):
+		return "apertus", nil
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer", nil
 	case strings.Contains(s, "laguna"):
