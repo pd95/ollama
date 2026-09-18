@@ -113,6 +113,19 @@ func NewTensorDataFromBytes(name, dtype string, shape []int32, rawData []byte) *
 	}
 }
 
+// NewTensorDataFromReaderAt creates TensorData over an existing random-access
+// reader without copying its contents. The caller must keep the reader alive
+// while the tensor is in use.
+func NewTensorDataFromReaderAt(name, dtype string, shape []int32, readerAt io.ReaderAt, size int64) *TensorData {
+	return &TensorData{
+		Name:   name,
+		Dtype:  dtype,
+		Shape:  append([]int32(nil), shape...),
+		Size:   size,
+		reader: io.NewSectionReader(readerAt, 0, size),
+	}
+}
+
 // ExtractRawFromSafetensors reads a safetensors-wrapped reader and extracts
 // the raw tensor data bytes (stripping the header).
 func ExtractRawFromSafetensors(r io.Reader) ([]byte, error) {
