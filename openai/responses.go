@@ -257,6 +257,24 @@ func (o *ResponsesFunctionCallOutput) UnmarshalJSON(data []byte) error {
 
 func (ResponsesFunctionCallOutput) responsesInputItem() {}
 
+type ResponsesCustomToolCall struct {
+	ID     string `json:"id,omitempty"`
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
+	Name   string `json:"name"`
+	Input  string `json:"input"`
+}
+
+func (ResponsesCustomToolCall) responsesInputItem() {}
+
+type ResponsesCustomToolCallOutput struct {
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
+	Output string `json:"output"`
+}
+
+func (ResponsesCustomToolCallOutput) responsesInputItem() {}
+
 // ResponsesToolSearchCall is a tool_search_call input item.
 type ResponsesToolSearchCall struct {
 	ID        string                        `json:"id,omitempty"`
@@ -373,6 +391,18 @@ func unmarshalResponsesInputItem(data []byte) (ResponsesInputItem, error) {
 		return fc, nil
 	case "function_call_output":
 		var output ResponsesFunctionCallOutput
+		if err := json.Unmarshal(data, &output); err != nil {
+			return nil, err
+		}
+		return output, nil
+	case "custom_tool_call":
+		var call ResponsesCustomToolCall
+		if err := json.Unmarshal(data, &call); err != nil {
+			return nil, err
+		}
+		return call, nil
+	case "custom_tool_call_output":
+		var output ResponsesCustomToolCallOutput
 		if err := json.Unmarshal(data, &output); err != nil {
 			return nil, err
 		}
@@ -497,7 +527,8 @@ type ResponsesTool struct {
 	// Tools carries a "namespace" declaration's member functions. The
 	// Responses API groups related tools by domain under a namespace tool
 	// whose nested tools array holds the real function definitions.
-	Tools []ResponsesTool `json:"tools,omitempty"`
+	Tools  []ResponsesTool `json:"tools,omitempty"`
+	Format json.RawMessage `json:"format,omitempty"`
 }
 
 type ResponsesRequest struct {
@@ -609,7 +640,10 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 			// so the tool result immediately follows the call it answers.
 			var outputCallID string
 			if i+1 < len(r.Input.Items) {
-				if output, ok := r.Input.Items[i+1].(ResponsesFunctionCallOutput); ok {
+				switch output := r.Input.Items[i+1].(type) {
+				case ResponsesFunctionCallOutput:
+					outputCallID = output.CallID
+				case ResponsesCustomToolCallOutput:
 					outputCallID = output.CallID
 				}
 			}
@@ -675,6 +709,21 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 				message.ToolName = qualifyNamespaceToolName(v.Namespace, v.Name)
 			}
 			messages = append(messages, message)
+		case ResponsesCustomToolCall:
+			if v.Name != "apply_patch" {
+				return nil, fmt.Errorf("unsupported responses custom tool call %q", v.Name)
+			}
+			args := api.NewToolCallFunctionArguments()
+			args.Set("input", v.Input)
+			messages = appendResponseToolCall(messages, api.ToolCall{
+				ID: v.CallID,
+				Function: api.ToolCallFunction{
+					Name:      resolver.internalCustomName(v.Name),
+					Arguments: args,
+				},
+			}, &pendingThinking)
+		case ResponsesCustomToolCallOutput:
+			messages = append(messages, api.Message{Role: "tool", Content: v.Output, ToolCallID: v.CallID})
 		case ResponsesToolSearchCall:
 			messages = appendResponseToolCall(messages, api.ToolCall{
 				ID: v.CallID,
@@ -775,6 +824,14 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 			tools = append(tools, tool)
 			continue
 		}
+		if t.Type == "custom" {
+			tool, err := customApplyPatchTool(t, resolver.applyPatchExample)
+			if err != nil {
+				return nil, err
+			}
+			tools = append(tools, tool)
+			continue
+		}
 		expanded, err := convertTools(t)
 		if err != nil {
 			return nil, err
@@ -782,7 +839,8 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 		for _, tool := range expanded {
 			// The built-in tool owns this name. Keeping a user-declared function
 			// with the same name makes a model call ambiguous.
-			if (hasWebSearch && tool.Function.Name == "web_search") ||
+			if (resolver.hasCustomApplyPatch && tool.Function.Name == "apply_patch") ||
+				(hasWebSearch && tool.Function.Name == "web_search") ||
 				(hasToolSearch && tool.Function.Name == "tool_search") {
 				continue
 			}
@@ -809,6 +867,11 @@ func FromResponsesRequest(r ResponsesRequest) (*api.ChatRequest, error) {
 		Format:   format,
 		Think:    think,
 	}, nil
+}
+
+func applyPatchExampleForModel(model string) bool {
+	model = strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(strings.TrimSpace(model)))
+	return model != "" && !strings.HasPrefix(model, "gptoss")
 }
 
 func appendResponseToolCall(messages []api.Message, toolCall api.ToolCall, pendingThinking *string) []api.Message {
@@ -905,43 +968,111 @@ func convertTools(t ResponsesTool) ([]api.Tool, error) {
 }
 
 type responsesToolExternalName struct {
+	kind      responsesToolKind
 	namespace string
 	name      string
 }
 
+type responsesToolKind string
+
+const responsesToolKindCustom responsesToolKind = "custom"
+
 type responsesToolResolver struct {
-	byExternal map[responsesToolExternalName]string
-	byInternal map[string]responsesToolExternalName
-	declared   map[responsesToolExternalName]bool
+	byExternal          map[responsesToolExternalName]string
+	byInternal          map[string]responsesToolExternalName
+	declared            map[responsesToolExternalName]bool
+	hasCustomApplyPatch bool
+	applyPatchExample   bool
 }
 
 func newResponsesToolResolver(r ResponsesRequest) (*responsesToolResolver, error) {
-	resolver, err := newResponsesToolResolverFromTools(responsesRequestTools(r))
+	if err := rejectResponsesToolSearchCustomTools(r); err != nil {
+		return nil, err
+	}
+
+	hasHistoryCustom := false
+	for _, item := range r.Input.Items {
+		if call, ok := item.(ResponsesCustomToolCall); ok && call.Name == "apply_patch" {
+			hasHistoryCustom = true
+		}
+	}
+	resolver, err := newResponsesToolResolverFromToolsWithCustom(responsesRequestTools(r), hasHistoryCustom)
 	if err != nil {
 		return nil, err
 	}
 	for _, item := range r.Input.Items {
 		call, ok := item.(ResponsesFunctionCall)
-		if !ok {
+		if ok {
+			if call.Namespace == "" {
+				if external, found := resolver.byInternal[call.Name]; found && resolver.declared[external] {
+					continue
+				}
+			}
+			if err := resolver.register(call.Namespace, call.Name, false); err != nil {
+				return nil, err
+			}
 			continue
 		}
-		if call.Namespace == "" {
-			if external, ok := resolver.byInternal[call.Name]; ok && resolver.declared[external] {
-				continue
+		if custom, ok := item.(ResponsesCustomToolCall); ok {
+			if custom.Name != "apply_patch" {
+				return nil, fmt.Errorf("unsupported responses custom tool call %q", custom.Name)
+			}
+			if err := resolver.registerKind(responsesToolKindCustom, "", custom.Name, false); err != nil {
+				return nil, err
 			}
 		}
-		if err := resolver.register(call.Namespace, call.Name, false); err != nil {
-			return nil, err
-		}
 	}
+	resolver.applyPatchExample = applyPatchExampleForModel(r.Model)
 	return resolver, nil
 }
 
+func rejectResponsesToolSearchCustomTools(r ResponsesRequest) error {
+	var rejectCustom func(ResponsesTool) error
+	rejectCustom = func(tool ResponsesTool) error {
+		if tool.Type == "custom" {
+			return fmt.Errorf("responses custom tool %q from tool_search_output is not supported", tool.Name)
+		}
+		for _, nested := range tool.Tools {
+			if err := rejectCustom(nested); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	for _, item := range r.Input.Items {
+		output, ok := item.(ResponsesToolSearchOutput)
+		if !ok {
+			continue
+		}
+		for _, raw := range output.Tools {
+			var tool ResponsesTool
+			if err := json.Unmarshal(raw, &tool); err != nil {
+				continue
+			}
+			if err := rejectCustom(tool); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func newResponsesToolResolverFromTools(tools []ResponsesTool) (*responsesToolResolver, error) {
+	return newResponsesToolResolverFromToolsWithCustom(tools, false)
+}
+
+func newResponsesToolResolverFromToolsWithCustom(tools []ResponsesTool, hasCustom bool) (*responsesToolResolver, error) {
 	resolver := &responsesToolResolver{
-		byExternal: make(map[responsesToolExternalName]string),
-		byInternal: make(map[string]responsesToolExternalName),
-		declared:   make(map[responsesToolExternalName]bool),
+		byExternal:          make(map[responsesToolExternalName]string),
+		byInternal:          make(map[string]responsesToolExternalName),
+		declared:            make(map[responsesToolExternalName]bool),
+		hasCustomApplyPatch: hasCustom,
+	}
+	for _, tool := range tools {
+		if tool.Type == "custom" && tool.Name == "apply_patch" {
+			resolver.hasCustomApplyPatch = true
+		}
 	}
 	for _, tool := range tools {
 		if err := resolver.registerTool("", tool); err != nil {
@@ -968,11 +1099,22 @@ func (r *responsesToolResolver) registerTool(namespace string, tool ResponsesToo
 		}
 	case "function":
 		return r.register(namespace, tool.Name, true)
+	case "custom":
+		if namespace != "" {
+			return fmt.Errorf("responses custom tool %q must be top-level", tool.Name)
+		}
+		if tool.Name != "apply_patch" {
+			return fmt.Errorf("unsupported responses custom tool %q", tool.Name)
+		}
+		return r.registerKind(responsesToolKindCustom, "", tool.Name, true)
 	}
 	return nil
 }
 
 func describeResponsesToolName(name responsesToolExternalName) string {
+	if name.kind == responsesToolKindCustom {
+		return fmt.Sprintf("custom tool %q", name.name)
+	}
 	if name.namespace == "" {
 		return fmt.Sprintf("flat function %q", name.name)
 	}
@@ -980,11 +1122,18 @@ func describeResponsesToolName(name responsesToolExternalName) string {
 }
 
 func (r *responsesToolResolver) register(namespace, name string, declaration bool) error {
+	return r.registerKind("", namespace, name, declaration)
+}
+
+func (r *responsesToolResolver) registerKind(kind responsesToolKind, namespace, name string, declaration bool) error {
 	if name == "" {
 		return fmt.Errorf("responses function name must not be empty")
 	}
-	external := responsesToolExternalName{namespace: namespace, name: name}
+	external := responsesToolExternalName{kind: kind, namespace: namespace, name: name}
 	internal := qualifyNamespaceToolName(namespace, name)
+	if kind == "" && namespace == "" && name == "apply_patch" && r.hasCustomApplyPatch {
+		internal = "apply_patch__function"
+	}
 	if _, ok := r.byExternal[external]; ok {
 		if declaration {
 			return fmt.Errorf("duplicate responses tool declaration for %s", describeResponsesToolName(external))
@@ -1024,6 +1173,18 @@ func (r *responsesToolResolver) internalName(namespace, name string) string {
 	return qualifyNamespaceToolName(namespace, name)
 }
 
+func (r *responsesToolResolver) internalCustomName(name string) string {
+	if internal, ok := r.byExternal[responsesToolExternalName{kind: responsesToolKindCustom, name: name}]; ok {
+		return internal
+	}
+	return name
+}
+
+func (r *responsesToolResolver) customName(internal string) (string, bool) {
+	external, ok := r.byInternal[internal]
+	return external.name, ok && external.kind == responsesToolKindCustom
+}
+
 func (r *responsesToolResolver) externalName(internal string) (namespace, name string) {
 	if external, ok := r.byInternal[internal]; ok {
 		return external.namespace, external.name
@@ -1059,6 +1220,17 @@ func ResponsesFunctionCallOutputItems(request ResponsesRequest, idPrefix string,
 	converted := ToToolCalls(toolCalls)
 	items := make([]ResponsesOutputItem, 0, len(converted))
 	for i, tc := range converted {
+		if resolver != nil {
+			if name, custom := resolver.customName(tc.Function.Name); custom {
+				if input, ok := applyPatchInput(toolCalls[i]); ok {
+					items = append(items, ResponsesOutputItem{
+						ID: customToolCallItemID(idPrefix, i), Type: "custom_tool_call", Status: "completed",
+						CallID: tc.ID, Name: name, Input: input,
+					})
+					continue
+				}
+			}
+		}
 		name, namespace := tc.Function.Name, ""
 		if resolver != nil {
 			namespace, name = resolver.externalName(tc.Function.Name)
@@ -1074,6 +1246,10 @@ func ResponsesFunctionCallOutputItems(request ResponsesRequest, idPrefix string,
 		})
 	}
 	return items
+}
+
+func customToolCallItemID(idPrefix string, index int) string {
+	return fmt.Sprintf("ctc_%s%d", strings.TrimPrefix(idPrefix, "fc_"), index)
 }
 
 // modelToolSearchTools flattens namespace members.
@@ -1164,6 +1340,74 @@ func convertTool(t ResponsesTool) (api.Tool, error) {
 			Parameters:  params,
 		},
 	}, nil
+}
+
+func customApplyPatchTool(t ResponsesTool, includeExample bool) (api.Tool, error) {
+	if t.Name != "apply_patch" {
+		return api.Tool{}, fmt.Errorf("unsupported responses custom tool %q", t.Name)
+	}
+	return api.Tool{
+		Type: "function",
+		Function: api.ToolFunction{
+			Name:        "apply_patch",
+			Description: applyPatchToolDescription(t, includeExample),
+			Parameters:  applyPatchFunctionParameters(),
+		},
+	}, nil
+}
+
+func applyPatchToolDescription(t ResponsesTool, includeExample bool) string {
+	description := "Apply a patch to files. The input field must contain the complete raw patch text."
+	if t.Description != nil && strings.TrimSpace(*t.Description) != "" {
+		description = *t.Description
+	}
+	if len(t.Format) == 0 || string(t.Format) == "null" {
+		return description
+	}
+	var format struct {
+		Type       string `json:"type"`
+		Syntax     string `json:"syntax"`
+		Definition string `json:"definition"`
+	}
+	if err := json.Unmarshal(t.Format, &format); err == nil &&
+		format.Type == "grammar" && format.Syntax == "lark" &&
+		strings.Contains(format.Definition, "*** Begin Patch") &&
+		strings.Contains(format.Definition, "*** Update File:") &&
+		strings.Contains(format.Definition, "*** End Patch") {
+		instructions := "\n\nFor the custom Lark patch format, emit only raw patch text: begin with *** Begin Patch; use *** Update File: <path>, then a plain @@ line (never a numbered unified-diff header such as @@ -1,3 +1,3 @@ and never ---/+++ file headers), then -old and +new lines; finish with *** End Patch. Every patch control and hunk line must start in column 1; never indent it. In an update hunk, prefix unchanged context lines with one space, and make - and + the first character of removed and added lines."
+		if includeExample {
+			instructions += "\n\nExample complete input:\n*** Begin Patch\n*** Update File: path/to/file\n@@\n-old text\n+new text\n*** End Patch"
+		}
+		return description + instructions
+	}
+	return description
+}
+
+func applyPatchFunctionParameters() api.ToolFunctionParameters {
+	properties := api.NewToolPropertiesMap()
+	properties.Set("input", api.ToolProperty{
+		Type:        api.PropertyType{"string"},
+		Description: "Complete raw patch text. Use the custom patch format guidance in this tool's description.",
+	})
+	return api.ToolFunctionParameters{Type: "object", Required: []string{"input"}, Properties: properties}
+}
+
+func applyPatchInput(toolCall api.ToolCall) (string, bool) {
+	if toolCall.Function.Name != "apply_patch" {
+		return "", false
+	}
+	input, ok := toolCall.Function.Arguments.Get("input")
+	if !ok {
+		return "", false
+	}
+	patch, ok := input.(string)
+	if !ok || !strings.HasPrefix(patch, "*** Begin Patch\n") {
+		return "", false
+	}
+	if !strings.HasSuffix(strings.TrimRight(patch, "\n"), "*** End Patch") {
+		return "", false
+	}
+	return patch, true
 }
 
 func convertInputMessage(m ResponsesInputMessage) (api.Message, error) {
@@ -1279,6 +1523,7 @@ type ResponsesOutputItem struct {
 	Namespace string                    `json:"namespace,omitempty"` // for namespaced function_call
 	Execution string                    `json:"execution,omitempty"` // for tool_search_call
 	Arguments any                       `json:"arguments,omitempty"` // string for function_call, object for tool_search_call
+	Input     string                    `json:"input,omitempty"`     // for custom_tool_call
 	Action    *ResponsesWebSearchAction `json:"action,omitempty"`    // for web_search_call
 
 	// Reasoning fields
@@ -1380,6 +1625,7 @@ func ToResponse(model, responseID, itemID string, chatResponse api.ChatResponse,
 	if len(chatResponse.Message.ToolCalls) > 0 {
 		toolCalls := ToToolCalls(chatResponse.Message.ToolCalls)
 		availableTools := responsesRequestTools(request)
+		resolver, _ := newResponsesToolResolver(request)
 		for i, tc := range toolCalls {
 			if HasToolSearchTool(request.Tools) && tc.Function.Name == "tool_search" {
 				output = append(output, ResponsesOutputItem{
@@ -1391,6 +1637,17 @@ func ToResponse(model, responseID, itemID string, chatResponse api.ChatResponse,
 					Arguments: toolSearchArguments(tc.Function.Arguments),
 				})
 				continue
+			}
+			if resolver != nil {
+				if name, custom := resolver.customName(tc.Function.Name); custom {
+					if input, ok := applyPatchInput(chatResponse.Message.ToolCalls[i]); ok {
+						output = append(output, ResponsesOutputItem{
+							ID: fmt.Sprintf("ctc_%s_%d", responseID, i), Type: "custom_tool_call", Status: "completed",
+							CallID: tc.ID, Name: name, Input: input,
+						})
+						continue
+					}
+				}
 			}
 			namespace, name := responsesToolCallName(availableTools, tc.Function.Name)
 			output = append(output, ResponsesOutputItem{
@@ -1521,6 +1778,7 @@ type ResponsesStreamConverter struct {
 	itemID     string
 	model      string
 	request    ResponsesRequest
+	resolver   *responsesToolResolver
 
 	// State tracking (mutated across Process calls)
 	firstWrite      bool
@@ -1553,11 +1811,13 @@ func (c *ResponsesStreamConverter) newEvent(eventType string, data map[string]an
 
 // NewResponsesStreamConverter creates a new converter with the given configuration.
 func NewResponsesStreamConverter(responseID, itemID, model string, request ResponsesRequest) *ResponsesStreamConverter {
+	resolver, _ := newResponsesToolResolver(request)
 	return &ResponsesStreamConverter{
 		responseID: responseID,
 		itemID:     itemID,
 		model:      model,
 		request:    request,
+		resolver:   resolver,
 		firstWrite: true,
 	}
 }
@@ -1823,6 +2083,37 @@ func (c *ResponsesStreamConverter) emitFunctionCallEvents(toolCalls []api.ToolCa
 				}),
 			)
 			continue
+		}
+		if c.resolver != nil {
+			if name, custom := c.resolver.customName(tc.Function.Name); custom {
+				if input, ok := applyPatchInput(toolCalls[i]); ok {
+					itemID := fmt.Sprintf("ctc_%d_%d", rand.Intn(999999), i)
+					item := map[string]any{
+						"id": itemID, "type": "custom_tool_call", "status": "completed",
+						"call_id": tc.ID, "name": name, "input": input,
+					}
+					c.completedItems = append(c.completedItems, item)
+					events = append(events,
+						c.newEvent("response.output_item.added", map[string]any{
+							"output_index": outputIndex,
+							"item": map[string]any{
+								"id": itemID, "type": "custom_tool_call", "status": "in_progress",
+								"call_id": tc.ID, "name": name, "input": "",
+							},
+						}),
+						c.newEvent("response.custom_tool_call_input.delta", map[string]any{
+							"item_id": itemID, "output_index": outputIndex, "delta": input,
+						}),
+						c.newEvent("response.custom_tool_call_input.done", map[string]any{
+							"item_id": itemID, "output_index": outputIndex, "input": input,
+						}),
+						c.newEvent("response.output_item.done", map[string]any{
+							"output_index": outputIndex, "item": item,
+						}),
+					)
+					continue
+				}
+			}
 		}
 		fcItemID := fmt.Sprintf("fc_%d_%d", rand.Intn(999999), i)
 		namespace, name := responsesToolCallName(availableTools, tc.Function.Name)
