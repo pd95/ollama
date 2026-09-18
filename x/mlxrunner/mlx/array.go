@@ -122,7 +122,13 @@ func (t *Array) Clone() *Array {
 // valid reports whether t still refers to an array: false once its scope
 // freed it.
 func (t *Array) valid() bool {
-	return t.ctx.ctx != nil
+	return t != nil && t.ctx.ctx != nil
+}
+
+// Valid reports whether t still refers to an MLX array. It is the public form
+// used by model packages that need to validate optional or scope-owned arrays.
+func (t *Array) Valid() bool {
+	return t.valid()
 }
 
 func (t *Array) free() {
