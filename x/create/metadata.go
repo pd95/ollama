@@ -65,7 +65,7 @@ func modelFamilies(family string) []string {
 
 func inferModelFamilyFromConfig(cfg sourceModelConfig) string {
 	for _, id := range sourceConfigIdentifiers(cfg) {
-		if isApertusFamily(id) {
+		if isApertusFamily(id) || isApertus1p5Family(id) {
 			return "apertus"
 		}
 		if isGPTOSSFamily(id) {
@@ -190,6 +190,11 @@ func isApertusFamily(s string) bool {
 	return s == "apertus" || s == "apertusforcausallm"
 }
 
+func isApertus1p5Family(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "apertus1p5") || strings.Contains(s, "apertus-1.5") || strings.Contains(s, "apertus_1_5")
+}
+
 func isApertus1p0SourceConfig(cfg sourceModelConfig, parserName string) bool {
 	if parserName != "apertus" {
 		return false
@@ -263,7 +268,7 @@ func parserNameForConfig(modelDir string, cfg sourceModelConfig, chatTemplate st
 func parserNameForIdentifier(modelDir, s, chatTemplate string) (string, error) {
 	s = strings.ToLower(s)
 	switch {
-	case isApertusFamily(s):
+	case isApertusFamily(s), isApertus1p5Family(s):
 		return "apertus", nil
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
 		return "glimmer", nil
@@ -303,6 +308,8 @@ func rendererNameForConfig(modelDir string, cfg sourceModelConfig, chatTemplate 
 func rendererNameForIdentifier(modelDir, s, chatTemplate string) (string, error) {
 	s = strings.ToLower(s)
 	switch {
+	case isApertus1p5Family(s):
+		return "apertus1p5", nil
 	case isApertusFamily(s):
 		return "apertus", nil
 	case strings.HasPrefix(s, "museglimmer") || s == "muse_glimmer":
