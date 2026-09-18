@@ -8,6 +8,8 @@ import Settings from "./Settings";
 const mocks = vi.hoisted(() => ({
   resetClaudeMappings: vi.fn(),
   resetChatGPTModels: vi.fn(),
+  checkForUpdates: vi.fn().mockResolvedValue({ status: "up_to_date" }),
+  installUpdate: vi.fn().mockResolvedValue({ status: "installing" }),
   updateSettings: vi.fn(),
   updateCloudSetting: vi.fn(),
   setShowAppsInMenu: vi.fn(),
@@ -137,6 +139,8 @@ vi.mock("@tanstack/react-query", () => ({
 }));
 
 vi.mock("@/api", () => ({
+  checkForUpdates: mocks.checkForUpdates,
+  installUpdate: mocks.installUpdate,
   getSettings: vi.fn(),
   getInferenceCompute: vi.fn(),
   updateSettings: mocks.updateSettings,
