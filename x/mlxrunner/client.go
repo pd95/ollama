@@ -27,6 +27,7 @@ import (
 	"github.com/ollama/ollama/llm"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/x/imagegen/manifest"
+	"github.com/ollama/ollama/x/mlxrunner/mlx"
 )
 
 // Client wraps an MLX runner subprocess to implement llm.LlamaServer for LLM models.
@@ -42,12 +43,15 @@ type Client struct {
 	status            *llm.StatusWriter
 	mu                sync.Mutex
 	cmd               *exec.Cmd
+	closed            bool
 }
+
+var ErrRuntimeUnavailable = errors.New("MLX runtime is not available")
 
 // NewClient prepares a new MLX runner client for LLM models.
 // The subprocess is not started until Load() is called.
 func NewClient(modelName string, softContextLength int) (*Client, error) {
-	if err := checkPlatformSupport(); err != nil {
+	if err := CheckRuntime(); err != nil {
 		return nil, err
 	}
 
@@ -67,18 +71,12 @@ func NewClient(modelName string, softContextLength int) (*Client, error) {
 	return c, nil
 }
 
-func checkPlatformSupport() error {
-	switch runtime.GOOS {
-	case "darwin":
-		if runtime.GOARCH != "arm64" {
-			return fmt.Errorf("MLX on macOS requires Apple Silicon (arm64), got %s", runtime.GOARCH)
-		}
-		return nil
-	case "linux", "windows":
-		return nil
-	default:
-		return fmt.Errorf("MLX is not supported on %s", runtime.GOOS)
+// CheckRuntime reports whether an MLX dynamic library was loaded successfully.
+func CheckRuntime() error {
+	if _, err := mlx.LoadedLibraryPath(); err != nil {
+		return fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
+	return nil
 }
 
 // WaitUntilRunning waits for the subprocess to be ready.
@@ -141,15 +139,11 @@ func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	c.closed = true
 	if c.cmd != nil && c.cmd.Process != nil {
 		slog.Info("stopping mlx runner subprocess", "pid", c.cmd.Process.Pid)
-		c.cmd.Process.Signal(os.Interrupt)
-
-		select {
-		case <-c.done:
-		case <-time.After(5 * time.Second):
-			c.cmd.Process.Kill()
-		}
+		c.cmd.Process.Kill()
+		<-c.done
 		c.cmd = nil
 	}
 	return nil
@@ -301,11 +295,14 @@ func (c *Client) HasExited() bool {
 }
 
 // Load checks whether the model fits in GPU memory and starts the subprocess.
-func (c *Client) Load(ctx context.Context, _ ml.SystemInfo, gpus []ml.DeviceInfo, requireFull bool) ([]ml.DeviceID, error) {
+func (c *Client) Load(ctx context.Context, systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, requireFull bool) ([]ml.DeviceID, error) {
 	if len(gpus) > 0 {
 		modelSize := c.memory.Load()
 		// We currently only use the first GPU with MLX
 		available := gpus[0].FreeMemory
+		if requireFull && gpus[0].Integrated && systemInfo.FreeMemory > 0 && systemInfo.FreeMemory < available {
+			available = systemInfo.FreeMemory
+		}
 		overhead := gpus[0].MinimumMemory() + envconfig.GpuOverhead()
 		if available > overhead {
 			available -= overhead
@@ -402,19 +399,24 @@ func (c *Client) Load(ctx context.Context, _ ml.SystemInfo, gpus []ml.DeviceInfo
 		}
 	}
 
-	c.cmd = cmd
-
 	status := llm.NewStatusWriter(os.Stderr)
-	c.status = status
 	// os/exec serializes Write calls when shared, which keeps the status writer
 	// from seeing concurrent stdout/stderr fragments.
 	cmd.Stdout = status
 	cmd.Stderr = status
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, errors.New("mlx runner client is closed")
+	}
+
+	c.status = status
 	slog.Info("starting mlx runner subprocess", "model", c.modelName, "port", c.port)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start mlx runner: %w", err)
 	}
+	c.cmd = cmd
 
 	// Reap subprocess when it exits
 	go func() {
