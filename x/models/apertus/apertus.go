@@ -91,15 +91,24 @@ type Config struct {
 
 // Model is an Apertus text model.
 type Model struct {
-	EmbedTokens nn.EmbeddingLayer
-	Layers      []*Layer
-	Norm        *nn.RMSNorm
-	LMHead      nn.LinearLayer
-	Vision      *VisionTokenizer
-	Audio       *AudioTokenizer
+	EmbedTokens      nn.EmbeddingLayer
+	Layers           []*Layer
+	Norm             *nn.RMSNorm
+	LMHead           nn.LinearLayer
+	Vision           *VisionTokenizer
+	Audio            *AudioTokenizer
+	mediaMemoryLimit uint64
+	mediaResident    uint64
 
 	tok *tokenizer.Tokenizer
 	*Config
+}
+
+// ConfigureMediaMemory receives the runner's stable per-process media budget
+// after model weights have been materialized.
+func (m *Model) ConfigureMediaMemory(limit, resident uint64) {
+	m.mediaMemoryLimit = limit
+	m.mediaResident = resident
 }
 
 type Layer struct {
@@ -169,12 +178,8 @@ func newModel(root *model.Root) (base.Model, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load tokenizer config: %w", err)
 	}
-	tokData, err = tokenizerDataForConfig(cfg, tokData)
-	if err != nil {
-		return nil, fmt.Errorf("prepare Apertus tokenizer: %w", err)
-	}
 
-	tokConfig := &tokenizer.TokenizerConfig{ConfigJSON: configData}
+	tokConfig := tokenizerConfigForModel(cfg, configData)
 	if data, err := root.Manifest.ReadConfig("generation_config.json"); err == nil {
 		tokConfig.GenerationConfigJSON = data
 	}
@@ -196,44 +201,12 @@ func isApertus1p5Config(cfg Config) bool {
 	return cfg.Architecture == apertus1p5Architecture
 }
 
-func tokenizerDataForConfig(cfg Config, data []byte) ([]byte, error) {
-	if !isApertus1p5Config(cfg) {
-		return data, nil
+func tokenizerConfigForModel(cfg Config, configData []byte) *tokenizer.TokenizerConfig {
+	tokConfig := &tokenizer.TokenizerConfig{ConfigJSON: configData}
+	if isApertus1p5Config(cfg) {
+		tokConfig.AddedTokenIDLimit = cfg.VocabSize
 	}
-	return pruneApertus1p5TokenizerAddedTokens(data, cfg.OutputVocabSize)
-}
-
-func pruneApertus1p5TokenizerAddedTokens(data []byte, outputVocabSize int32) ([]byte, error) {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	addedRaw, ok := raw["added_tokens"]
-	if !ok {
-		return data, nil
-	}
-	var added []json.RawMessage
-	if err := json.Unmarshal(addedRaw, &added); err != nil {
-		return nil, err
-	}
-	filtered := make([]json.RawMessage, 0, len(added))
-	for _, tokenRaw := range added {
-		var token struct {
-			ID int32 `json:"id"`
-		}
-		if err := json.Unmarshal(tokenRaw, &token); err != nil {
-			return nil, err
-		}
-		if token.ID >= 0 && token.ID < outputVocabSize {
-			filtered = append(filtered, tokenRaw)
-		}
-	}
-	filteredRaw, err := json.Marshal(filtered)
-	if err != nil {
-		return nil, err
-	}
-	raw["added_tokens"] = filteredRaw
-	return json.Marshal(raw)
+	return tokConfig
 }
 
 func parseConfig(configData []byte) (Config, error) {
@@ -543,6 +516,14 @@ func hasTensorPrefix(tensors map[string]*mlx.Array, prefix string) bool {
 		}
 	}
 	return false
+}
+
+func canValidateVisionTokenizer(tensors map[string]*mlx.Array, cfg VisionTokenizerConfig) bool {
+	return hasTensorPrefix(tensors, "model.vision_tokenizer.") && cfg.validate() == nil
+}
+
+func canValidateAudioTokenizer(tensors map[string]*mlx.Array, cfg AudioTokenizerConfig) bool {
+	return hasTensorPrefix(tensors, "model.audio_tokenizer.") && cfg.validate() == nil
 }
 
 func qkNormShape(batch, seqLen, heads, headDim int32) []int32 {
@@ -876,7 +857,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		return err
 	}
 	mediaConfig := m.mediaMetadataConfig()
-	if hasTensorPrefix(tensors, "model.vision_tokenizer.") {
+	if canValidateVisionTokenizer(tensors, m.VisionTokenizer) {
 		if err := apertusmetadata.ValidateVisionInventory(mediaConfig, mediaDescriptors); err != nil {
 			return err
 		}
@@ -885,7 +866,7 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 			return fmt.Errorf("load Apertus 1.5 vision tokenizer: %w", err)
 		}
 	}
-	if hasTensorPrefix(tensors, "model.audio_tokenizer.") {
+	if canValidateAudioTokenizer(tensors, m.AudioTokenizer) {
 		if err := apertusmetadata.ValidateAudioInventory(mediaConfig, mediaDescriptors); err != nil {
 			return err
 		}

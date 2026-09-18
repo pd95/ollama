@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/ollama/ollama/x/mlxrunner/mlx"
+	mlxaudio "github.com/ollama/ollama/x/mlxrunner/model/audio"
 	"github.com/ollama/ollama/x/models/nn"
 )
 
@@ -87,21 +88,32 @@ func (c *apertureAudioConv) forward(x *mlx.Array) *mlx.Array {
 	right := paddingTotal / 2
 	left := paddingTotal - right
 	extra := ((length+c.stride-1)/c.stride)*c.stride - length
-	paddedLength := length + left + right + extra
+	maxPad := max(left, right+extra)
+	extraZero := int32(0)
+	reflectLength := length
+	if length <= maxPad {
+		extraZero = maxPad - length + 1
+		x = mlx.PadConstant(x, []int{1}, []int{0}, []int{int(extraZero)})
+		reflectLength += extraZero
+	}
+	paddedLength := reflectLength + left + right + extra
 	indices := make([]int32, paddedLength)
-	period := max(int32(1), 2*(length-1))
+	period := max(int32(1), 2*(reflectLength-1))
 	for i := range indices {
 		position := int32(i) - left
 		position %= period
 		if position < 0 {
 			position += period
 		}
-		if position >= length {
+		if position >= reflectLength {
 			position = period - position
 		}
 		indices[i] = position
 	}
 	x = mlx.Take(x, mlx.FromValues(indices, len(indices)), 1)
+	if extraZero > 0 {
+		x = x.Slice(mlx.Slice(), mlx.Slice(0, int(length+left+right+extra)), mlx.Slice())
+	}
 	return c.conv.Forward(x)
 }
 
@@ -157,7 +169,7 @@ func loadApertureLSTM(tensors map[string]*mlx.Array, path string, layers int, hi
 	return l, nil
 }
 
-func (l *apertureLSTM) forward(input *mlx.Array) (*mlx.Array, error) {
+func (l *apertureLSTM) forward(input *mlx.Array, materialize func(...*mlx.Array)) (*mlx.Array, error) {
 	residual := input
 	x := input
 	for layer := range l.inputWeights {
@@ -177,6 +189,14 @@ func (l *apertureLSTM) forward(input *mlx.Array) (*mlx.Array, error) {
 			o := mlx.Sigmoid(gates.Slice(mlx.Slice(), mlx.Slice(int(3*l.hidden), int(4*l.hidden))))
 			c = mlx.Add(mlx.Mul(f, c), mlx.Mul(i, g))
 			h = mlx.Mul(o, c.Tanh())
+			if materialize != nil {
+				keep := make([]*mlx.Array, 0, len(outputs)+4)
+				keep = append(keep, outputs...)
+				// x is sliced again by the next recurrent step; residual is
+				// reused after every LSTM layer.
+				keep = append(keep, h, c, x, residual)
+				materialize(keep...)
+			}
 			outputs = append(outputs, h.ExpandDims(1))
 		}
 		x = mlx.Concatenate(outputs, 1)
@@ -255,27 +275,40 @@ func loadAudioTokenizer(tensors map[string]*mlx.Array, cfg AudioTokenizerConfig)
 }
 
 func (a *AudioTokenizer) encode(data *mlx.Array, sampleCount int) (*mlx.Array, error) {
+	return a.encodeStaged(data, sampleCount, nil)
+}
+
+func (a *AudioTokenizer) encodeStaged(data *mlx.Array, sampleCount int, materialize func(...*mlx.Array)) (*mlx.Array, error) {
 	if sampleCount == 0 {
 		return nil, errors.New("empty Apertus audio")
 	}
 	x := mlx.Reshape(data, 1, int32(sampleCount), 1)
 	h := a.initial.forward(x)
+	if materialize != nil {
+		materialize(h)
+	}
 	if h.Dim(1) == 0 {
 		return nil, fmt.Errorf("Apertus audio initial convolution produced an empty sequence from %d samples", sampleCount)
 	}
 	for i := range a.residuals {
 		h = a.residuals[i].forward(h)
 		h = a.downsample[i].forward(apertureELU(h))
+		if materialize != nil {
+			materialize(h)
+		}
 		if h.Dim(1) == 0 {
 			return nil, fmt.Errorf("Apertus audio downsample stage %d produced an empty sequence", i)
 		}
 	}
 	var err error
-	h, err = a.lstm.forward(h)
+	h, err = a.lstm.forward(h, materialize)
 	if err != nil {
 		return nil, err
 	}
 	h = a.final.forward(apertureELU(h))
+	if materialize != nil {
+		materialize(h)
+	}
 	flat := mlx.Reshape(h, int32(h.Dim(1)), a.config.CodebookDim)
 	dot := mlx.Mul(mlx.Matmul(flat, mlx.Transpose(a.codebook, 1, 0)), mlx.NewScalarArray(float32(2)))
 	codeNorm := mlx.Sum(mlx.Mul(a.codebook, a.codebook), 1, false)
@@ -288,7 +321,7 @@ type apertusAudioInput struct {
 }
 
 func preprocessApertusAudio(ctx context.Context, data []byte, cfg AudioTokenizerConfig) (*apertusAudioInput, error) {
-	samples, err := decodeApertusWAV(ctx, data, int(cfg.SamplingRate))
+	samples, err := decodeApertusAudio(ctx, data, int(cfg.SamplingRate))
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +341,29 @@ func preprocessApertusAudio(ctx context.Context, data []byte, cfg AudioTokenizer
 		}
 	}
 	return &apertusAudioInput{samples: samples, codes: (len(samples) + cfg.hopLength() - 1) / cfg.hopLength()}, nil
+}
+
+func decodeApertusAudio(ctx context.Context, data []byte, targetRate int) ([]float32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(data) > maxApertusAudioBytes {
+		return nil, fmt.Errorf("Apertus audio is %d bytes, limit %d", len(data), maxApertusAudioBytes)
+	}
+	samples, sampleRate, err := mlxaudio.Decode(data)
+	if err != nil {
+		return nil, fmt.Errorf("decode Apertus audio: %w", err)
+	}
+	if sampleRate != targetRate {
+		samples = mlxaudio.Resample(samples, sampleRate, targetRate)
+	}
+	if len(samples) > maxApertusAudioSamples {
+		return nil, fmt.Errorf("Apertus audio has %d samples, limit %d", len(samples), maxApertusAudioSamples)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return samples, nil
 }
 
 func decodeApertusWAV(ctx context.Context, data []byte, targetRate int) ([]float32, error) {
