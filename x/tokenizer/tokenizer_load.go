@@ -8,12 +8,41 @@ import (
 	"strings"
 )
 
+const maxTokenizerVocabularySize = 1 << 20
+
+type addedToken struct {
+	ID      int32  `json:"id"`
+	Content string `json:"content"`
+	Special bool   `json:"special"`
+}
+
+func validateTokenizerRecordCount(baseCount, addedCount int) error {
+	if baseCount > maxTokenizerVocabularySize || addedCount > maxTokenizerVocabularySize-baseCount {
+		return fmt.Errorf("tokenizer has too many vocabulary records (maximum %d)", maxTokenizerVocabularySize)
+	}
+	return nil
+}
+
+func validateTokenizerID(id int32) error {
+	if id < 0 {
+		return fmt.Errorf("tokenizer ID %d must not be negative", id)
+	}
+	if id >= maxTokenizerVocabularySize {
+		return fmt.Errorf("tokenizer ID %d exceeds maximum %d", id, maxTokenizerVocabularySize-1)
+	}
+	return nil
+}
+
 // TokenizerConfig holds optional configuration data that can be passed to LoadFromBytesWithConfig.
 type TokenizerConfig struct {
 	TokenizerConfigJSON  []byte // tokenizer_config.json content
 	GenerationConfigJSON []byte // generation_config.json content
 	SpecialTokensMapJSON []byte // special_tokens_map.json content
 	ConfigJSON           []byte // config.json content
+	// AddedTokenIDLimit is an optional exclusive upper bound for added token IDs.
+	// When positive, added tokens with negative IDs or IDs at or above the limit
+	// are ignored. A zero value disables filtering.
+	AddedTokenIDLimit int32
 }
 
 // LoadFromBytes loads a tokenizer from tokenizer.json bytes.
@@ -21,13 +50,17 @@ type TokenizerConfig struct {
 // Note: This won't load special token config from companion files. Use LoadFromBytesWithConfig
 // to provide tokenizer_config.json data for proper PAD/EOS token loading.
 func LoadFromBytes(data []byte) (*Tokenizer, error) {
-	return loadFromTokenizerJSON(data)
+	return loadFromTokenizerJSON(data, 0)
 }
 
 // LoadFromBytesWithConfig loads a tokenizer from tokenizer.json bytes with additional config files.
 // This is useful when loading from blob storage where companion config files are also blobs.
 func LoadFromBytesWithConfig(data []byte, config *TokenizerConfig) (*Tokenizer, error) {
-	t, err := loadFromTokenizerJSON(data)
+	var addedTokenIDLimit int32
+	if config != nil {
+		addedTokenIDLimit = config.AddedTokenIDLimit
+	}
+	t, err := loadFromTokenizerJSON(data, addedTokenIDLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +76,11 @@ func LoadFromBytesWithConfig(data []byte, config *TokenizerConfig) (*Tokenizer, 
 }
 
 // loadFromTokenizerJSON parses tokenizer.json content from bytes.
-func loadFromTokenizerJSON(data []byte) (*Tokenizer, error) {
+func loadFromTokenizerJSON(data []byte, addedTokenIDLimit int32) (*Tokenizer, error) {
+	if addedTokenIDLimit < 0 {
+		return nil, fmt.Errorf("added token ID limit must not be negative: %d", addedTokenIDLimit)
+	}
+
 	var raw struct {
 		Model struct {
 			Type   string           `json:"type"` // "BPE"
@@ -52,11 +89,7 @@ func loadFromTokenizerJSON(data []byte) (*Tokenizer, error) {
 		} `json:"model"`
 		PreTokenizer json.RawMessage `json:"pre_tokenizer"`
 		Decoder      json.RawMessage `json:"decoder"`
-		AddedTokens  []struct {
-			ID      int32  `json:"id"`
-			Content string `json:"content"`
-			Special bool   `json:"special"`
-		} `json:"added_tokens"`
+		AddedTokens  []addedToken    `json:"added_tokens"`
 	}
 
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -66,6 +99,95 @@ func loadFromTokenizerJSON(data []byte) (*Tokenizer, error) {
 	// Covers SentencePiece and BPE models
 	if raw.Model.Type != "BPE" {
 		return nil, fmt.Errorf("unsupported tokenizer type: %s", raw.Model.Type)
+	}
+	if addedTokenIDLimit > 0 {
+		filtered := raw.AddedTokens[:0]
+		for _, tok := range raw.AddedTokens {
+			if tok.ID >= 0 && tok.ID < addedTokenIDLimit {
+				filtered = append(filtered, tok)
+			}
+		}
+		raw.AddedTokens = filtered
+	}
+
+	if err := validateTokenizerRecordCount(len(raw.Model.Vocab), len(raw.AddedTokens)); err != nil {
+		return nil, fmt.Errorf("invalid tokenizer vocabulary: %w", err)
+	}
+
+	baseByID := make(map[int32]string, len(raw.Model.Vocab))
+	maxID := int32(-1)
+	// Select canonical failures instead of returning from randomized map traversal.
+	// Range errors take precedence, and the lowest numeric ID wins within each class.
+	invalidBaseID := int32(0)
+	hasInvalidBaseID := false
+	duplicateBaseID := int32(0)
+	hasDuplicateBaseID := false
+	for token, id := range raw.Model.Vocab {
+		if err := validateTokenizerID(id); err != nil {
+			if !hasInvalidBaseID || id < invalidBaseID {
+				invalidBaseID = id
+				hasInvalidBaseID = true
+			}
+			continue
+		}
+		if _, ok := baseByID[id]; ok {
+			if !hasDuplicateBaseID || id < duplicateBaseID {
+				duplicateBaseID = id
+				hasDuplicateBaseID = true
+			}
+			continue
+		}
+		baseByID[id] = token
+		if id > maxID {
+			maxID = id
+		}
+	}
+	if hasInvalidBaseID {
+		return nil, fmt.Errorf("invalid base token ID: %w", validateTokenizerID(invalidBaseID))
+	}
+	if hasDuplicateBaseID {
+		return nil, fmt.Errorf("duplicate base token ID %d", duplicateBaseID)
+	}
+
+	addedByID := make(map[int32]string, len(raw.AddedTokens))
+	addedByContent := make(map[string]int32, len(raw.AddedTokens))
+	for _, tok := range raw.AddedTokens {
+		if err := validateTokenizerID(tok.ID); err != nil {
+			return nil, fmt.Errorf("invalid added token %q: %w", tok.Content, err)
+		}
+		if _, ok := addedByID[tok.ID]; ok {
+			return nil, fmt.Errorf("duplicate added token ID %d", tok.ID)
+		}
+		if previousID, ok := addedByContent[tok.Content]; ok {
+			first, second := previousID, tok.ID
+			if first > second {
+				first, second = second, first
+			}
+			return nil, fmt.Errorf("duplicate added token content %q with IDs %d and %d", tok.Content, first, second)
+		}
+		addedByID[tok.ID] = tok.Content
+		addedByContent[tok.Content] = tok.ID
+		if tok.ID > maxID {
+			maxID = tok.ID
+		}
+	}
+
+	for _, tok := range raw.AddedTokens {
+		if baseContent, ok := baseByID[tok.ID]; ok && baseContent != tok.Content {
+			return nil, fmt.Errorf("token ID %d has conflicting base and added content", tok.ID)
+		}
+		if baseID, ok := raw.Model.Vocab[tok.Content]; ok && baseID != tok.ID {
+			first, second := baseID, tok.ID
+			if first > second {
+				first, second = second, first
+			}
+			return nil, fmt.Errorf("token content %q has conflicting base and added IDs %d and %d", tok.Content, first, second)
+		}
+	}
+
+	valuesLen := 0
+	if maxID >= 0 {
+		valuesLen = int(maxID) + 1
 	}
 
 	// Parse merges - can be []string (Llama) or [][]string (GPT-OSS).
@@ -91,7 +213,7 @@ func loadFromTokenizerJSON(data []byte) (*Tokenizer, error) {
 	// Build tokenizer
 	t := &Tokenizer{
 		vocab: &Vocabulary{
-			Values:  make([]string, len(raw.Model.Vocab)),
+			Values:  make([]string, valuesLen),
 			Reverse: raw.Model.Vocab,
 			Merges:  make(map[string]int, len(mergesStrings)),
 			BOS:     -1,
@@ -102,11 +224,6 @@ func loadFromTokenizerJSON(data []byte) (*Tokenizer, error) {
 
 	// Build values array
 	for token, id := range raw.Model.Vocab {
-		if int(id) >= len(t.vocab.Values) {
-			newValues := make([]string, id+1)
-			copy(newValues, t.vocab.Values)
-			t.vocab.Values = newValues
-		}
 		t.vocab.Values[id] = token
 	}
 
@@ -121,11 +238,6 @@ func loadFromTokenizerJSON(data []byte) (*Tokenizer, error) {
 	// if it's a "truly special" token like BOS/EOS/PAD, but for tokenization we need
 	// to treat all added_tokens as special to match HuggingFace behavior.
 	for _, tok := range raw.AddedTokens {
-		if int(tok.ID) >= len(t.vocab.Values) {
-			newValues := make([]string, tok.ID+1)
-			copy(newValues, t.vocab.Values)
-			t.vocab.Values = newValues
-		}
 		t.vocab.Values[tok.ID] = tok.Content
 		t.specialTokens[tok.Content] = tok.ID // Add ALL added_tokens to special tokens
 	}
