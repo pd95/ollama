@@ -46,12 +46,11 @@ import (
 	"github.com/ollama/ollama/model/parsers"
 	"github.com/ollama/ollama/model/renderers"
 	"github.com/ollama/ollama/template"
-	"github.com/ollama/ollama/thinking"
+	thinkingparser "github.com/ollama/ollama/thinking"
 	"github.com/ollama/ollama/tools"
 	"github.com/ollama/ollama/types/errtypes"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/version"
-	xserver "github.com/ollama/ollama/x/server"
 )
 
 const signinURLStr = "https://ollama.com/connect?name=%s&key=%s"
@@ -254,12 +253,24 @@ func signinURL() (string, error) {
 func (s *Server) GenerateHandler(c *gin.Context) {
 	checkpointStart := time.Now()
 	var req api.GenerateRequest
-	if err := c.ShouldBindJSON(&req); errors.Is(err, io.EOF) {
+	body := struct {
+		*api.GenerateRequest
+		Think json.RawMessage `json:"think"`
+	}{GenerateRequest: &req}
+	if err := c.ShouldBindJSON(&body); errors.Is(err, io.EOF) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
 		return
 	} else if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	if len(body.Think) > 0 {
+		if err := json.Unmarshal(body.Think, &req.Think); err != nil {
+			err = s.thinkingInputError(c.Request.Context(), req.Model, err)
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	if req.TopLogprobs < 0 || req.TopLogprobs > 20 {
@@ -433,6 +444,35 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		return
 	}
 
+	thinking := m.genericThinking()
+	if thinking == nil {
+		if err := api.ValidateLegacyThinking(req.Think); err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	caps := []model.Capability{model.CapabilityCompletion}
+	if req.Suffix != "" {
+		caps = append(caps, model.CapabilityInsert)
+	}
+
+	requestedThink := req.Think
+	think := renderers.ResolveThinking(requestedThink, thinking)
+	req.Think = think
+	modelCaps := m.Capabilities()
+	if slices.Contains(modelCaps, model.CapabilityThinking) {
+		caps = append(caps, model.CapabilityThinking)
+		if req.Think == nil && thinking == nil {
+			req.Think = &api.ThinkValue{Value: true}
+		}
+	} else {
+		if req.Think != nil && req.Think.Bool() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support thinking", req.Model)})
+			return
+		}
+	}
+
 	var builtinParser parsers.Parser
 	if shouldUseHarmony(m) {
 		// harmony's Reasoning field only understands low/medium/high; map "max" to "high"
@@ -451,24 +491,6 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		if builtinParser != nil {
 			// no tools or last message for generate endpoint
 			builtinParser.Init(nil, nil, req.Think)
-		}
-	}
-
-	caps := []model.Capability{model.CapabilityCompletion}
-	if req.Suffix != "" {
-		caps = append(caps, model.CapabilityInsert)
-	}
-
-	modelCaps := m.Capabilities()
-	if slices.Contains(modelCaps, model.CapabilityThinking) {
-		caps = append(caps, model.CapabilityThinking)
-		if req.Think == nil {
-			req.Think = &api.ThinkValue{Value: true}
-		}
-	} else {
-		if req.Think != nil && req.Think.Bool() {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support thinking", req.Model)})
-			return
 		}
 	}
 
@@ -641,16 +663,16 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		return
 	}
 
-	var thinkingState *thinking.Parser
+	var thinkTagParser *thinkingparser.Parser
 	if builtinParser == nil {
-		openingTag, closingTag := thinking.InferTags(m.Template.Template)
+		openingTag, closingTag := thinkingparser.InferTags(m.Template.Template)
 		if req.Think != nil && req.Think.Bool() && openingTag != "" && closingTag != "" {
-			thinkingState = &thinking.Parser{
+			thinkTagParser = &thinkingparser.Parser{
 				OpeningTag: openingTag,
 				ClosingTag: closingTag,
 			}
 			if strings.HasSuffix(strings.TrimSpace(prompt), openingTag) {
-				thinkingState.AddContent(openingTag)
+				thinkTagParser.AddContent(openingTag)
 			}
 		}
 	}
@@ -665,6 +687,13 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		defer cancel()
 		var parserErr error
 
+		// A raw prompt gives no way to tell where the response starts, so the
+		// format applies from its first token.
+		var thinkingClose []string
+		if !req.Raw {
+			thinkingClose = thinkingCloseForCompletion(builtinParser, thinkTagParser)
+		}
+
 		if err := r.Completion(ctx, llm.CompletionRequest{
 			Prompt:          prompt,
 			Media:           media,
@@ -676,6 +705,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 			TopLogprobs:     req.TopLogprobs,
 			PreservedTokens: preservedTokensForCompletion(builtinParser),
 			LeadingBOS:      leadingBOS,
+			ThinkingClose:   thinkingClose,
 		}, func(cr llm.CompletionResponse) {
 			res := api.GenerateResponse{
 				Model:     req.Model,
@@ -704,8 +734,8 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 				if cr.Done && len(toolCalls) > 0 {
 					res.ToolCalls = toolCalls
 				}
-			} else if thinkingState != nil {
-				thinking, content := thinkingState.AddContent(cr.Content)
+			} else if thinkTagParser != nil {
+				thinking, content := thinkTagParser.AddContent(cr.Content)
 				res.Thinking = thinking
 				res.Response = content
 			}
@@ -1227,20 +1257,53 @@ func getExistingName(n model.Name) (model.Name, error) {
 	if err != nil {
 		return zero, err
 	}
-	var set model.Name // tracks parts already canonicalized
+	// First pass: look for a full case-insensitive match across all four
+	// parts. If found, return the on-disk canonical name directly.
 	for e := range existing {
-		if set.Host == "" && strings.EqualFold(e.Host, n.Host) {
-			n.Host = e.Host
+		if strings.EqualFold(e.Host, n.Host) &&
+			strings.EqualFold(e.Namespace, n.Namespace) &&
+			strings.EqualFold(e.Model, n.Model) &&
+			strings.EqualFold(e.Tag, n.Tag) {
+			return e, nil
 		}
-		if set.Namespace == "" && strings.EqualFold(e.Namespace, n.Namespace) {
-			n.Namespace = e.Namespace
+	}
+
+	// Second pass: find the single manifest with the longest consecutive
+	// case-insensitive prefix match (host -> namespace -> model) and copy
+	// only the matching prefix parts from that manifest. The tag is left
+	// as-is so that an unrelated manifest with a matching tag cannot
+	// influence the casing of a different model's tag (e.g. pulling
+	// "myorg/mymodel:q8" when "MyOrg/MyModel:q4" and
+	// "OtherOrg/OtherModel:Q8" exist must not produce "MyOrg/MyModel:Q8").
+	var best model.Name
+	bestLen := 0
+	for e := range existing {
+		length := 0
+		if strings.EqualFold(e.Host, n.Host) {
+			length = 1
+			if strings.EqualFold(e.Namespace, n.Namespace) {
+				length = 2
+				if strings.EqualFold(e.Model, n.Model) {
+					length = 3
+				}
+			}
 		}
-		if set.Model == "" && strings.EqualFold(e.Model, n.Model) {
-			n.Model = e.Model
+		if length > bestLen {
+			bestLen = length
+			best = e
 		}
-		if set.Tag == "" && strings.EqualFold(e.Tag, n.Tag) {
-			n.Tag = e.Tag
-		}
+	}
+
+	switch bestLen {
+	case 3:
+		n.Host = best.Host
+		n.Namespace = best.Namespace
+		n.Model = best.Model
+	case 2:
+		n.Host = best.Host
+		n.Namespace = best.Namespace
+	case 1:
+		n.Host = best.Host
 	}
 
 	return n, nil
@@ -1430,7 +1493,7 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 
 	// For safetensors LLM models, populate details from config.json.
 	if m.Config.ModelFormat == "safetensors" && slices.Contains(m.Config.Capabilities, "completion") {
-		if info, err := xserver.GetSafetensorsLLMInfo(name); err == nil {
+		if info, err := getSafetensorsLLMInfo(name); err == nil {
 			if arch, ok := info["general.architecture"].(string); ok && arch != "" {
 				modelDetails.Family = arch
 			}
@@ -1440,7 +1503,7 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		}
 		// Older manifests may not have file_type populated for safetensors models.
 		if modelDetails.QuantizationLevel == "" {
-			if dtype, err := xserver.GetSafetensorsDtype(name); err == nil && dtype != "" {
+			if dtype, err := getSafetensorsDtype(name); err == nil && dtype != "" {
 				modelDetails.QuantizationLevel = dtype
 			}
 		}
@@ -1467,6 +1530,7 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		Details:      modelDetails,
 		Messages:     msgs,
 		Capabilities: m.Capabilities(),
+		Thinking:     m.Thinking(),
 		ModifiedAt:   mf.FileInfo().ModTime(),
 		Requires:     m.Config.Requires,
 		// Several integrations crash on a nil/omitempty+empty ModelInfo, so by
@@ -1541,12 +1605,12 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 
 	// For safetensors LLM models, populate ModelInfo from config.json.
 	if m.Config.ModelFormat == "safetensors" && slices.Contains(m.Config.Capabilities, "completion") {
-		if info, err := xserver.GetSafetensorsLLMInfo(name); err == nil {
+		if info, err := getSafetensorsLLMInfo(name); err == nil {
 			resp.ModelInfo = info
 		}
 		// Populate tensor info if verbose
 		if req.Verbose {
-			if tensors, err := xserver.GetSafetensorsTensorInfo(name); err == nil {
+			if tensors, err := getSafetensorsTensorInfo(name); err == nil {
 				resp.Tensors = tensors
 			}
 		}
@@ -1559,7 +1623,7 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 	if slices.Contains(m.Capabilities(), model.CapabilityImage) {
 		// Populate tensor info if verbose
 		if req.Verbose {
-			if tensors, err := xserver.GetSafetensorsTensorInfo(name); err == nil {
+			if tensors, err := getSafetensorsTensorInfo(name); err == nil {
 				resp.Tensors = tensors
 			}
 		}
@@ -1902,18 +1966,18 @@ func (s *Server) GenerateRoutes() (http.Handler, error) {
 	// Inference (OpenAI compatibility)
 	// TODO(cloud-stage-a): apply Modelfile overlay deltas for local models with cloud
 	// parents on v1 request families while preserving this explicit :cloud passthrough.
-	r.POST("/v1/chat/completions", s.withInferenceRequestLogging("/v1/chat/completions", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.ChatMiddleware(), s.ChatHandler)...)
+	r.POST("/v1/chat/completions", s.withInferenceRequestLogging("/v1/chat/completions", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.ChatMiddleware(lookupThinking), s.ChatHandler)...)
 	r.POST("/v1/completions", s.withInferenceRequestLogging("/v1/completions", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.CompletionsMiddleware(), s.GenerateHandler)...)
 	r.POST("/v1/embeddings", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.EmbeddingsMiddleware(), s.EmbedHandler)
 	r.GET("/v1/models", middleware.ListMiddleware(), s.ListHandler)
 	r.GET("/v1/models/:model", cloudModelPathPassthroughMiddleware(cloudErrRemoteModelDetailsUnavailable), middleware.RetrieveMiddleware(), s.ShowHandler)
-	r.POST("/v1/responses", s.withInferenceRequestLogging("/v1/responses", s.responsesCompactionMiddleware(), cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.ResponsesMiddleware(), s.ChatHandler)...)
+	r.POST("/v1/responses", s.withInferenceRequestLogging("/v1/responses", s.responsesCompactionMiddleware(), cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.ResponsesMiddleware(lookupThinking), s.ChatHandler)...)
 	r.POST("/v1/responses/compact", s.ResponsesCompactHandler)
 	// OpenAI-compatible audio endpoint
 	r.POST("/v1/audio/transcriptions", middleware.TranscriptionMiddleware(), s.ChatHandler)
 
 	// Inference (Anthropic compatibility)
-	r.POST("/v1/messages", s.withInferenceRequestLogging("/v1/messages", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.AnthropicMessagesMiddleware(), s.ChatHandler)...)
+	r.POST("/v1/messages", s.withInferenceRequestLogging("/v1/messages", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.AnthropicMessagesMiddleware(lookupThinking), s.ChatHandler)...)
 
 	return r, nil
 }
@@ -2318,6 +2382,16 @@ func toolCallTagForCompletion(toolParser *tools.Parser) string {
 	return toolParser.Tag()
 }
 
+func thinkingCloseForCompletion(builtinParser parsers.Parser, thinkTagParser *thinkingparser.Parser) []string {
+	if builtinParser != nil {
+		return builtinParser.ThinkingClose()
+	}
+	if thinkTagParser != nil {
+		return []string{thinkTagParser.ClosingTag}
+	}
+	return nil
+}
+
 func leadingBOSForModel(m *Model) string {
 	if m == nil || m.Config.Renderer == "" {
 		return ""
@@ -2436,12 +2510,24 @@ func (s *Server) ChatHandler(c *gin.Context) {
 	checkpointStart := time.Now()
 
 	var req api.ChatRequest
-	if err := c.ShouldBindJSON(&req); errors.Is(err, io.EOF) {
+	body := struct {
+		*api.ChatRequest
+		Think json.RawMessage `json:"think"`
+	}{ChatRequest: &req}
+	if err := c.ShouldBindJSON(&body); errors.Is(err, io.EOF) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
 		return
 	} else if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	if len(body.Think) > 0 {
+		if err := json.Unmarshal(body.Think, &req.Think); err != nil {
+			err = s.thinkingInputError(c.Request.Context(), req.Model, err)
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	if req.TopLogprobs < 0 || req.TopLogprobs > 20 {
@@ -2602,15 +2688,26 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		return
 	}
 
+	thinking := m.genericThinking()
+	if thinking == nil {
+		if err := api.ValidateLegacyThinking(req.Think); err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
 	caps := []model.Capability{model.CapabilityCompletion}
 	if len(req.Tools) > 0 {
 		caps = append(caps, model.CapabilityTools)
 	}
 
+	requestedThink := req.Think
+	think := renderers.ResolveThinking(requestedThink, thinking)
+	req.Think = think
 	modelCaps := m.Capabilities()
 	if slices.Contains(modelCaps, model.CapabilityThinking) {
 		caps = append(caps, model.CapabilityThinking)
-		if req.Think == nil {
+		if req.Think == nil && thinking == nil {
 			req.Think = &api.ThinkValue{Value: true}
 		}
 	} else {
@@ -2712,16 +2809,16 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		return
 	}
 
-	var thinkingState *thinking.Parser
-	openingTag, closingTag := thinking.InferTags(m.Template.Template)
+	var thinkTagParser *thinkingparser.Parser
+	openingTag, closingTag := thinkingparser.InferTags(m.Template.Template)
 	if req.Think != nil && req.Think.Bool() && openingTag != "" && closingTag != "" {
-		thinkingState = &thinking.Parser{
+		thinkTagParser = &thinkingparser.Parser{
 			OpeningTag: openingTag,
 			ClosingTag: closingTag,
 		}
 
 		if strings.HasSuffix(strings.TrimSpace(prompt), openingTag) {
-			thinkingState.AddContent(openingTag)
+			thinkTagParser.AddContent(openingTag)
 		}
 	}
 
@@ -2730,224 +2827,129 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		toolParser = tools.NewParser(m.Template.Template, req.Tools)
 	}
 
-	type structuredOutputsState int
-	const (
-		structuredOutputsState_None structuredOutputsState = iota
-		structuredOutputsState_ReadyToApply
-		structuredOutputsState_Applying
-	)
-
 	ch := make(chan any)
 	go func() {
 		defer close(ch)
 
-		structuredOutputsState := structuredOutputsState_None
-		var firstPassMetrics api.Metrics
+		ctx, cancel := context.WithCancel(c.Request.Context())
+		defer cancel()
 
-		for {
-			var tb strings.Builder
+		var parserErr error
 
-			currentFormat := req.Format
-			// structured outputs via double request is enabled when:
-			// 1. the model supports the thinking capability and
-			// 2. it uses a built-in parser or our generic thinking parser
-
-			// Note that the current approach does not work for (potential future)
-			// non-thinking models that emit anything before actual content. This
-			// current approach uses the transition from parsed thinking content to
-			// parsed non-thinking content as the signal to turn constraining on
-
-			forceImmediate := builtinParser != nil && builtinParser.HasThinkingSupport() && req.Think != nil && !req.Think.Bool()
-			if req.Format != nil && structuredOutputsState == structuredOutputsState_None && !forceImmediate && ((builtinParser != nil || thinkingState != nil) && slices.Contains(m.Capabilities(), model.CapabilityThinking)) {
-				currentFormat = nil
-			}
-			includeIntermediateMetrics := req.Format != nil && currentFormat == nil
-
-			// sets up new context given parent context per request
-			ctx, cancel := context.WithCancel(c.Request.Context())
-
-			var parserErr error
-
-			err := r.Completion(ctx, llm.CompletionRequest{
-				Prompt:                     prompt,
-				Media:                      media,
-				Format:                     currentFormat,
-				Options:                    opts,
-				Shift:                      req.Shift == nil || *req.Shift,
-				Truncate:                   truncate,
-				Logprobs:                   req.Logprobs,
-				TopLogprobs:                req.TopLogprobs,
-				PreservedTokens:            preservedTokensForCompletion(builtinParser),
-				ToolCallTag:                toolCallTagForCompletion(toolParser),
-				LeadingBOS:                 leadingBOSForModel(m),
-				IncludeIntermediateMetrics: includeIntermediateMetrics,
-			}, func(r llm.CompletionResponse) {
-				metrics := api.Metrics{
+		err := r.Completion(ctx, llm.CompletionRequest{
+			Prompt:          prompt,
+			Media:           media,
+			Format:          req.Format,
+			Options:         opts,
+			Shift:           req.Shift == nil || *req.Shift,
+			Truncate:        truncate,
+			Logprobs:        req.Logprobs,
+			TopLogprobs:     req.TopLogprobs,
+			PreservedTokens: preservedTokensForCompletion(builtinParser),
+			ToolCallTag:     toolCallTagForCompletion(toolParser),
+			LeadingBOS:      leadingBOSForModel(m),
+			ThinkingClose:   thinkingCloseForCompletion(builtinParser, thinkTagParser),
+		}, func(r llm.CompletionResponse) {
+			res := api.ChatResponse{
+				Model:     req.Model,
+				CreatedAt: time.Now().UTC(),
+				Message:   api.Message{Role: "assistant", Content: r.Content},
+				Done:      r.Done,
+				Metrics: api.Metrics{
 					PromptEvalCount:       r.PromptEvalCount,
 					PromptEvalCachedCount: r.PromptEvalCachedCount,
 					PromptEvalDuration:    r.PromptEvalDuration,
 					EvalCount:             r.EvalCount,
 					EvalDuration:          r.EvalDuration,
-				}
-				if includeIntermediateMetrics {
-					firstPassMetrics = metrics
-					if !r.Done {
-						metrics = api.Metrics{}
-					}
-				} else if structuredOutputsState == structuredOutputsState_Applying && r.Done {
-					// Treat the restart as generation work: retain the original prompt metrics and fold in the second prefill.
-					metrics.PromptEvalCount = firstPassMetrics.PromptEvalCount
-					metrics.PromptEvalCachedCount = firstPassMetrics.PromptEvalCachedCount
-					metrics.PromptEvalDuration = firstPassMetrics.PromptEvalDuration
-					metrics.EvalCount += firstPassMetrics.EvalCount
-					metrics.EvalDuration += firstPassMetrics.EvalDuration + r.PromptEvalDuration
-				}
+				},
+				Logprobs: toAPILogprobs(r.Logprobs),
+			}
 
-				res := api.ChatResponse{
-					Model:     req.Model,
-					CreatedAt: time.Now().UTC(),
-					Message:   api.Message{Role: "assistant", Content: r.Content},
-					Done:      r.Done,
-					Metrics:   metrics,
-					Logprobs:  toAPILogprobs(r.Logprobs),
+			if r.Done {
+				res.DoneReason = r.DoneReason.String()
+				res.TotalDuration = time.Since(checkpointStart)
+				res.LoadDuration = checkpointLoaded.Sub(checkpointStart)
+			}
+
+			if builtinParser != nil {
+				slog.Log(context.TODO(), logutil.LevelTrace, "builtin parser input", "parser", m.Config.Parser, "content", r.Content)
+
+				content, thinking, toolCalls, err := builtinParser.Add(r.Content, r.Done)
+				if err != nil {
+					parserErr = err
+					cancel()
+					return
 				}
 
-				if r.Done {
-					res.DoneReason = r.DoneReason.String()
-					res.TotalDuration = time.Since(checkpointStart)
-					res.LoadDuration = checkpointLoaded.Sub(checkpointStart)
+				res.Message.Content = content
+				res.Message.Thinking = thinking
+				for i := range toolCalls {
+					toolCalls[i].ID = toolCallId()
 				}
+				res.Message.ToolCalls = toolCalls
 
-				if builtinParser != nil {
-					slog.Log(context.TODO(), logutil.LevelTrace, "builtin parser input", "parser", m.Config.Parser, "content", r.Content)
+				if res.Message.Content != "" || res.Message.Thinking != "" || len(res.Message.ToolCalls) > 0 || r.Done || len(res.Logprobs) > 0 {
+					slog.Log(context.TODO(), logutil.LevelTrace, "builtin parser output", "parser", m.Config.Parser, "content", content, "thinking", thinking, "toolCalls", toolCalls, "done", r.Done)
+					ch <- res
+				} else {
+					slog.Log(context.TODO(), logutil.LevelTrace, "builtin parser empty output", "parser", m.Config.Parser)
+				}
+				return
+			}
 
-					content, thinking, toolCalls, err := builtinParser.Add(r.Content, r.Done)
-					if err != nil {
-						parserErr = err
-						cancel()
-						return
-					}
+			if thinkTagParser != nil {
+				thinkingContent, remainingContent := thinkTagParser.AddContent(res.Message.Content)
+				if thinkingContent == "" && remainingContent == "" && !r.Done {
+					// need to accumulate more to decide what to send
+					return
+				}
+				res.Message.Thinking = thinkingContent
+				res.Message.Content = remainingContent
+			}
 
+			if len(req.Tools) > 0 {
+				toolCalls, content := toolParser.Add(res.Message.Content)
+				if len(content) > 0 {
 					res.Message.Content = content
-					res.Message.Thinking = thinking
+				} else if len(toolCalls) > 0 {
 					for i := range toolCalls {
 						toolCalls[i].ID = toolCallId()
 					}
 					res.Message.ToolCalls = toolCalls
-
-					tb.WriteString(thinking)
-					// we are now receiving content from the model - we should start applying structured outputs
-					if structuredOutputsState == structuredOutputsState_None && req.Format != nil && tb.String() != "" && res.Message.Content != "" {
-						structuredOutputsState = structuredOutputsState_ReadyToApply
-						cancel()
-						return
-					}
-
-					if res.Message.Content != "" || res.Message.Thinking != "" || len(res.Message.ToolCalls) > 0 || r.Done || len(res.Logprobs) > 0 {
-						slog.Log(context.TODO(), logutil.LevelTrace, "builtin parser output", "parser", m.Config.Parser, "content", content, "thinking", thinking, "toolCalls", toolCalls, "done", r.Done)
-						ch <- res
-					} else {
-						slog.Log(context.TODO(), logutil.LevelTrace, "builtin parser empty output", "parser", m.Config.Parser)
-					}
-					return
-				}
-
-				if thinkingState != nil {
-					thinkingContent, remainingContent := thinkingState.AddContent(res.Message.Content)
-					if thinkingContent == "" && remainingContent == "" && !r.Done {
-						// need to accumulate more to decide what to send
-						return
-					}
-					res.Message.Thinking = thinkingContent
-					tb.WriteString(thinkingContent)
-					// emit the collected thinking text before restarting with structured outputs and clear unstructured content
-					// to avoid leaking mixed tokens like "</think>Hello"
-					if structuredOutputsState == structuredOutputsState_None && req.Format != nil && tb.String() != "" && remainingContent != "" {
-						structuredOutputsState = structuredOutputsState_ReadyToApply
-						res.Message.Content = ""
-						ch <- res
-						cancel()
-						return
-					}
-					res.Message.Content = remainingContent
-				}
-
-				if len(req.Tools) > 0 {
-					toolCalls, content := toolParser.Add(res.Message.Content)
-					if len(content) > 0 {
-						res.Message.Content = content
-					} else if len(toolCalls) > 0 {
-						for i := range toolCalls {
-							toolCalls[i].ID = toolCallId()
-						}
-						res.Message.ToolCalls = toolCalls
-						res.Message.Content = ""
-					} else if res.Message.Thinking != "" {
-						// don't return, fall through to send
-					} else {
-						//  Send logprobs while content is being buffered by the parser for tool calls
-						if len(res.Logprobs) > 0 && !r.Done {
-							logprobRes := res
-							logprobRes.Message.Content = ""
-							logprobRes.Message.ToolCalls = nil
-							ch <- logprobRes
-						}
-
-						if r.Done {
-							res.Message.Content = toolParser.Content()
-							ch <- res
-						}
-						return
-					}
-				}
-
-				ch <- res
-			})
-			if parserErr != nil {
-				ch <- gin.H{"error": parserErr.Error()}
-				return
-			}
-			if err != nil {
-				if structuredOutputsState == structuredOutputsState_ReadyToApply && strings.Contains(err.Error(), "context canceled") && c.Request.Context().Err() == nil {
-					// only ignores error if it's a context cancellation due to setting structured outputs
+					res.Message.Content = ""
+				} else if res.Message.Thinking != "" {
+					// don't return, fall through to send
 				} else {
-					s.sched.expireRunnersForRuntimeOOM(m, err)
-					var serr api.StatusError
-					if errors.As(err, &serr) {
-						ch <- gin.H{"error": serr.ErrorMessage, "status": serr.StatusCode}
-					} else {
-						ch <- gin.H{"error": err.Error()}
+					//  Send logprobs while content is being buffered by the parser for tool calls
+					if len(res.Logprobs) > 0 && !r.Done {
+						logprobRes := res
+						logprobRes.Message.Content = ""
+						logprobRes.Message.ToolCalls = nil
+						ch <- logprobRes
+					}
+
+					if r.Done {
+						res.Message.Content = toolParser.Content()
+						ch <- res
 					}
 					return
 				}
 			}
 
-			// ignored structured outputs cancellation falls through to here, start a new request with the structured outputs and updated prompt. use the
-			if structuredOutputsState == structuredOutputsState_ReadyToApply {
-				structuredOutputsState = structuredOutputsState_Applying
-				msg := api.Message{
-					Role:     "assistant",
-					Thinking: tb.String(),
-				}
-
-				msgs = append(msgs, msg)
-				prompt, _, err = chatPrompt(c.Request.Context(), m, r.Tokenize, promptOpts, msgs, processedTools, req.Think, truncate)
-				if err != nil {
-					slog.Error("chat prompt error applying structured outputs", "error", err)
-					ch <- gin.H{"error": err.Error()}
-					return
-				}
-				// force constraining by terminating thinking header, the parser is already at this state
-				// when the last message is thinking, the rendered for gpt-oss cannot disambiguate between having the
-				// model continue thinking or ending thinking and outputting the final message.
-				// TODO(parthsareen): consider adding prefill disambiguation logic to the renderer for structured outputs.
-				if shouldUseHarmony(m) || (builtinParser != nil && m.Config.Parser == "harmony") {
-					prompt += "<|end|><|start|>assistant<|channel|>final<|message|>"
-				}
-				continue
+			ch <- res
+		})
+		if parserErr != nil {
+			ch <- gin.H{"error": parserErr.Error()}
+			return
+		}
+		if err != nil {
+			s.sched.expireRunnersForRuntimeOOM(m, err)
+			var serr api.StatusError
+			if errors.As(err, &serr) {
+				ch <- gin.H{"error": serr.ErrorMessage, "status": serr.StatusCode}
+			} else {
+				ch <- gin.H{"error": err.Error()}
 			}
-
-			break
 		}
 	}()
 
@@ -3150,11 +3152,11 @@ func filterThinkTags(msgs []api.Message, m *Model) []api.Message {
 				// change the user output), we should probably perform this filtering
 				// for all thinking models (not just qwen3 & deepseek-r1) since it tends
 				// to save tokens and improve quality.
-				thinkingState := &thinking.Parser{
+				thinkTagParser := &thinkingparser.Parser{
 					OpeningTag: "<think>",
 					ClosingTag: "</think>",
 				}
-				_, content := thinkingState.AddContent(msg.Content)
+				_, content := thinkTagParser.AddContent(msg.Content)
 				msgs[i].Content = content
 			}
 		}

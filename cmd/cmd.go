@@ -42,22 +42,21 @@ import (
 	"github.com/ollama/ollama/cmd/config"
 	"github.com/ollama/ollama/cmd/launch"
 	"github.com/ollama/ollama/cmd/tui"
+	"github.com/ollama/ollama/create"
 	"github.com/ollama/ollama/discover"
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/internal/modelref"
 	"github.com/ollama/ollama/logutil"
 	"github.com/ollama/ollama/manifest"
+	"github.com/ollama/ollama/mlxrunner"
 	"github.com/ollama/ollama/parser"
 	"github.com/ollama/ollama/progress"
 	"github.com/ollama/ollama/readline"
-	"github.com/ollama/ollama/runner"
 	"github.com/ollama/ollama/server"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/types/syncmap"
 	"github.com/ollama/ollama/version"
-	xcreate "github.com/ollama/ollama/x/create"
-	xcreateclient "github.com/ollama/ollama/x/create/client"
 )
 
 func init() {
@@ -191,7 +190,7 @@ func resolveCreateLocalModelDir(ref, filename string) string {
 	}
 
 	candidate := filepath.Join(filepath.Dir(filename), ref)
-	if xcreate.IsSafetensorsModelDir(candidate) {
+	if create.IsSafetensorsModelDir(candidate) {
 		return candidate
 	}
 
@@ -203,14 +202,14 @@ func resolveCreateDraftDir(ref, filename string) (string, error) {
 		return "", nil
 	}
 	if filepath.IsAbs(ref) {
-		if xcreate.IsSafetensorsModelDir(ref) {
+		if create.IsSafetensorsModelDir(ref) {
 			return ref, nil
 		}
 		return "", fmt.Errorf("draft %s is not a supported safetensors model directory", ref)
 	}
 	if filename != "" {
 		candidate := filepath.Join(filepath.Dir(filename), ref)
-		if xcreate.IsSafetensorsModelDir(candidate) {
+		if create.IsSafetensorsModelDir(candidate) {
 			return candidate, nil
 		}
 	}
@@ -241,28 +240,28 @@ func readCreateModelfile(cmd *cobra.Command) (*parser.Modelfile, string, error) 
 	return modelfile, filename, nil
 }
 
-func safetensorsCreateOptions(modelfile *parser.Modelfile, filename, modelName string) (xcreateclient.CreateOptions, bool, error) {
-	modelDir, mfConfig, err := xcreateclient.ConfigFromModelfile(modelfile)
+func safetensorsCreateOptions(modelfile *parser.Modelfile, filename, modelName string) (createOptions, bool, error) {
+	modelDir, mfConfig, err := configFromModelfile(modelfile)
 	if err != nil {
-		return xcreateclient.CreateOptions{}, false, err
+		return createOptions{}, false, err
 	}
 
 	modelDir = resolveCreateLocalModelDir(modelDir, filename)
-	isSafetensors := xcreate.IsSafetensorsModelDir(modelDir)
-	isBaseModelWithDraft := mfConfig.Draft != "" && !isSafetensors && xcreate.IsSafetensorsLLMModel(modelDir)
+	isSafetensors := create.IsSafetensorsModelDir(modelDir)
+	isBaseModelWithDraft := mfConfig.Draft != "" && !isSafetensors && create.IsSafetensorsLLMModel(modelDir)
 	if !isSafetensors && !isBaseModelWithDraft {
-		return xcreateclient.CreateOptions{}, false, nil
+		return createOptions{}, false, nil
 	}
 
 	if mfConfig.Draft != "" {
 		draftDir, err := resolveCreateDraftDir(mfConfig.Draft, filename)
 		if err != nil {
 			if isSafetensors {
-				return xcreateclient.CreateOptions{}, false, err
+				return createOptions{}, false, err
 			}
 			// Existing safetensors models may still use a GGUF DRAFT layer;
 			// leave that combination on the standard create path.
-			return xcreateclient.CreateOptions{}, false, nil
+			return createOptions{}, false, nil
 		}
 		mfConfig.Draft = draftDir
 	}
@@ -277,13 +276,13 @@ func safetensorsCreateOptions(modelfile *parser.Modelfile, filename, modelName s
 		}
 	}
 	if modelCount != 1 {
-		return xcreateclient.CreateOptions{}, false, errors.New("safetensors imports require exactly one FROM source")
+		return createOptions{}, false, errors.New("safetensors imports require exactly one FROM source")
 	}
 	if draftCount > 1 {
-		return xcreateclient.CreateOptions{}, false, errors.New("safetensors imports support at most one DRAFT source")
+		return createOptions{}, false, errors.New("safetensors imports support at most one DRAFT source")
 	}
 
-	return xcreateclient.CreateOptions{
+	return createOptions{
 		ModelName: modelName,
 		ModelDir:  modelDir,
 		Modelfile: mfConfig,
@@ -298,9 +297,9 @@ var (
 
 // createSafetensorsModel imports in-process when the server is local and
 // otherwise uploads the source files for the server to import.
-func createSafetensorsModel(cmd *cobra.Command, args []string, opts xcreateclient.CreateOptions, p *progress.Progress) error {
+func createSafetensorsModel(cmd *cobra.Command, args []string, opts createOptions, p *progress.Progress) error {
 	if !envconfig.CreateRemote() && isLocalhost() {
-		return xcreateclient.CreateModel(cmd.Context(), opts, p)
+		return createModel(cmd.Context(), opts, p)
 	}
 	if opts.Force {
 		return errForceLocalOnly
@@ -312,7 +311,7 @@ func createSafetensorsModel(cmd *cobra.Command, args []string, opts xcreateclien
 	if err != nil {
 		return err
 	}
-	return xcreateclient.CreateModelRemote(cmd.Context(), client, opts, p)
+	return createModelRemote(cmd.Context(), client, opts, p)
 }
 
 func CreateHandler(cmd *cobra.Command, args []string) error {
@@ -842,10 +841,8 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 			opts.Think = &api.ThinkValue{Value: true}
 		case "false":
 			opts.Think = &api.ThinkValue{Value: false}
-		case "high", "medium", "low", "max":
-			opts.Think = &api.ThinkValue{Value: thinkStr}
 		default:
-			return fmt.Errorf("invalid value for --think: %q (must be true, false, high, medium, low, or max)", thinkStr)
+			opts.Think = &api.ThinkValue{Value: thinkStr}
 		}
 	} else {
 		opts.Think = nil
@@ -1430,6 +1427,16 @@ func showInfo(resp *api.ShowResponse, verbose bool, w io.Writer) error {
 		tableRender("Capabilities", func() (rows [][]string) {
 			for _, capability := range resp.Capabilities {
 				rows = append(rows, []string{"", capability.String()})
+				if capability == model.CapabilityThinking && resp.Thinking.Valid() {
+					values := make([]string, len(resp.Thinking.Values))
+					for i, value := range resp.Thinking.Values {
+						values[i] = fmt.Sprint(value)
+					}
+					rows = append(rows,
+						[]string{"", "    levels", strings.Join(values, ", ")},
+						[]string{"", "    default", fmt.Sprint(resp.Thinking.Default)},
+					)
+				}
 			}
 			return
 		})
@@ -2397,6 +2404,12 @@ func NewCLI() *cobra.Command {
 				return
 			}
 
+			if err := runWelcome(cmd.Context()); err != nil {
+				if !errors.Is(err, launch.ErrCancelled) {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
+				return
+			}
 			runInteractiveTUI(cmd)
 		},
 	}
@@ -2557,12 +2570,12 @@ func NewCLI() *cobra.Command {
 		Use:    "runner",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runner.Execute(os.Args[1:])
+			return mlxrunner.Execute(os.Args[2:])
 		},
 		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
 	}
 	runnerCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		_ = runner.Execute(args[1:])
+		_ = mlxrunner.Execute([]string{"--help"})
 	})
 
 	var gpuDiscoverLibDirs []string
