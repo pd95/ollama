@@ -1,6 +1,7 @@
 package parsers
 
 import (
+	"encoding/json"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -28,6 +29,11 @@ type Parser interface {
 	HasThinkingSupport() bool
 }
 
+// RequestFormatParser interprets output using the current request's structured format.
+type RequestFormatParser interface {
+	InitWithFormat(tools []api.Tool, lastMessage *api.Message, thinkValue *api.ThinkValue, format json.RawMessage) []api.Tool
+}
+
 type ParserConstructor func() Parser
 
 type ParserRegistry struct {
@@ -53,6 +59,8 @@ func ParserForName(name string) Parser {
 	var p Parser
 
 	switch name {
+	case "apertus":
+		return &ApertusParser{}
 	case "qwen3":
 		p = &Qwen3Parser{hasThinkingSupport: false, defaultThinking: false}
 	case "qwen3-thinking":
