@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	_ "image/jpeg"
 	_ "image/png"
 	"math"
 	"slices"
 	"strings"
 
-	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 
 	"github.com/ollama/ollama/mlx"
@@ -23,6 +23,15 @@ const (
 	maxApertusImageDimension = 16_384
 	maxApertusImagePixels    = 64 << 20
 	visionCodebookChunk      = 4096
+	minApertusImageArea      = 256 * 256
+	maxApertusImageArea      = 1400 * 1400
+
+	// The FP32 VQ encoder's first level dominates its working set. These
+	// conservative coefficients include the measured Metal/process overhead
+	// of the 1600x976 regression screenshot plus headroom for prompt prefill.
+	apertusVisionFixedBytes    = uint64(1 << 30)
+	apertusVisionBytesPerPixel = uint64(16 << 10)
+	apertusVisionBytesPerToken = uint64(128 << 10)
 )
 
 type VisionTokenizerConfig struct {
@@ -138,6 +147,28 @@ func (b *apertureVisionResBlock) forward(x *mlx.Array) *mlx.Array {
 		residual = b.shortcut.forward(x)
 	}
 	return mlx.Add(residual, h)
+}
+
+func (b *apertureVisionResBlock) forwardStaged(x *mlx.Array, materialize func(...*mlx.Array)) *mlx.Array {
+	if materialize == nil {
+		return b.forward(x)
+	}
+	normalized := mlx.SiLU(b.norm1.forward(x))
+	materialize(normalized, x)
+	h := b.conv1.forward(normalized)
+	materialize(h, x)
+	normalized = mlx.SiLU(b.norm2.forward(h))
+	materialize(normalized, x)
+	h = b.conv2.forward(normalized)
+	materialize(h, x)
+	residual := x
+	if b.shortcut != nil {
+		residual = b.shortcut.forward(x)
+		materialize(residual, h)
+	}
+	output := mlx.Add(residual, h)
+	materialize(output)
+	return output
 }
 
 type apertureVisionAttention struct {
@@ -311,28 +342,59 @@ func loadVisionTokenizer(tensors map[string]*mlx.Array, cfg VisionTokenizerConfi
 }
 
 func (v *VisionTokenizer) encode(data *mlx.Array, width, height int) (*mlx.Array, error) {
+	return v.encodeStaged(data, width, height, nil)
+}
+
+func (v *VisionTokenizer) encodeStaged(data *mlx.Array, width, height int, materialize func(...*mlx.Array)) (*mlx.Array, error) {
 	x := mlx.Reshape(data, 1, int32(height), int32(width), 3)
 	h := v.convIn.forward(x)
+	if materialize != nil {
+		materialize(h)
+	}
 	for _, level := range v.levels {
 		for i, block := range level.blocks {
-			h = block.forward(h)
+			h = block.forwardStaged(h, materialize)
 			if len(level.attn) > 0 {
 				h = level.attn[i].forward(h)
+				if materialize != nil {
+					materialize(h)
+				}
 			}
 		}
 		if level.downsample != nil {
 			h = mlx.PadConstant(h, []int{1, 2}, []int{0, 0}, []int{1, 1})
 			h = level.downsample.forward(h)
+			if materialize != nil {
+				materialize(h)
+			}
 		}
 	}
 	h = v.mid1.forward(h)
+	if materialize != nil {
+		materialize(h)
+	}
 	h = v.midAttn.forward(h)
+	if materialize != nil {
+		materialize(h)
+	}
 	h = v.mid2.forward(h)
+	if materialize != nil {
+		materialize(h)
+	}
 	h = v.convOut.forward(mlx.SiLU(v.normOut.forward(h)))
+	if materialize != nil {
+		materialize(h)
+	}
 	h = v.quantConv.forward(h)
+	if materialize != nil {
+		materialize(h)
+	}
 	d := h.Dims()
 	count := int32(d[1] * d[2])
 	flat := mlx.Reshape(h, count, v.config.EmbedDim)
+	if materialize != nil {
+		materialize(flat)
+	}
 	var bestScore, bestID *mlx.Array
 	for start := int32(0); start < v.config.CodebookSize; start += visionCodebookChunk {
 		end := min(start+visionCodebookChunk, v.config.CodebookSize)
@@ -347,43 +409,63 @@ func (v *VisionTokenizer) encode(data *mlx.Array, width, height int) (*mlx.Array
 			bestScore = mlx.Where(better, chunkScore, bestScore)
 			bestID = mlx.Where(better, chunkID, bestID)
 		}
+		if materialize != nil {
+			// Every codebook chunk reuses the realized latent row. Keep it
+			// across runner-owned sweeps until the search is complete.
+			materialize(bestScore, bestID, flat)
+		}
 	}
 	return mlx.Reshape(bestID, 1, count), nil
 }
 
 type apertusImageInput struct {
+	data                  []byte
+	originalWidth         int
+	originalHeight        int
+	canonicalWidth        int
+	canonicalHeight       int
 	pixels                []float32
 	width, height         int
 	gridWidth, gridHeight int
 }
 
-func preprocessApertusImage(ctx context.Context, data []byte) (*apertusImageInput, error) {
+func inspectApertusImage(ctx context.Context, data []byte) (*apertusImageInput, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(data) == 0 || len(data) > maxApertusImageBytes {
 		return nil, fmt.Errorf("Apertus image size %d is invalid", len(data))
 	}
-	img, _, err := image.Decode(bytes.NewReader(data))
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode Apertus image config: %w", err)
+	}
+	width, height := cfg.Width, cfg.Height
+	if width <= 0 || height <= 0 || width > maxApertusImageDimension || height > maxApertusImageDimension || int64(width)*int64(height) > maxApertusImagePixels {
+		return nil, fmt.Errorf("Apertus image dimensions %dx%d are invalid", width, height)
+	}
+	targetW, targetH := apertusImageSize(width, height)
+	return &apertusImageInput{
+		data: data, originalWidth: width, originalHeight: height,
+		canonicalWidth: targetW, canonicalHeight: targetH,
+		width: targetW, height: targetH, gridWidth: targetW / 16, gridHeight: targetH / 16,
+	}, nil
+}
+
+func materializeApertusImage(ctx context.Context, input *apertusImageInput) ([]float32, error) {
+	if input == nil || len(input.data) == 0 {
+		return nil, errors.New("Apertus image input is empty")
+	}
+	img, _, err := image.Decode(bytes.NewReader(input.data))
 	if err != nil {
 		return nil, fmt.Errorf("decode Apertus image: %w", err)
 	}
 	b := img.Bounds()
-	width, height := b.Dx(), b.Dy()
-	if width <= 0 || height <= 0 || width > maxApertusImageDimension || height > maxApertusImageDimension || int64(width)*int64(height) > maxApertusImagePixels {
-		return nil, fmt.Errorf("Apertus image dimensions %dx%d are invalid", width, height)
+	if b.Dx() != input.originalWidth || b.Dy() != input.originalHeight {
+		return nil, fmt.Errorf("Apertus image dimensions changed from %dx%d to %dx%d while decoding", input.originalWidth, input.originalHeight, b.Dx(), b.Dy())
 	}
-	targetArea := max(256*256, min(1400*1400, width*height))
-	aspect := float64(width) / float64(height)
-	targetH := int(math.Sqrt(float64(targetArea) / aspect))
-	targetW := int(float64(targetH) * aspect)
-	targetH = ((targetH + 8) / 16) * 16
-	targetW = ((targetW + 8) / 16) * 16
-	targetH = max(targetH, 16)
-	targetW = max(targetW, 16)
-	dst := image.NewRGBA(image.Rect(0, 0, targetW, targetH))
-	xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Src, nil)
-	pixels := make([]float32, targetW*targetH*3)
+	targetW, targetH := input.width, input.height
+	pixels := resizeApertusImage(img, b, targetW, targetH)
 	for y := range targetH {
 		if y&127 == 0 {
 			if err := ctx.Err(); err != nil {
@@ -391,12 +473,155 @@ func preprocessApertusImage(ctx context.Context, data []byte) (*apertusImageInpu
 			}
 		}
 		for x := range targetW {
-			r, g, blue, _ := dst.At(x, y).RGBA()
 			i := (y*targetW + x) * 3
-			pixels[i] = float32(r>>8)/127.5 - 1
-			pixels[i+1] = float32(g>>8)/127.5 - 1
-			pixels[i+2] = float32(blue>>8)/127.5 - 1
+			pixels[i] = pixels[i]/127.5 - 1
+			pixels[i+1] = pixels[i+1]/127.5 - 1
+			pixels[i+2] = pixels[i+2]/127.5 - 1
 		}
 	}
-	return &apertusImageInput{pixels: pixels, width: targetW, height: targetH, gridWidth: targetW / 16, gridHeight: targetH / 16}, nil
+	return pixels, nil
+}
+
+func preprocessApertusImage(ctx context.Context, data []byte) (*apertusImageInput, error) {
+	input, err := inspectApertusImage(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	input.pixels, err = materializeApertusImage(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return input, nil
+}
+
+func apertusImageSize(width, height int) (int, int) {
+	return apertusImageSizeForArea(width, height, maxApertusImageArea)
+}
+
+func apertusImageSizeForArea(width, height, maxArea int) (int, int) {
+	targetArea := max(minApertusImageArea, min(maxArea, width*height))
+	aspect := float64(width) / float64(height)
+	targetH := int(math.Sqrt(float64(targetArea) / aspect))
+	targetW := int(float64(targetH) * aspect)
+	targetH = ((targetH + 8) / 16) * 16
+	targetW = ((targetW + 8) / 16) * 16
+	targetH = max(targetH, 16)
+	targetW = max(targetW, 16)
+	return targetW, targetH
+}
+
+func setApertusImageArea(input *apertusImageInput, maxArea int) {
+	input.width, input.height = apertusImageSizeForArea(input.originalWidth, input.originalHeight, maxArea)
+	input.gridWidth, input.gridHeight = input.width/16, input.height/16
+}
+
+func estimateApertusImagePeak(resident uint64, inputs []*apertusImageInput) uint64 {
+	var maxPixels, totalTokens uint64
+	for _, input := range inputs {
+		pixels := uint64(input.width) * uint64(input.height)
+		tokens := uint64(input.gridWidth) * uint64(input.gridHeight)
+		maxPixels = max(maxPixels, pixels)
+		totalTokens += tokens
+	}
+	return resident + apertusVisionFixedBytes + maxPixels*apertusVisionBytesPerPixel + totalTokens*apertusVisionBytesPerToken
+}
+
+type apertureResamplePoint struct {
+	indices []int
+	weights []int64
+}
+
+func apertureCubic(x float64) float64 {
+	x = math.Abs(x)
+	const a = -0.5
+	if x < 1 {
+		return ((a+2)*x-(a+3))*x*x + 1
+	}
+	if x < 2 {
+		return (((a*x-5*a)*x+8*a)*x - 4*a)
+	}
+	return 0
+}
+
+func apertureResamplePoints(input, output int) ([]apertureResamplePoint, uint) {
+	scale := float64(input) / float64(output)
+	filterScale := max(scale, 1)
+	support := 2 * filterScale
+	points := make([]apertureResamplePoint, output)
+	floatWeights := make([][]float64, output)
+	var maxWeight float64
+	for out := range output {
+		// Match Torchvision's antialiased uint8 path: its coefficient bounds
+		// follow Pillow, then weights are converted to dynamic-precision int16.
+		center := (float64(out) + 0.5) * scale
+		start := max(int(center-support+0.5), 0)
+		end := min(int(center+support+0.5), input)
+		var sum float64
+		for source := start; source < end; source++ {
+			weight := apertureCubic((float64(source) - center + 0.5) / filterScale)
+			points[out].indices = append(points[out].indices, source)
+			floatWeights[out] = append(floatWeights[out], weight)
+			sum += weight
+		}
+		for i := range floatWeights[out] {
+			floatWeights[out][i] /= sum
+			maxWeight = max(maxWeight, floatWeights[out][i])
+		}
+	}
+	precision := uint(22)
+	for candidate := range 22 {
+		if int(0.5+maxWeight*float64(uint64(1)<<uint(candidate+1))) >= 1<<15 {
+			precision = uint(candidate)
+			break
+		}
+	}
+	for i := range points {
+		points[i].weights = make([]int64, len(floatWeights[i]))
+		for j, weight := range floatWeights[i] {
+			points[i].weights[j] = int64(math.Round(weight * float64(uint64(1)<<precision)))
+		}
+	}
+	return points, precision
+}
+
+func apertureResamplePixel(source []float32, stride, offset int, point apertureResamplePoint, precision uint) float32 {
+	value := int64(1 << (precision - 1))
+	for i, index := range point.indices {
+		value += int64(source[index*stride+offset]) * point.weights[i]
+	}
+	return float32(min(max(value>>precision, 0), 255))
+}
+
+func resizeApertusImage(img image.Image, bounds image.Rectangle, width, height int) []float32 {
+	sourceWidth, sourceHeight := bounds.Dx(), bounds.Dy()
+	source := make([]float32, sourceWidth*sourceHeight*3)
+	for y := range sourceHeight {
+		for x := range sourceWidth {
+			c := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
+			i := (y*sourceWidth + x) * 3
+			source[i], source[i+1], source[i+2] = float32(c.R), float32(c.G), float32(c.B)
+		}
+	}
+	if sourceWidth == width && sourceHeight == height {
+		return source
+	}
+	xPoints, xPrecision := apertureResamplePoints(sourceWidth, width)
+	yPoints, yPrecision := apertureResamplePoints(sourceHeight, height)
+	horizontal := make([]float32, width*sourceHeight*3)
+	for y := range sourceHeight {
+		for x, point := range xPoints {
+			for channel := range 3 {
+				horizontal[(y*width+x)*3+channel] = apertureResamplePixel(source, 3, y*sourceWidth*3+channel, point, xPrecision)
+			}
+		}
+	}
+	result := make([]float32, width*height*3)
+	for y, point := range yPoints {
+		for x := range width {
+			for channel := range 3 {
+				result[(y*width+x)*3+channel] = apertureResamplePixel(horizontal, width*3, x*3+channel, point, yPrecision)
+			}
+		}
+	}
+	return result
 }

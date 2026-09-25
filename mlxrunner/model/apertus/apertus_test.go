@@ -2,10 +2,10 @@ package apertus
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,6 +13,7 @@ import (
 	imagemanifest "github.com/ollama/ollama/manifest"
 	"github.com/ollama/ollama/mlx"
 	"github.com/ollama/ollama/mlxrunner/model"
+	"github.com/ollama/ollama/mlxrunner/tokenizer"
 )
 
 func TestRegistration(t *testing.T) {
@@ -154,7 +155,7 @@ func TestParseConfigApertus1p5Exact8B(t *testing.T) {
 	}
 }
 
-func TestPruneApertus1p5TokenizerAddedTokens(t *testing.T) {
+func TestApertus1p5TokenizerAddedTokenLimit(t *testing.T) {
 	data := []byte(`{
 		"model": {
 			"type": "BPE",
@@ -162,26 +163,27 @@ func TestPruneApertus1p5TokenizerAddedTokens(t *testing.T) {
 			"merges": []
 		},
 		"added_tokens": [
+			{"id": -1, "content": "<|negative|>", "special": true},
 			{"id": 61, "content": "<|system_start|>", "special": true},
 			{"id": 73, "content": "<|tool_output_start|>", "special": true},
 			{"id": 131073, "content": "<|img_start|>", "special": true},
-			{"id": 262344, "content": "<|audio token 0|>", "special": true}
+			{"id": 262344, "content": "<|audio token 0|>", "special": true},
+			{"id": 266752, "content": "<|overflow|>", "special": true}
 		]
 	}`)
 
-	pruned, err := pruneApertus1p5TokenizerAddedTokens(data, 131072)
+	cfg := Config{
+		Architecture:    apertus1p5Architecture,
+		VocabSize:       266752,
+		OutputVocabSize: 131072,
+	}
+	tokConfig := tokenizerConfigForModel(cfg, nil)
+	if tokConfig.AddedTokenIDLimit != cfg.VocabSize {
+		t.Fatalf("AddedTokenIDLimit = %d, want input VocabSize %d", tokConfig.AddedTokenIDLimit, cfg.VocabSize)
+	}
+	tok, err := tokenizer.LoadFromBytesWithConfig(data, tokConfig)
 	if err != nil {
-		t.Fatalf("pruneApertus1p5TokenizerAddedTokens error: %v", err)
-	}
-
-	var got struct {
-		AddedTokens []struct {
-			ID      int32  `json:"id"`
-			Content string `json:"content"`
-		} `json:"added_tokens"`
-	}
-	if err := json.Unmarshal(pruned, &got); err != nil {
-		t.Fatalf("parse pruned tokenizer: %v", err)
+		t.Fatalf("load bounded Apertus tokenizer: %v", err)
 	}
 
 	want := []struct {
@@ -190,39 +192,48 @@ func TestPruneApertus1p5TokenizerAddedTokens(t *testing.T) {
 	}{
 		{id: 61, content: "<|system_start|>"},
 		{id: 73, content: "<|tool_output_start|>"},
+		{id: 131073, content: "<|img_start|>"},
+		{id: 262344, content: "<|audio token 0|>"},
 	}
-	if len(got.AddedTokens) != len(want) {
-		t.Fatalf("kept added tokens = %v, want %d", got.AddedTokens, len(want))
-	}
-	for i, wantToken := range want {
-		if got.AddedTokens[i].ID != wantToken.id || got.AddedTokens[i].Content != wantToken.content {
-			t.Fatalf("kept token %d = (%d, %q), want (%d, %q)",
-				i,
-				got.AddedTokens[i].ID,
-				got.AddedTokens[i].Content,
-				wantToken.id,
-				wantToken.content,
-			)
+	for _, wantToken := range want {
+		id, ok := tok.GetSpecialToken(wantToken.content)
+		if !ok || id != wantToken.id {
+			t.Fatalf("GetSpecialToken(%q) = (%d, %v), want (%d, true)", wantToken.content, id, ok, wantToken.id)
 		}
+	}
+	for _, filtered := range []string{"<|negative|>", "<|overflow|>"} {
+		if id, ok := tok.GetSpecialToken(filtered); ok {
+			t.Fatalf("GetSpecialToken(%q) = (%d, true), want absent", filtered, id)
+		}
+	}
+
+	input := "a<|system_start|><|tool_output_start|><|img_start|><|audio token 0|>"
+	wantIDs := []int32{0, 61, 73, 131073, 262344}
+	if got := tok.Encode(input, false); !reflect.DeepEqual(got, wantIDs) {
+		t.Fatalf("Encode(%q) = %v, want %v", input, got, wantIDs)
+	}
+	if got := tok.Decode(wantIDs); got != input {
+		t.Fatalf("Decode(%v) = %q, want %q", wantIDs, got, input)
 	}
 }
 
-func TestTokenizerPruningIsApertus1p5Only(t *testing.T) {
-	data := []byte(`{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},"added_tokens":[{"id":7,"content":"kept"},{"id":129,"content":"media"}]}`)
-
-	v1, err := tokenizerDataForConfig(Config{Architecture: apertus1p0Architecture, OutputVocabSize: 128}, data)
-	if err != nil {
-		t.Fatal(err)
+func TestAddedTokenIDLimitIsApertus1p5Only(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want int32
+	}{
+		{name: "Apertus 1.0", cfg: Config{Architecture: apertus1p0Architecture, VocabSize: 128}},
+		{name: "Apertus 1.1 Mini", cfg: Config{Architecture: apertus1p0Architecture, VocabSize: 131072, MaxPositionEmbeddings: 4096, RopeTheta: 500000}},
+		{name: "Apertus 1.5 uses input vocabulary", cfg: Config{Architecture: apertus1p5Architecture, VocabSize: 128, OutputVocabSize: 64}, want: 128},
 	}
-	if string(v1) != string(data) {
-		t.Fatalf("Apertus 1.0 tokenizer changed: %s", v1)
-	}
-	v15, err := tokenizerDataForConfig(Config{Architecture: apertus1p5Architecture, OutputVocabSize: 128}, data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(v15), `"id":129`) || !strings.Contains(string(v15), `"id":7`) {
-		t.Fatalf("Apertus 1.5 tokenizer pruning = %s", v15)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tokenizerConfigForModel(tt.cfg, nil).AddedTokenIDLimit
+			if got != tt.want {
+				t.Fatalf("AddedTokenIDLimit = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -283,6 +294,56 @@ func TestParseConfigApertus1p5RequiresRopeParameters(t *testing.T) {
 	}`))
 	if err == nil || !strings.Contains(err.Error(), "missing rope_parameters.rope_theta") {
 		t.Fatalf("parseConfig error = %v, want missing rope_parameters.rope_theta", err)
+	}
+}
+
+func TestApertus1p5MediaLoaderRequiresValidIndependentConfig(t *testing.T) {
+	tensors := map[string]*mlx.Array{
+		"model.vision_tokenizer.present": mlx.New("vision"),
+		"model.audio_tokenizer.present":  mlx.New("audio"),
+	}
+	vision := VisionTokenizerConfig{
+		AttnResolutions: []int32{16}, BaseChannels: 256, ChannelMultiplier: []int32{1, 1, 2, 2, 4},
+		CodebookSize: 131072, EmbedDim: 256, InChannels: 3, LatentChannels: 256,
+		NumResBlocks: 4, Resolution: 256,
+	}
+	audio := AudioTokenizerConfig{
+		AudioChannels: 1, CodebookDim: 512, CodebookSize: 4096, Compress: 2,
+		DilationGrowthRate: 2, HiddenSize: 512, KernelSize: 7, LastKernelSize: 7,
+		NormType: "weight_norm", NumFilters: 32, NumLSTMLayers: 2, NumResidualLayers: 1,
+		PadMode: "reflect", ResidualKernelSize: 3, SamplingRate: 24000,
+		UpsamplingRatios: []int32{6, 5, 5, 4}, UseConvShortcut: true,
+	}
+	if err := vision.validate(); err != nil {
+		t.Fatalf("supported vision config rejected: %v", err)
+	}
+	if err := audio.validate(); err != nil {
+		t.Fatalf("supported audio config rejected: %v", err)
+	}
+	if !canValidateVisionTokenizer(tensors, vision) || !canValidateAudioTokenizer(tensors, audio) {
+		t.Fatal("supported independent media configs were suppressed")
+	}
+	if err := (VisionTokenizerConfig{}).validate(); err == nil {
+		t.Fatal("missing vision config accepted")
+	}
+	invalidVision := vision
+	invalidVision.Resolution = 512
+	if err := invalidVision.validate(); err == nil {
+		t.Fatal("invalid vision config accepted")
+	}
+	if canValidateVisionTokenizer(tensors, invalidVision) || !canValidateAudioTokenizer(tensors, audio) {
+		t.Fatal("invalid vision config did not suppress only vision")
+	}
+	if err := (AudioTokenizerConfig{}).validate(); err == nil {
+		t.Fatal("missing audio config accepted")
+	}
+	invalidAudio := audio
+	invalidAudio.SamplingRate = 16000
+	if err := invalidAudio.validate(); err == nil {
+		t.Fatal("invalid audio config accepted")
+	}
+	if canValidateAudioTokenizer(tensors, invalidAudio) || !canValidateVisionTokenizer(tensors, vision) {
+		t.Fatal("invalid audio config did not suppress only audio")
 	}
 }
 
