@@ -755,7 +755,19 @@ static NSImage *ollamaApplicationIcon(void) {
 }
 
 - (void)aboutOllama {
-    [[NSApplication sharedApplication] orderFrontStandardAboutPanel:nil];
+    NSString *marketing = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    NSString *publicVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"OllamaPublicBuildVersion"];
+    NSString *prefix = [marketing stringByAppendingString:@"-"];
+    if (marketing != nil && publicVersion != nil && [publicVersion hasPrefix:prefix]) {
+        NSString *build = [publicVersion substringFromIndex:prefix.length];
+        NSString *display = [NSString stringWithFormat:@"Version %@ (%@)", marketing, build];
+        [[NSApplication sharedApplication] orderFrontStandardAboutPanelWithOptions:@{
+            NSAboutPanelOptionApplicationVersion: display,
+            NSAboutPanelOptionVersion: @"",
+        }];
+    } else {
+        [[NSApplication sharedApplication] orderFrontStandardAboutPanel:nil];
+    }
     [NSApp activateIgnoringOtherApps:YES];
 }
 
