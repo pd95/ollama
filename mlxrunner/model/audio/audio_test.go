@@ -158,6 +158,18 @@ func TestDecodeErrors(t *testing.T) {
 	}
 }
 
+func TestDecodeMalformedMP3Recognized(t *testing.T) {
+	for _, data := range [][]byte{
+		[]byte("ID3\x04\x00rest"),
+		{0xff, 0xfb, 0x90, 0x00},
+	} {
+		_, _, err := Decode(data)
+		if err == nil || !strings.Contains(err.Error(), "MP3") {
+			t.Fatalf("malformed MP3 decode = %v, want MP3-specific error", err)
+		}
+	}
+}
+
 func TestResample(t *testing.T) {
 	tone := func(n int, freq, rate float64) []float32 {
 		out := make([]float32, n)
