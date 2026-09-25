@@ -5,7 +5,10 @@
 // hand-maintained copies.
 package quant
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 type params struct {
 	groupSize int
@@ -18,7 +21,11 @@ type params struct {
 var byType = map[string]params{
 	"nvfp4": {groupSize: 16, bits: 4, mode: "nvfp4"},
 	"mxfp4": {groupSize: 32, bits: 4, mode: "mxfp4"},
+	"int2":  {groupSize: 64, bits: 2, mode: "affine"},
+	"int3":  {groupSize: 64, bits: 3, mode: "affine"},
 	"int4":  {groupSize: 64, bits: 4, mode: "affine"},
+	"int5":  {groupSize: 64, bits: 5, mode: "affine"},
+	"int6":  {groupSize: 64, bits: 6, mode: "affine"},
 	"mxfp8": {groupSize: 32, bits: 8, mode: "mxfp8"},
 	"int8":  {groupSize: 64, bits: 8, mode: "affine"},
 }
@@ -34,12 +41,38 @@ func Canonical(quantType string) string {
 		return "mxfp4"
 	case "MXFP8":
 		return "mxfp8"
+	case "INT2", "Q2":
+		return "int2"
+	case "INT3", "Q3":
+		return "int3"
 	case "INT4", "FP4", "Q4":
 		return "int4"
+	case "INT5", "Q5":
+		return "int5"
+	case "INT6", "Q6":
+		return "int6"
 	case "INT8", "FP8", "Q8":
 		return "int8"
 	default:
 		return ""
+	}
+}
+
+// Importable reports whether the runtime can load this quantization format.
+func Importable(quantType string) bool {
+	_, ok := byType[Canonical(quantType)]
+	return ok
+}
+
+// Creatable reports whether Ollama may create this quantization from a float
+// checkpoint. MLX can execute additional affine widths that are intentionally
+// import-only because they are not exposed as Ollama quantization targets.
+func Creatable(quantType string) bool {
+	switch Canonical(quantType) {
+	case "int4", "int8", "nvfp4", "mxfp4", "mxfp8":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -72,8 +105,68 @@ func Bits(quantType string) int {
 // packed into U32 words, so a tensor's logical last dimension is its stored
 // last dimension times this factor.
 func PackFactor(quantType string) int {
-	if b := Bits(quantType); b > 0 {
+	if b := Bits(quantType); b > 0 && 32%b == 0 {
 		return 32 / b
 	}
 	return 0
+}
+
+// LogicalColumns expands a U32-packed last dimension using the exact MLX
+// relationship logical_columns = packed_columns * 32 / bits. The result is
+// rejected when the division is not exact or multiplication would overflow.
+func LogicalColumns(packedColumns uint64, quantType string) (uint64, bool) {
+	bits := Bits(quantType)
+	if bits == 0 || packedColumns > math.MaxUint64/32 {
+		return 0, false
+	}
+	n := packedColumns * 32
+	if n%uint64(bits) != 0 {
+		return 0, false
+	}
+	return n / uint64(bits), true
+}
+
+// InferAffineParams derives an affine group size from packed weight and scale
+// columns. A low-bit hint makes every MLX-supported width resolvable; without
+// one, only the historical unambiguous int4/int8 layouts are accepted.
+func InferAffineParams(packedColumns, scaleColumns uint64, hintBits int) (groupSize, bits int, ok bool) {
+	groupForBits := func(bits int) (int, bool) {
+		if packedColumns == 0 || scaleColumns == 0 || packedColumns > math.MaxUint64/32 || scaleColumns > math.MaxUint64/uint64(bits) {
+			return 0, false
+		}
+		n, d := packedColumns*32, scaleColumns*uint64(bits)
+		if d == 0 || n%d != 0 || n/d > uint64(math.MaxInt) {
+			return 0, false
+		}
+		groupSize := int(n / d)
+		switch groupSize {
+		case 32, 64, 128:
+			return groupSize, true
+		default:
+			return 0, false
+		}
+	}
+
+	switch hintBits {
+	case 2, 3, 4, 5, 6, 8:
+		if groupSize, ok := groupForBits(hintBits); ok {
+			return groupSize, hintBits, true
+		}
+		return 0, 0, false
+	}
+
+	groupSize4, ok4 := groupForBits(4)
+	groupSize8, ok8 := groupForBits(8)
+	switch {
+	case ok4 && groupSize4 == 32:
+		return groupSize4, 4, true
+	case ok8 && groupSize8 == 64:
+		return groupSize8, 8, true
+	case ok4 && !ok8:
+		return groupSize4, 4, true
+	case ok8 && !ok4:
+		return groupSize8, 8, true
+	default:
+		return 0, 0, false
+	}
 }
