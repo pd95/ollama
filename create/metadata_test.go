@@ -152,20 +152,20 @@ func TestInferSafetensorsConfigFamilies(t *testing.T) {
 		{
 			name:       "gpt-oss architecture",
 			config:     `{"architectures":["GptOssForCausalLM"],"model_type":"gpt_oss"}`,
-			wantParser: "harmony", wantRenderer: "harmony",
-			wantCaps: []string{"completion", "tools", "thinking"},
+			wantParser: "harmony",
+			wantCaps:   []string{"completion", "tools", "thinking"},
 		},
 		{
 			name:       "gpt-oss model type",
 			config:     `{"model_type":"gpt-oss"}`,
-			wantParser: "harmony", wantRenderer: "harmony",
-			wantCaps: []string{"completion", "tools", "thinking"},
+			wantParser: "harmony",
+			wantCaps:   []string{"completion", "tools", "thinking"},
 		},
 		{
 			name:       "gpt-oss nested llm model type",
 			config:     `{"model_type":"wrapper","llm_config":{"model_type":"gpt_oss"}}`,
-			wantParser: "harmony", wantRenderer: "harmony",
-			wantCaps: []string{"completion", "tools", "thinking"},
+			wantParser: "harmony",
+			wantCaps:   []string{"completion", "tools", "thinking"},
 		},
 		{
 			name:         "glimmer vision",

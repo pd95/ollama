@@ -287,8 +287,6 @@ func rendererNameForIdentifier(modelDir, s, chatTemplate string) (string, error)
 		return lagunaRendererParserNameFromTemplate(modelDir, chatTemplate)
 	case strings.Contains(s, "cohere2moe") || strings.Contains(s, "cohere2_moe"):
 		return "cohere", nil
-	case isGPTOSSFamily(s):
-		return "harmony", nil
 	case strings.Contains(s, "gemma4"):
 		return "gemma4", nil
 	case strings.Contains(s, "glm4") || strings.Contains(s, "glm-4"):
