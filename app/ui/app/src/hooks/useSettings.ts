@@ -11,6 +11,7 @@ interface SettingsState {
   sidebarOpen: boolean;
   lastHomeView: string;
   onboardingVersion: number;
+  quitBehavior: "quit" | "background";
   thinkEnabled: boolean;
   thinkLevel: string;
 }
@@ -25,6 +26,7 @@ type SettingsUpdate = Partial<{
   SidebarOpen: boolean;
   LastHomeView: string;
   OnboardingVersion: number;
+  QuitBehavior: "quit" | "background";
 }>;
 
 export function useSettings({
@@ -59,6 +61,10 @@ export function useSettings({
       sidebarOpen: settingsData?.settings?.SidebarOpen ?? false,
       lastHomeView: settingsData?.settings?.LastHomeView ?? "chat",
       onboardingVersion: settingsData?.settings?.OnboardingVersion ?? 0,
+      quitBehavior:
+        settingsData?.settings?.QuitBehavior === "background"
+          ? "background"
+          : "quit",
     }),
     [settingsData?.settings],
   );

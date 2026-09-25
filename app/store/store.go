@@ -168,8 +168,12 @@ type Settings struct {
 	// SidebarOpen indicates if the chat sidebar is open
 	SidebarOpen bool
 
-	// LastHomeView is retained for settings compatibility and resolves to chat.
+	// LastHomeView stores the last primary desktop area: chat or apps.
 	LastHomeView string
+
+	// QuitBehavior controls whether Command-Q quits the macOS application or
+	// hides its window while the service remains available in the menu bar.
+	QuitBehavior string
 
 	// OnboardingVersion stores the latest onboarding flow the user has completed.
 	OnboardingVersion int
@@ -411,8 +415,11 @@ func (s *Store) Settings() (Settings, error) {
 		}
 	}
 
-	if settings.LastHomeView == "" {
+	if settings.LastHomeView != "chat" && settings.LastHomeView != "apps" {
 		settings.LastHomeView = "chat"
+	}
+	if settings.QuitBehavior != "background" {
+		settings.QuitBehavior = "quit"
 	}
 
 	return settings, nil

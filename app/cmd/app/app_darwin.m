@@ -582,7 +582,7 @@ static NSImage *ollamaApplicationIcon(void) {
                 keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:[NSString stringWithFormat:@"Quit %@", appName]
-                       action:@selector(hide)
+                       action:@selector(commandQuit)
                 keyEquivalent:@"q"];
 
     NSMenuItem *fileMenuItem = [[NSMenuItem alloc] init];
@@ -1463,9 +1463,11 @@ didCompleteWithError:(NSError *)error {
         });
         return NSTerminateLater;
     }
-    // Otherwise just hide the app (for Cmd+Q, close button, etc.)
-    [NSApp hide:nil];
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    if (!ShouldKeepRunningOnQuit()) {
+        [self requestQuit];
+        return NSTerminateCancel;
+    }
+    [self hide];
     return NSTerminateCancel;
 }
 
@@ -1524,6 +1526,14 @@ didCompleteWithError:(NSError *)error {
 - (void)hide {
     [NSApp hide:nil];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+}
+
+- (void)commandQuit {
+    if (ShouldKeepRunningOnQuit()) {
+        [self hide];
+        return;
+    }
+    [self requestQuit];
 }
 
 - (void)requestQuit {

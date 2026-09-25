@@ -14,7 +14,7 @@ import (
 
 // currentSchemaVersion defines the current database schema version.
 // Increment this when making schema changes that require migrations.
-const currentSchemaVersion = 19
+const currentSchemaVersion = 20
 
 // database wraps the SQLite connection.
 // SQLite handles its own locking for concurrent access:
@@ -83,6 +83,7 @@ func (db *database) init() error {
 		selected_model TEXT NOT NULL DEFAULT '',
 		sidebar_open BOOLEAN NOT NULL DEFAULT 0,
 		last_home_view TEXT NOT NULL DEFAULT 'chat',
+		quit_behavior TEXT NOT NULL DEFAULT 'quit',
 		onboarding_version INTEGER NOT NULL DEFAULT 0,
 		think_enabled BOOLEAN NOT NULL DEFAULT 0,
 		think_level TEXT NOT NULL DEFAULT '',
@@ -291,6 +292,11 @@ func (db *database) migrate() error {
 				return fmt.Errorf("migrate v18 to v19: %w", err)
 			}
 			version = 19
+		case 19:
+			if err := db.migrateV19ToV20(); err != nil {
+				return fmt.Errorf("migrate v19 to v20: %w", err)
+			}
+			version = 20
 		default:
 			// If we have a version we don't recognize, just set it to current
 			// This might happen during development
@@ -599,6 +605,17 @@ func (db *database) migrateV18ToV19() error {
 		return fmt.Errorf("add codex_desktop_used column: %w", err)
 	}
 	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 19`)
+	return err
+}
+
+// migrateV19ToV20 adds the macOS Command-Q lifecycle preference. Existing
+// users get the conventional full-quit behavior selected for this release.
+func (db *database) migrateV19ToV20() error {
+	_, err := db.conn.Exec(`ALTER TABLE settings ADD COLUMN quit_behavior TEXT NOT NULL DEFAULT 'quit'`)
+	if err != nil && !duplicateColumnError(err) {
+		return fmt.Errorf("add quit_behavior column: %w", err)
+	}
+	_, err = db.conn.Exec(`UPDATE settings SET quit_behavior = 'quit', schema_version = 20`)
 	return err
 }
 
@@ -1250,9 +1267,9 @@ func (db *database) getSettings() (Settings, error) {
 	var s Settings
 
 	err := db.conn.QueryRow(`
-		SELECT expose, survey, browser, models, agent, tools, working_dir, context_length, turbo_enabled, websearch_enabled, selected_model, sidebar_open, last_home_view, onboarding_version, think_enabled, think_level, auto_update_enabled, claude_desktop_used, codex_desktop_used
+		SELECT expose, survey, browser, models, agent, tools, working_dir, context_length, turbo_enabled, websearch_enabled, selected_model, sidebar_open, last_home_view, quit_behavior, onboarding_version, think_enabled, think_level, auto_update_enabled, claude_desktop_used, codex_desktop_used
 		FROM settings
-	`).Scan(&s.Expose, &s.Survey, &s.Browser, &s.Models, &s.Agent, &s.Tools, &s.WorkingDir, &s.ContextLength, &s.TurboEnabled, &s.WebSearchEnabled, &s.SelectedModel, &s.SidebarOpen, &s.LastHomeView, &s.OnboardingVersion, &s.ThinkEnabled, &s.ThinkLevel, &s.AutoUpdateEnabled, &s.ClaudeDesktopUsed, &s.CodexDesktopUsed)
+	`).Scan(&s.Expose, &s.Survey, &s.Browser, &s.Models, &s.Agent, &s.Tools, &s.WorkingDir, &s.ContextLength, &s.TurboEnabled, &s.WebSearchEnabled, &s.SelectedModel, &s.SidebarOpen, &s.LastHomeView, &s.QuitBehavior, &s.OnboardingVersion, &s.ThinkEnabled, &s.ThinkLevel, &s.AutoUpdateEnabled, &s.ClaudeDesktopUsed, &s.CodexDesktopUsed)
 	if err != nil {
 		return Settings{}, fmt.Errorf("get settings: %w", err)
 	}
@@ -1262,14 +1279,18 @@ func (db *database) getSettings() (Settings, error) {
 
 func (db *database) setSettings(s Settings) error {
 	lastHomeView := strings.ToLower(strings.TrimSpace(s.LastHomeView))
-	if lastHomeView != "chat" {
+	if lastHomeView != "chat" && lastHomeView != "apps" {
 		lastHomeView = "chat"
+	}
+	quitBehavior := strings.ToLower(strings.TrimSpace(s.QuitBehavior))
+	if quitBehavior != "background" {
+		quitBehavior = "quit"
 	}
 
 	_, err := db.conn.Exec(`
 		UPDATE settings
-		SET expose = ?, survey = ?, browser = ?, models = ?, agent = ?, tools = ?, working_dir = ?, context_length = ?, turbo_enabled = ?, websearch_enabled = ?, selected_model = ?, sidebar_open = ?, last_home_view = ?, onboarding_version = MAX(onboarding_version, ?), think_enabled = ?, think_level = ?, auto_update_enabled = ?, claude_desktop_used = ?
-	`, s.Expose, s.Survey, s.Browser, s.Models, s.Agent, s.Tools, s.WorkingDir, s.ContextLength, s.TurboEnabled, s.WebSearchEnabled, s.SelectedModel, s.SidebarOpen, lastHomeView, s.OnboardingVersion, s.ThinkEnabled, s.ThinkLevel, s.AutoUpdateEnabled, s.ClaudeDesktopUsed)
+		SET expose = ?, survey = ?, browser = ?, models = ?, agent = ?, tools = ?, working_dir = ?, context_length = ?, turbo_enabled = ?, websearch_enabled = ?, selected_model = ?, sidebar_open = ?, last_home_view = ?, quit_behavior = ?, onboarding_version = MAX(onboarding_version, ?), think_enabled = ?, think_level = ?, auto_update_enabled = ?, claude_desktop_used = ?
+	`, s.Expose, s.Survey, s.Browser, s.Models, s.Agent, s.Tools, s.WorkingDir, s.ContextLength, s.TurboEnabled, s.WebSearchEnabled, s.SelectedModel, s.SidebarOpen, lastHomeView, quitBehavior, s.OnboardingVersion, s.ThinkEnabled, s.ThinkLevel, s.AutoUpdateEnabled, s.ClaudeDesktopUsed)
 	if err != nil {
 		return fmt.Errorf("set settings: %w", err)
 	}

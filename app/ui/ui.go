@@ -1541,6 +1541,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 		store.Settings
 		OnboardingVersion *int
 		ClaudeDesktopUsed *bool
+		QuitBehavior      *string
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		return fmt.Errorf("invalid request body: %w", err)
@@ -1556,6 +1557,11 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 		settings.ClaudeDesktopUsed = old.ClaudeDesktopUsed
 	} else {
 		settings.ClaudeDesktopUsed = *request.ClaudeDesktopUsed
+	}
+	if request.QuitBehavior == nil {
+		settings.QuitBehavior = old.QuitBehavior
+	} else {
+		settings.QuitBehavior = *request.QuitBehavior
 	}
 
 	if err := s.Store.SetSettings(settings); err != nil {
