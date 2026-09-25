@@ -3254,3 +3254,22 @@ func TestFromResponsesRequestAcceptsEncryptedContentPart(t *testing.T) {
 		t.Fatalf("messages = %#v", chat.Messages)
 	}
 }
+
+func TestCustomApplyPatchDirectDeclarationOnly(t *testing.T) {
+	direct, err := FromResponsesRequest(ResponsesRequest{Tools: []ResponsesTool{{Type: "custom", Name: "apply_patch"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(direct.Tools) != 1 || direct.Tools[0].Type != "function" || direct.Tools[0].Function.Name != "apply_patch" {
+		t.Fatalf("direct custom tool = %#v, want an internal apply_patch function", direct.Tools)
+	}
+
+	for _, tools := range [][]ResponsesTool{
+		{{Type: "custom", Name: "other"}},
+		{{Type: "namespace", Name: "tools", Tools: []ResponsesTool{{Type: "custom", Name: "apply_patch"}}}},
+	} {
+		if _, err := FromResponsesRequest(ResponsesRequest{Tools: tools}); err == nil {
+			t.Fatalf("unsupported custom declaration %#v was accepted", tools)
+		}
+	}
+}
