@@ -13,6 +13,13 @@
 #
 VOL_NAME=${VOL_NAME:-"Ollama"}
 export VERSION=${VERSION:-$(git describe --tags --first-parent --abbrev=7 --long --dirty --always | sed -e "s/^v//g")}
+export OLLAMA_UPDATE_MANIFEST_URL=${OLLAMA_UPDATE_MANIFEST_URL:-https://pd95.github.io/Ollama/updates/v1/preview/darwin-arm64.json}
+export OLLAMA_UPDATE_SOURCE=${OLLAMA_UPDATE_SOURCE:-mlx-preview}
+export OLLAMA_UPDATE_CHANNEL=${OLLAMA_UPDATE_CHANNEL:-preview}
+export OLLAMA_UPDATE_REPOSITORY=${OLLAMA_UPDATE_REPOSITORY:-pd95/ollama}
+export OLLAMA_UPDATE_BUNDLE_ID=${OLLAMA_UPDATE_BUNDLE_ID:-com.electron.ollama}
+export OLLAMA_UPDATE_APPLE_TEAM_ID=${OLLAMA_UPDATE_APPLE_TEAM_ID:-P8CC95REUG}
+export OLLAMA_UPDATE_DISTRIBUTION_REVISION=${OLLAMA_UPDATE_DISTRIBUTION_REVISION:-1}
 export CGO_CFLAGS="-O3 -mmacosx-version-min=14.0"
 export CGO_CXXFLAGS="-O3 -mmacosx-version-min=14.0"
 export CGO_LDFLAGS="-mmacosx-version-min=14.0"
@@ -186,6 +193,38 @@ _sign_darwin() {
 }
 
 _build_macapp() {
+    OLLAMA_APP_VERSION=${OLLAMA_APP_VERSION:-$(printf '%s' "$VERSION" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')}
+    printf '%s' "$OLLAMA_APP_VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
+        echo "invalid update marketing version: $OLLAMA_APP_VERSION" >&2
+        exit 1
+    }
+    printf '%s' "$OLLAMA_UPDATE_DISTRIBUTION_REVISION" | grep -Eq '^[1-9][0-9]*$' || {
+        echo "invalid update distribution revision: $OLLAMA_UPDATE_DISTRIBUTION_REVISION" >&2
+        exit 1
+    }
+    if [ -z "${OLLAMA_APP_BUILD_VERSION:-}" ]; then
+        old_ifs=$IFS
+        IFS=.
+        set -- $OLLAMA_APP_VERSION
+        IFS=$old_ifs
+        OLLAMA_APP_BUILD_VERSION="$(($1 * 1000 + $2)).$(($3)).$(($OLLAMA_UPDATE_DISTRIBUTION_REVISION))"
+    fi
+    printf '%s' "$OLLAMA_APP_BUILD_VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
+        echo "invalid update build version: $OLLAMA_APP_BUILD_VERSION" >&2
+        exit 1
+    }
+    APP_LDFLAGS="-s -w -X=github.com/ollama/ollama/app/version.Version=${VERSION}"
+    APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.UpdateManifestURL=${OLLAMA_UPDATE_MANIFEST_URL}"
+    APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.UpdateSource=${OLLAMA_UPDATE_SOURCE}"
+    APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.UpdateChannel=${OLLAMA_UPDATE_CHANNEL}"
+    APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.UpdateRepository=${OLLAMA_UPDATE_REPOSITORY}"
+    APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.CurrentMarketingVersion=${OLLAMA_APP_VERSION}"
+    APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.CurrentBuildVersion=${OLLAMA_APP_BUILD_VERSION}"
+    APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.ExpectedBundleID=${OLLAMA_UPDATE_BUNDLE_ID}"
+    APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.ExpectedAppleTeamID=${OLLAMA_UPDATE_APPLE_TEAM_ID}"
+    if [ "${OLLAMA_DISABLE_UPDATES:-0}" = 1 ]; then
+        APP_LDFLAGS="$APP_LDFLAGS -X=github.com/ollama/ollama/app/updater.DisableUpdates=true"
+    fi
     if ! command -v npm &> /dev/null; then
         echo "npm is not installed. Please install Node.js and npm first:"
         echo "   Visit: https://nodejs.org/"
@@ -212,8 +251,8 @@ _build_macapp() {
     touch dist/Ollama.app
 
     go clean -cache
-    GOARCH=amd64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-amd64 -ldflags="-s -w -X=github.com/ollama/ollama/app/version.Version=${VERSION}" ./app/cmd/app
-    GOARCH=arm64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-arm64 -ldflags="-s -w -X=github.com/ollama/ollama/app/version.Version=${VERSION}" ./app/cmd/app
+    GOARCH=amd64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-amd64 -ldflags="$APP_LDFLAGS" ./app/cmd/app
+    GOARCH=arm64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-arm64 -ldflags="$APP_LDFLAGS" ./app/cmd/app
     mkdir -p dist/Ollama.app/Contents/MacOS
     lipo -create -output dist/Ollama.app/Contents/MacOS/Ollama dist/darwin-app-amd64 dist/darwin-app-arm64
     rm -f dist/darwin-app-amd64 dist/darwin-app-arm64
@@ -228,8 +267,9 @@ _build_macapp() {
     ln -s Versions/Current/Squirrel dist/Ollama.app/Contents/Frameworks/Squirrel.framework/Squirrel
 
     # Update the version in the Info.plist
-    plutil -replace CFBundleShortVersionString -string "$VERSION" dist/Ollama.app/Contents/Info.plist
-    plutil -replace CFBundleVersion -string "$VERSION" dist/Ollama.app/Contents/Info.plist
+    plutil -replace CFBundleShortVersionString -string "$OLLAMA_APP_VERSION" dist/Ollama.app/Contents/Info.plist
+    plutil -replace CFBundleVersion -string "$OLLAMA_APP_BUILD_VERSION" dist/Ollama.app/Contents/Info.plist
+    plutil -replace OllamaPublicBuildVersion -string "$VERSION" dist/Ollama.app/Contents/Info.plist
 
     # Setup the ollama binaries
     mkdir -p dist/Ollama.app/Contents/Resources
