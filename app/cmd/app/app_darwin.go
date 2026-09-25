@@ -137,6 +137,19 @@ func ShowUI() {
 	openUI("/")
 }
 
+//export ShouldKeepRunningOnQuit
+func ShouldKeepRunningOnQuit() C.bool {
+	if appStore == nil {
+		return false
+	}
+	settings, err := appStore.Settings()
+	if err != nil {
+		slog.Warn("failed to load Command-Q preference", "error", err)
+		return false
+	}
+	return C._Bool(settings.QuitBehavior == "background")
+}
+
 //export IsOnboardingActive
 func IsOnboardingActive() C.bool {
 	return C._Bool(wv.OnboardingActive())

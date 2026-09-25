@@ -415,6 +415,7 @@ export class Settings {
     SelectedModel: string;
     SidebarOpen: boolean;
     LastHomeView: string;
+    QuitBehavior: string;
     OnboardingVersion: number;
     AutoUpdateEnabled: boolean;
     ClaudeDesktopUsed: boolean;
@@ -436,6 +437,7 @@ export class Settings {
         this.SelectedModel = source["SelectedModel"];
         this.SidebarOpen = source["SidebarOpen"];
         this.LastHomeView = source["LastHomeView"];
+        this.QuitBehavior = source["QuitBehavior"];
         this.OnboardingVersion = source["OnboardingVersion"];
         this.AutoUpdateEnabled = source["AutoUpdateEnabled"];
         this.ClaudeDesktopUsed = source["ClaudeDesktopUsed"];

@@ -32,6 +32,7 @@ extern void Restart();
 void StartUI(const char *path);
 void ShowUI();
 bool IsOnboardingActive(void);
+bool ShouldKeepRunningOnQuit(void);
 void StopUI();
 void StartUpdate();
 void darwinStartHiddenTasks();

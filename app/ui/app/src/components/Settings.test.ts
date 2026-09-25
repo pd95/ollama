@@ -58,6 +58,7 @@ describe("Settings defaults", () => {
       Models: "",
       ContextLength: 65_536,
       AutoUpdateEnabled: true,
+      QuitBehavior: "quit",
     });
     expect(onSaved).not.toHaveBeenCalled();
     settingsUpdate.resolve();
