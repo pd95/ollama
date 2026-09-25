@@ -1501,3 +1501,12 @@ func TestParseGemma4ToolCall_RawQuotedStructuralString(t *testing.T) {
 		t.Fatalf("tool call mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestGemma4RejectsControlTokenInsideToolArguments(t *testing.T) {
+	_, err := parseGemma4ToolCall(`call:bash{command:<|"|>before<|channel>after<|"|>}`, []api.Tool{
+		gemma4TestStringTool("bash", "command"),
+	})
+	if err == nil {
+		t.Fatal("Gemma control token inside an executable argument was accepted")
+	}
+}
