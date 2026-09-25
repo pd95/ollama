@@ -27,8 +27,8 @@ func TestFocusUICreatesOrShowsWindow(t *testing.T) {
 		wantRun    string
 		wantShow   bool
 	}{
-		{name: "creates Apps window when tray only", wantRun: "/connect"},
-		{name: "routes existing window to Apps", running: true, wantRun: "/connect"},
+		{name: "creates selected home when tray only", wantRun: "/"},
+		{name: "routes existing window to selected home", running: true, wantRun: "/"},
 		{name: "preserves onboarding", running: true, onboarding: true, wantShow: true},
 	}
 

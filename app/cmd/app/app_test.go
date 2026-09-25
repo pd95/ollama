@@ -161,7 +161,7 @@ func TestRunInitialWindowsUIRoutesInteractiveLaunch(t *testing.T) {
 		wantPath       string
 	}{
 		{name: "fresh install preserves onboarding", showOnboarding: true, wantPath: "/"},
-		{name: "returning launch opens apps", wantPath: "/connect"},
+		{name: "returning launch resolves selected home", wantPath: "/"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var gotPath string
