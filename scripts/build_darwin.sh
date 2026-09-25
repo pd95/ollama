@@ -192,6 +192,32 @@ _sign_darwin() {
     _create_darwin_runtime_tarball
 }
 
+_codesign_one() {
+    IDENTITY=$1
+    IDENTIFIER=$2
+    TARGET=$3
+
+    codesign -f --timestamp -s "$IDENTITY" --identifier "$IDENTIFIER" --options=runtime "$TARGET"
+}
+
+_sign_app_bundle() {
+    IDENTITY=$1
+
+    _codesign_one "$IDENTITY" ai.ollama.ollama dist/Ollama.app/Contents/Resources/ollama
+    _codesign_one "$IDENTITY" ai.ollama.ollama dist/Ollama.app/Contents/Resources/llama-server
+    _codesign_one "$IDENTITY" ai.ollama.ollama dist/Ollama.app/Contents/Resources/llama-quantize
+
+    for lib in dist/Ollama.app/Contents/Resources/*.so dist/Ollama.app/Contents/Resources/*.dylib dist/Ollama.app/Contents/Resources/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.dylib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.so; do
+        [ -f "$lib" ] || continue
+        _codesign_one "$IDENTITY" ai.ollama.ollama "$lib"
+    done
+
+    _codesign_one "$IDENTITY" com.electron.ollama dist/Ollama.app/Contents/Frameworks/Squirrel.framework/Versions/A/Squirrel
+    _codesign_one "$IDENTITY" com.github.Squirrel dist/Ollama.app/Contents/Frameworks/Squirrel.framework
+    _codesign_one "$IDENTITY" com.electron.ollama dist/Ollama.app/Contents/MacOS/Ollama
+    codesign -f --timestamp -s "$IDENTITY" --identifier com.electron.ollama --deep --options=runtime dist/Ollama.app
+}
+
 _build_macapp() {
     OLLAMA_APP_VERSION=${OLLAMA_APP_VERSION:-$(printf '%s' "$VERSION" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')}
     printf '%s' "$OLLAMA_APP_VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
@@ -282,50 +308,26 @@ _build_macapp() {
     fi
     chmod a+x dist/Ollama.app/Contents/Resources/ollama
 
-    # Sign
+    # Sign the nested executables and frameworks before sealing the app bundle.
     if [ -n "$APPLE_IDENTITY" ]; then
-        codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/ollama
-        codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/llama-server
-        codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/llama-quantize
-        for lib in dist/Ollama.app/Contents/Resources/*.so dist/Ollama.app/Contents/Resources/*.dylib dist/Ollama.app/Contents/Resources/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.dylib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.metallib dist/Ollama.app/Contents/Resources/mlx_metal_v*/*.so; do
-            [ -f "$lib" ] || continue
-            codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime "$lib"
-        done
-        codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier com.electron.ollama --deep --options=runtime dist/Ollama.app
+        _sign_app_bundle "$APPLE_IDENTITY"
     fi
 
     rm -f dist/Ollama-darwin.zip
     ditto -c -k --norsrc --keepParent dist/Ollama.app dist/Ollama-darwin.zip
     (cd dist/Ollama.app/Contents/Resources/; tar -cf - ollama llama-server llama-quantize *.so *.dylib *.metallib *_LICENSE *_NOTICE mlx_metal_v*/ 2>/dev/null) | gzip -9vc > dist/ollama-darwin.tgz
 
-    # Notarize and Staple
+    # The helper persists each submission's artifact and hash so timeouts can
+    # be resumed without rebuilding or creating an untracked second submission.
     if [ -n "$APPLE_IDENTITY" ]; then
-        $(xcrun -f notarytool) submit dist/Ollama-darwin.zip --wait --timeout 20m --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
-        rm -f dist/Ollama-darwin.zip
-        $(xcrun -f stapler) staple dist/Ollama.app
-        ditto -c -k --norsrc --keepParent dist/Ollama.app dist/Ollama-darwin.zip
-
+        # A stale DMG must never be mistaken for this attempt's output.
         rm -f dist/Ollama.dmg
-
-        (cd dist && ../scripts/create-dmg.sh \
-            --volname "${VOL_NAME}" \
-            --volicon ../app/darwin/Ollama.app/Contents/Resources/icon.icns \
-            --background ../app/assets/background.png \
-            --window-pos 200 120 \
-            --window-size 800 400 \
-            --icon-size 128 \
-            --icon "Ollama.app" 200 190 \
-            --hide-extension "Ollama.app" \
-            --app-drop-link 600 190 \
-            --text-size 12 \
-            "Ollama.dmg" \
-            "Ollama.app" \
-        ; )
-        rm -f dist/rw*.dmg
-
-        codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.dmg
-        $(xcrun -f notarytool) submit dist/Ollama.dmg --wait --timeout 20m --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
-        $(xcrun -f stapler) staple dist/Ollama.dmg
+        ./scripts/notarize_darwin.sh \
+            --release-revision "${MLX_RELEASE_REVISION:-$(git rev-parse HEAD)}" \
+            --release-version "$VERSION" \
+            --app-version "$OLLAMA_APP_VERSION" \
+            --app-build-version "$OLLAMA_APP_BUILD_VERSION" \
+            --timeout "${MLX_NOTARY_TIMEOUT:-20m}" || return $?
     else
         echo "WARNING: Code signing disabled, this bundle will not work for upgrade testing"
     fi
