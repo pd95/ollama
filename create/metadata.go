@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	apertusmetadata "github.com/ollama/ollama/mlxrunner/model/apertus/metadata"
 	modelparsers "github.com/ollama/ollama/model/parsers"
 	"github.com/ollama/ollama/thinking"
 	"github.com/ollama/ollama/types/model"
@@ -39,6 +41,20 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 	}
 
 	capabilities := inferSafetensorsCapabilitiesFromConfig(cfg, chatTemplate, parserName)
+	if sourceConfigHasApertus1p5(cfg) {
+		vision, audio := false, false
+		if inv, err := ReadInventory(modelDir); err == nil {
+			vision, audio = apertus1p5MediaCapabilities(inv)
+		}
+		capabilities = []string{"completion"}
+		if vision {
+			capabilities = append(capabilities, "vision")
+		}
+		if audio {
+			capabilities = append(capabilities, "audio")
+		}
+		capabilities = append(capabilities, "tools", "thinking")
+	}
 	modelFamily := inferModelFamilyFromConfig(cfg)
 	generationDefaults, err := readHFGenerationDefaults(modelDir)
 	if err != nil {
@@ -163,6 +179,28 @@ func inferSafetensorsCapabilitiesFromConfig(cfg sourceModelConfig, chatTemplate,
 	}
 
 	return capabilities
+}
+
+func sourceConfigHasApertus1p5(cfg sourceModelConfig) bool {
+	for _, id := range sourceConfigIdentifiers(cfg) {
+		if isApertus1p5Family(id) {
+			return true
+		}
+	}
+	return false
+}
+
+func apertus1p5MediaCapabilities(inv Inventory) (vision, audio bool) {
+	cfg, err := apertusmetadata.ParseConfig(inv.RawConfig)
+	if err != nil {
+		return false, false
+	}
+	descriptors := make(map[string]apertusmetadata.TensorDescriptor, len(inv.Tensors))
+	for name, tensor := range inv.Tensors {
+		descriptors[name] = apertusmetadata.TensorDescriptor{Dtype: tensor.Dtype, Shape: slices.Clone(tensor.Shape)}
+	}
+	return apertusmetadata.ValidateVisionInventory(cfg, descriptors) == nil,
+		apertusmetadata.ValidateAudioInventory(cfg, descriptors) == nil
 }
 
 type modelCapabilities struct {
