@@ -195,7 +195,7 @@ func focusUI(app AppCallbacks) {
 		app.UIShow()
 		return
 	}
-	app.UIRun("/connect")
+	app.UIRun("/")
 }
 
 func (t *winTray) Quit() {

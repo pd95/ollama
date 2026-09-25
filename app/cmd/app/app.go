@@ -375,7 +375,7 @@ func shouldShowOnboarding(settings store.Settings, err error) bool {
 
 func runInitialWindowsUI(
 	startHidden bool,
-	showOnboarding bool,
+	_ bool,
 	urlSchemeRequest string,
 	startHiddenFn func(),
 	handleURLFn func(string),
@@ -389,11 +389,7 @@ func runInitialWindowsUI(
 		startHiddenFn()
 		return
 	}
-	if showOnboarding {
-		showUIFn("/")
-		return
-	}
-	showUIFn("/connect")
+	showUIFn("/")
 }
 
 func startHiddenTasks() {
