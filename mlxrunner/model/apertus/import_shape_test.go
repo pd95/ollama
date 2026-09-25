@@ -3,9 +3,11 @@ package apertus
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	imagemanifest "github.com/ollama/ollama/manifest"
@@ -18,12 +20,13 @@ func TestImportedApertusTensorShapes(t *testing.T) {
 		t.Skip("set OLLAMA_MODELS to the imported model cache to validate imported tensor shapes")
 	}
 
-	m, err := imagemanifest.ParseNamedManifest(modeltypes.ParseName("apertus-mlx:8b-nvfp4"))
+	m, err := imagemanifest.ParseNamedManifest(modeltypes.ParseName(importedApertusModelName()))
 	if err != nil {
 		t.Fatalf("load imported manifest: %v", err)
 	}
 
 	got := map[string][]int{}
+	rawCount, quantizedCount := 0, 0
 	for _, layer := range m.TensorLayers() {
 		blobPath, err := imagemanifest.BlobsPath(layer.Digest)
 		if err != nil {
@@ -32,6 +35,15 @@ func TestImportedApertusTensorShapes(t *testing.T) {
 		header, err := readSafetensorsHeader(blobPath)
 		if err != nil {
 			t.Fatalf("read tensor layer %s: %v", layer.Name, err)
+		}
+		var quant struct {
+			QuantType string `json:"quant_type"`
+			GroupSize string `json:"group_size"`
+		}
+		if metadata, ok := header["__metadata__"]; ok {
+			if err := json.Unmarshal(metadata, &quant); err != nil {
+				t.Fatal(err)
+			}
 		}
 		for name, meta := range header {
 			if name == "__metadata__" {
@@ -44,7 +56,46 @@ func TestImportedApertusTensorShapes(t *testing.T) {
 			if err := json.Unmarshal(meta, &info); err != nil {
 				t.Fatalf("parse tensor %s metadata: %v", name, err)
 			}
-			got[name] = info.Shape
+			rawCount++
+			if strings.HasSuffix(name, ".scale") {
+				continue
+			}
+			if _, exists := got[name]; exists {
+				t.Fatalf("duplicate tensor %s", name)
+			}
+			shape := append([]int{}, info.Shape...)
+			if quant.QuantType != "" {
+				packing, groupSize := 0, 0
+				switch quant.QuantType {
+				case "nvfp4":
+					packing, groupSize = 8, 16
+				case "mxfp8":
+					packing, groupSize = 4, 32
+				default:
+					t.Fatalf("unsupported imported quantization %q", quant.QuantType)
+				}
+				if info.DType != "U32" || len(shape) != 2 {
+					t.Fatalf("invalid packed tensor %s: dtype=%s shape=%v", name, info.DType, shape)
+				}
+				if quant.GroupSize != fmt.Sprint(groupSize) {
+					t.Fatalf("invalid quantization group size %q", quant.GroupSize)
+				}
+				var scale struct {
+					DType string `json:"dtype"`
+					Shape []int  `json:"shape"`
+				}
+				if err := json.Unmarshal(header[name+".scale"], &scale); err != nil {
+					t.Fatalf("missing or invalid scale for %s: %v", name, err)
+				}
+				shape[1] *= packing
+				if scale.DType != "U8" || !reflect.DeepEqual(scale.Shape, []int{shape[0], shape[1] / groupSize}) {
+					t.Fatalf("invalid scale for %s: dtype=%s shape=%v", name, scale.DType, scale.Shape)
+				}
+				quantizedCount++
+			} else if info.DType != "BF16" {
+				t.Fatalf("dense tensor %s dtype=%s, want BF16", name, info.DType)
+			}
+			got[name] = shape
 		}
 	}
 
@@ -84,6 +135,19 @@ func TestImportedApertusTensorShapes(t *testing.T) {
 	if len(got) != 451 {
 		t.Fatalf("imported tensor count = %d, want 451", len(got))
 	}
+	if quantizedCount != 0 && quantizedCount != 193 {
+		t.Fatalf("quantized tensor count=%d, want 0 or 193", quantizedCount)
+	}
+	if rawCount != 451+quantizedCount {
+		t.Fatalf("header tensor count=%d, want %d", rawCount, 451+quantizedCount)
+	}
+}
+
+func importedApertusModelName() string {
+	if name := os.Getenv("PORTING_APERTUS_MODEL_NAME"); name != "" {
+		return name
+	}
+	return "apertus-mlx:8b-nvfp4"
 }
 
 func TestImportedApertusEOSTokens(t *testing.T) {
@@ -91,7 +155,7 @@ func TestImportedApertusEOSTokens(t *testing.T) {
 		t.Skip("set OLLAMA_MODELS to the imported model cache to validate imported EOS tokens")
 	}
 
-	m, err := imagemanifest.ParseNamedManifest(modeltypes.ParseName("apertus-mlx:8b-nvfp4"))
+	m, err := imagemanifest.ParseNamedManifest(modeltypes.ParseName(importedApertusModelName()))
 	if err != nil {
 		t.Fatalf("load imported manifest: %v", err)
 	}

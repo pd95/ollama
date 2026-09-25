@@ -102,6 +102,20 @@ func TestInferSafetensorsConfigFamilies(t *testing.T) {
 		wantCaps     []string
 	}{
 		{
+			name:         "apertus architecture",
+			config:       `{"architectures":["ApertusForCausalLM"]}`,
+			wantParser:   "apertus",
+			wantRenderer: "apertus",
+			wantCaps:     []string{"completion", "tools"},
+		},
+		{
+			name:         "apertus model type",
+			config:       `{"model_type":"apertus"}`,
+			wantParser:   "apertus",
+			wantRenderer: "apertus",
+			wantCaps:     []string{"completion", "tools"},
+		},
+		{
 			name:         "qwen3",
 			config:       `{"architectures":["Qwen3ForCausalLM"]}`,
 			wantParser:   "qwen3",
@@ -274,6 +288,24 @@ func TestInferSafetensorsConfigGPTOSSFamily(t *testing.T) {
 	config := inferConfigForTest(t, dir, "", "")
 	if config.ModelFamily != "gptoss" || !slices.Equal(config.ModelFamilies, []string{"gptoss"}) {
 		t.Fatalf("model family/families = %q/%v, want gptoss/[gptoss]", config.ModelFamily, config.ModelFamilies)
+	}
+}
+
+func TestInferSafetensorsConfigApertusFamily(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"architectures":["ApertusForCausalLM"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	config := inferConfigForTest(t, dir, "", "")
+	if config.ModelFamily != "apertus" || !slices.Equal(config.ModelFamilies, []string{"apertus"}) {
+		t.Fatalf("model family/families = %q/%v, want apertus/[apertus]", config.ModelFamily, config.ModelFamilies)
+	}
+	if config.Parser != "apertus" || config.Renderer != "apertus" {
+		t.Fatalf("parser/renderer = %q/%q, want apertus/apertus", config.Parser, config.Renderer)
+	}
+	if want := []string{"completion", "tools"}; !slices.Equal(config.Capabilities, want) {
+		t.Fatalf("capabilities = %v, want %v", config.Capabilities, want)
 	}
 }
 
