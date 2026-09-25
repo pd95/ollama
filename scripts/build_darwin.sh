@@ -12,7 +12,15 @@
 #    VOL_NAME="$(date)" ./scripts/build_darwin.sh
 #
 VOL_NAME=${VOL_NAME:-"Ollama"}
-export VERSION=${VERSION:-$(git describe --tags --first-parent --abbrev=7 --long --dirty --always | sed -e "s/^v//g")}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+cd "$REPO_DIR"
+
+if [ -z "${VERSION:-}" ]; then
+    VERSION=$(git describe --tags --first-parent --abbrev=7 --long --dirty --always 2>/dev/null | sed -e "s/^v//g" || true)
+    VERSION=${VERSION:-0.0.0-local}
+fi
+export VERSION
 export OLLAMA_UPDATE_MANIFEST_URL=${OLLAMA_UPDATE_MANIFEST_URL:-https://pd95.github.io/Ollama/updates/v1/preview/darwin-arm64.json}
 export OLLAMA_UPDATE_SOURCE=${OLLAMA_UPDATE_SOURCE:-mlx-preview}
 export OLLAMA_UPDATE_CHANNEL=${OLLAMA_UPDATE_CHANNEL:-preview}
@@ -160,6 +168,65 @@ _prepare_darwin_runtime() {
     _merge_darwin_payload
 }
 
+_create_available_darwin_binary() {
+    OUT=$1
+    shift
+
+    INPUTS=
+    for F in "$@"; do
+        [ -f "$F" ] || continue
+        INPUTS="$INPUTS $F"
+    done
+    [ -n "$INPUTS" ] || {
+        echo "missing Darwin runtime input for $OUT" >&2
+        exit 1
+    }
+
+    # Paths here are fixed build outputs without whitespace.
+    # shellcheck disable=SC2086
+    set -- $INPUTS
+    if [ "$#" -gt 1 ]; then
+        lipo -create -output "$OUT" "$@"
+    else
+        cp "$1" "$OUT"
+    fi
+    chmod +x "$OUT"
+}
+
+_prepare_darwin_app_runtime() {
+    status "Preparing Darwin runtime payload for app bundle"
+    mkdir -p dist/darwin
+    _create_available_darwin_binary dist/darwin/ollama dist/darwin-amd64/ollama dist/darwin-arm64/ollama
+    _create_available_darwin_binary dist/darwin/llama-server dist/darwin-amd64/lib/ollama/llama-server dist/darwin-arm64/lib/ollama/llama-server
+    _create_available_darwin_binary dist/darwin/llama-quantize dist/darwin-amd64/lib/ollama/llama-quantize dist/darwin-arm64/lib/ollama/llama-quantize
+    _merge_darwin_payload
+}
+
+_build_darwin_app_launcher() {
+    APP_INPUTS=
+    for ARCH in $ARCHS; do
+        case "$ARCH" in
+            arm64|amd64) ;;
+            *) echo "unsupported Darwin app architecture: $ARCH" >&2; exit 1 ;;
+        esac
+        OUT="dist/darwin-app-$ARCH"
+        GOARCH=$ARCH CGO_ENABLED=1 GOOS=darwin go build -o "$OUT" -ldflags="$APP_LDFLAGS" ./app/cmd/app
+        APP_INPUTS="$APP_INPUTS $OUT"
+    done
+    [ -n "$APP_INPUTS" ] || { echo "no Darwin app architecture selected" >&2; exit 1; }
+    mkdir -p dist/Ollama.app/Contents/MacOS
+    # Paths here are fixed build outputs without whitespace.
+    # shellcheck disable=SC2086
+    set -- $APP_INPUTS
+    if [ "$#" -gt 1 ]; then
+        lipo -create -output dist/Ollama.app/Contents/MacOS/Ollama "$@"
+    else
+        cp "$1" dist/Ollama.app/Contents/MacOS/Ollama
+    fi
+    chmod +x dist/Ollama.app/Contents/MacOS/Ollama
+    rm -f dist/darwin-app-amd64 dist/darwin-app-arm64
+}
+
 _create_darwin_runtime_tarball() {
     status "Creating universal tarball..."
     rm -f dist/ollama-darwin.tar dist/ollama-darwin.tgz
@@ -197,7 +264,11 @@ _codesign_one() {
     IDENTIFIER=$2
     TARGET=$3
 
-    codesign -f --timestamp -s "$IDENTITY" --identifier "$IDENTIFIER" --options=runtime "$TARGET"
+    if [ "$IDENTITY" = - ]; then
+        codesign -f -s - --identifier "$IDENTIFIER" "$TARGET"
+    else
+        codesign -f --timestamp -s "$IDENTITY" --identifier "$IDENTIFIER" --options=runtime "$TARGET"
+    fi
 }
 
 _sign_app_bundle() {
@@ -215,7 +286,65 @@ _sign_app_bundle() {
     _codesign_one "$IDENTITY" com.electron.ollama dist/Ollama.app/Contents/Frameworks/Squirrel.framework/Versions/A/Squirrel
     _codesign_one "$IDENTITY" com.github.Squirrel dist/Ollama.app/Contents/Frameworks/Squirrel.framework
     _codesign_one "$IDENTITY" com.electron.ollama dist/Ollama.app/Contents/MacOS/Ollama
-    codesign -f --timestamp -s "$IDENTITY" --identifier com.electron.ollama --deep --options=runtime dist/Ollama.app
+    if [ "$IDENTITY" = - ]; then
+        codesign -f -s - --deep dist/Ollama.app
+    else
+        codesign -f --timestamp -s "$IDENTITY" --identifier com.electron.ollama --deep --options=runtime dist/Ollama.app
+    fi
+}
+
+_prepare_local_app_for_launch() {
+    xattr -cr dist/Ollama.app
+    if xattr -lr dist/Ollama.app 2>/dev/null | grep -q com.apple.quarantine; then
+        echo "failed to remove quarantine metadata from dist/Ollama.app" >&2
+        exit 1
+    fi
+    codesign --verify --deep --strict --verbose=2 dist/Ollama.app
+}
+
+_build_custom_app_icon() {
+    if [ -n "${OLLAMA_APP_ICON_PNG:-}" ]; then
+        APP_ICON_PNG=$OLLAMA_APP_ICON_PNG
+        [ -f "$APP_ICON_PNG" ] || {
+            echo "requested custom app icon is missing: $APP_ICON_PNG" >&2
+            exit 1
+        }
+    elif [ -f ../release-test-site/AppIcon-1024.png ]; then
+        APP_ICON_PNG=../release-test-site/AppIcon-1024.png
+    else
+        return
+    fi
+
+    if ! command -v sips >/dev/null 2>&1 || ! command -v iconutil >/dev/null 2>&1; then
+        echo "custom app icon requires macOS sips and iconutil: $APP_ICON_PNG" >&2
+        exit 1
+    fi
+
+    status "Building custom app icon from $APP_ICON_PNG"
+    ICONSET=dist/OllamaAppIcon.iconset
+    rm -rf "$ICONSET"
+    mkdir -p "$ICONSET"
+
+    sips -z 16 16 "$APP_ICON_PNG" --out "$ICONSET/icon_16x16.png" >/dev/null
+    sips -z 32 32 "$APP_ICON_PNG" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
+    sips -z 32 32 "$APP_ICON_PNG" --out "$ICONSET/icon_32x32.png" >/dev/null
+    sips -z 64 64 "$APP_ICON_PNG" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
+    sips -z 128 128 "$APP_ICON_PNG" --out "$ICONSET/icon_128x128.png" >/dev/null
+    sips -z 256 256 "$APP_ICON_PNG" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
+    sips -z 256 256 "$APP_ICON_PNG" --out "$ICONSET/icon_256x256.png" >/dev/null
+    sips -z 512 512 "$APP_ICON_PNG" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
+    sips -z 512 512 "$APP_ICON_PNG" --out "$ICONSET/icon_512x512.png" >/dev/null
+    sips -z 1024 1024 "$APP_ICON_PNG" --out "$ICONSET/icon_512x512@2x.png" >/dev/null
+
+    CUSTOM_ICON=dist/OllamaAppIcon.icns
+    rm -f "$CUSTOM_ICON"
+    iconutil -c icns "$ICONSET" -o "$CUSTOM_ICON"
+    [ -s "$CUSTOM_ICON" ] || {
+        echo "custom app icon generation produced no icon.icns" >&2
+        exit 1
+    }
+    mv "$CUSTOM_ICON" dist/Ollama.app/Contents/Resources/icon.icns
+    rm -rf "$ICONSET"
 }
 
 _build_macapp() {
@@ -272,16 +401,13 @@ _build_macapp() {
     # Build the Ollama.app bundle
     rm -rf dist/Ollama.app
     cp -a ./app/darwin/Ollama.app dist/Ollama.app
+    _build_custom_app_icon
 
     # update the modified date of the app bundle to now
     touch dist/Ollama.app
 
     go clean -cache
-    GOARCH=amd64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-amd64 -ldflags="$APP_LDFLAGS" ./app/cmd/app
-    GOARCH=arm64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-arm64 -ldflags="$APP_LDFLAGS" ./app/cmd/app
-    mkdir -p dist/Ollama.app/Contents/MacOS
-    lipo -create -output dist/Ollama.app/Contents/MacOS/Ollama dist/darwin-app-amd64 dist/darwin-app-arm64
-    rm -f dist/darwin-app-amd64 dist/darwin-app-arm64
+    _build_darwin_app_launcher
 
     # Create a mock Squirrel.framework bundle
     mkdir -p dist/Ollama.app/Contents/Frameworks/Squirrel.framework/Versions/A/Resources/
@@ -299,7 +425,7 @@ _build_macapp() {
 
     # Setup the ollama binaries
     mkdir -p dist/Ollama.app/Contents/Resources
-    [ -d dist/darwin/lib/ollama ] || _merge_darwin_payload
+    _prepare_darwin_app_runtime
     cp -a dist/darwin/ollama dist/Ollama.app/Contents/Resources/ollama
     cp dist/darwin/llama-server dist/Ollama.app/Contents/Resources/
     cp dist/darwin/llama-quantize dist/Ollama.app/Contents/Resources/
@@ -311,6 +437,11 @@ _build_macapp() {
     # Sign the nested executables and frameworks before sealing the app bundle.
     if [ -n "$APPLE_IDENTITY" ]; then
         _sign_app_bundle "$APPLE_IDENTITY"
+    elif [ "${OLLAMA_LOCAL_SIGN:-1}" = 1 ]; then
+        status "Ad-hoc signing local app bundle"
+        _sign_app_bundle -
+        _prepare_local_app_for_launch
+        status "Local app is ad-hoc signed and not notarized; do not redistribute it"
     fi
 
     rm -f dist/Ollama-darwin.zip
@@ -329,7 +460,11 @@ _build_macapp() {
             --app-build-version "$OLLAMA_APP_BUILD_VERSION" \
             --timeout "${MLX_NOTARY_TIMEOUT:-20m}" || return $?
     else
-        echo "WARNING: Code signing disabled, this bundle will not work for upgrade testing"
+        if [ "${OLLAMA_LOCAL_SIGN:-1}" = 1 ]; then
+            echo "WARNING: Developer ID signing and notarization disabled; local app is ad-hoc signed only"
+        else
+            echo "WARNING: Code signing disabled, this bundle will not work for upgrade testing"
+        fi
     fi
 }
 
