@@ -295,13 +295,19 @@ type sourceQuantization struct {
 }
 
 type sourceModelConfig struct {
-	ModelType     string          `json:"model_type"`
-	Architectures []string        `json:"architectures"`
-	VisionConfig  *map[string]any `json:"vision_config"`
-	AudioConfig   *map[string]any `json:"audio_config"`
-	HasVision     bool            `json:"has_vision"`
-	SoundConfig   *map[string]any `json:"sound_config"`
-	LLMConfig     struct {
+	ModelType             string   `json:"model_type"`
+	Architectures         []string `json:"architectures"`
+	MaxPositionEmbeddings int32    `json:"max_position_embeddings"`
+	RopeTheta             float64  `json:"rope_theta"`
+	RopeScaling           struct {
+		RopeType string `json:"rope_type"`
+		Type     string `json:"type"`
+	} `json:"rope_scaling"`
+	VisionConfig *map[string]any `json:"vision_config"`
+	AudioConfig  *map[string]any `json:"audio_config"`
+	HasVision    bool            `json:"has_vision"`
+	SoundConfig  *map[string]any `json:"sound_config"`
+	LLMConfig    struct {
 		ModelType string `json:"model_type"`
 	} `json:"llm_config"`
 	Quantization       sourceQuantization `json:"quantization"`
