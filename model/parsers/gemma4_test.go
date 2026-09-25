@@ -589,6 +589,160 @@ func TestGemma4Parser_StreamingToolCall(t *testing.T) {
 	}
 }
 
+func TestGemma4Parser_RejectsControlTokenInsideStreamingToolCall(t *testing.T) {
+	parser := &Gemma4Parser{hasThinkingSupport: true}
+	parser.Init([]api.Tool{gemma4TestStringTool("exec_command", "cmd")}, nil, &api.ThinkValue{Value: true})
+
+	chunks := []string{
+		`<|tool_call>call:exec_command{cmd:<|"|>cat << 'EOF' > project_analysis.py
+`,
+		`print('ok')
+"<|chan`,
+		`nel>EOF
+<|"|>}<tool_call|>`,
+	}
+
+	for i, chunk := range chunks {
+		_, _, calls, err := parser.Add(chunk, i == len(chunks)-1)
+		if i < len(chunks)-1 {
+			if err != nil {
+				t.Fatalf("Add() chunk %d returned an early error: %v", i, err)
+			}
+			if len(calls) != 0 {
+				t.Fatalf("Add() chunk %d returned tool calls before the closing tag: %#v", i, calls)
+			}
+			continue
+		}
+
+		if err == nil {
+			t.Fatal("Add() accepted a channel control token inside a tool call")
+		}
+		if !strings.Contains(err.Error(), gemma4ThinkingOpenTag) {
+			t.Fatalf("Add() error %q does not identify %q", err, gemma4ThinkingOpenTag)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("Add() returned an invalid tool call: %#v", calls)
+		}
+	}
+}
+
+func TestGemma4Parser_RejectsControlCharacterInsideStreamingToolCall(t *testing.T) {
+	parser := &Gemma4Parser{hasThinkingSupport: true}
+	parser.Init([]api.Tool{gemma4TestStringTool("exec_command", "cmd")}, nil, &api.ThinkValue{Value: true})
+
+	chunks := []string{
+		`<|tool_call>call:exec_command{cmd:<|"|>cat << 'EOF' > project_analysis.py
+print('ok')
+`,
+		"\x0fEOF\n",
+		`<|"|>}<tool_call|>`,
+	}
+
+	for i, chunk := range chunks {
+		_, _, calls, err := parser.Add(chunk, i == len(chunks)-1)
+		if i < len(chunks)-1 {
+			if err != nil {
+				t.Fatalf("Add() chunk %d returned an early error: %v", i, err)
+			}
+			if len(calls) != 0 {
+				t.Fatalf("Add() chunk %d returned tool calls before the closing tag: %#v", i, calls)
+			}
+			continue
+		}
+
+		if err == nil {
+			t.Fatal("Add() accepted a control character inside a tool call")
+		}
+		if !strings.Contains(err.Error(), "U+000F") {
+			t.Fatalf("Add() error %q does not identify U+000F", err)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("Add() returned an invalid tool call: %#v", calls)
+		}
+	}
+}
+
+func TestGemma4Parser_RejectsToolCallCloseInsideOpenArgumentString(t *testing.T) {
+	parser := &Gemma4Parser{hasThinkingSupport: true}
+	parser.Init([]api.Tool{gemma4TestStringTool("exec_command", "cmd")}, nil, &api.ThinkValue{Value: true})
+
+	input := `<|tool_call>call:exec_command{cmd:<|"|>printf before<tool_call|>printf after<|"|>}<tool_call|>`
+	_, _, calls, err := parser.Add(input, true)
+	if err == nil {
+		t.Fatal("Add() accepted a tool-call close token inside an open argument string")
+	}
+	if !strings.Contains(err.Error(), gemma4ToolCallCloseTag) {
+		t.Fatalf("Add() error %q does not identify %q", err, gemma4ToolCallCloseTag)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("Add() returned a truncated tool call: %#v", calls)
+	}
+}
+
+func TestGemma4Parser_RejectsToolCallCloseInsideRawArgument(t *testing.T) {
+	parser := &Gemma4Parser{hasThinkingSupport: true}
+	parser.Init([]api.Tool{gemma4TestStringTool("exec_command", "cmd")}, nil, &api.ThinkValue{Value: true})
+
+	input := `<|tool_call>call:exec_command{cmd:printf before<tool_call|>printf after}<tool_call|>`
+	_, _, calls, err := parser.Add(input, true)
+	if err == nil {
+		t.Fatal("Add() accepted a tool-call close token inside an incomplete raw argument")
+	}
+	if !strings.Contains(err.Error(), gemma4ToolCallCloseTag) {
+		t.Fatalf("Add() error %q does not identify %q", err, gemma4ToolCallCloseTag)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("Add() returned a truncated executable tool call: %#v", calls)
+	}
+}
+
+func TestGemma4Parser_RejectsEmptyToolCallAtEnd(t *testing.T) {
+	parser := &Gemma4Parser{hasThinkingSupport: true}
+	parser.Init(nil, nil, &api.ThinkValue{Value: true})
+
+	_, _, calls, err := parser.Add(gemma4ToolCallOpenTag, true)
+	if err == nil {
+		t.Fatal("Add() silently discarded an empty tool call")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("Add() returned a tool call for empty input: %#v", calls)
+	}
+}
+
+func TestGemma4Parser_AllowsStreamingMultilineHereDocument(t *testing.T) {
+	parser := &Gemma4Parser{hasThinkingSupport: true}
+	parser.Init([]api.Tool{gemma4TestStringTool("exec_command", "cmd")}, nil, &api.ThinkValue{Value: true})
+
+	command := "cat << 'EOF' > project_analysis.py\nprint('ok')\nEOF\n"
+	chunks := []string{
+		`<|tool_call>call:exec_command{cmd:<|"|>cat << 'EOF' > project_analysis.py
+`,
+		"print('ok')\nEOF\n",
+		`<|"|>}<tool_call|>`,
+	}
+
+	var calls []api.ToolCall
+	for i, chunk := range chunks {
+		_, _, chunkCalls, err := parser.Add(chunk, i == len(chunks)-1)
+		if err != nil {
+			t.Fatalf("Add() chunk %d returned error: %v", i, err)
+		}
+		calls = append(calls, chunkCalls...)
+	}
+
+	want := []api.ToolCall{{
+		Function: api.ToolCallFunction{
+			Name: "exec_command",
+			Arguments: testArgs(map[string]any{
+				"cmd": command,
+			}),
+		},
+	}}
+	if diff := cmp.Diff(want, calls, argsComparer); diff != "" {
+		t.Fatalf("tool calls mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestGemma4Parser_IgnoresExtraToolCallCloseTags(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -1263,6 +1417,65 @@ func TestParseGemma4ToolCall_InvalidRawQuotedEscape(t *testing.T) {
 	_, err := parseGemma4ToolCall(`call:open_file{path:"C:\users\bob\file.txt"}`, nil)
 	if err == nil {
 		t.Fatal("expected parseGemma4ToolCall to reject malformed raw-quoted JSON escapes")
+	}
+}
+
+func TestParseGemma4ToolCall_RejectsUnexpectedControlTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{name: "thinking open", token: gemma4ThinkingOpenTag},
+		{name: "thinking close", token: gemma4ThinkingCloseTag},
+		{name: "nested tool call", token: gemma4ToolCallOpenTag},
+		{name: "tool call close", token: gemma4ToolCallCloseTag},
+		{name: "tool response", token: gemma4ToolResponseTag},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := `call:exec_command{cmd:<|"|>printf 'before` + tt.token + `after'<|"|>}`
+			_, err := parseGemma4ToolCall(content, []api.Tool{gemma4TestStringTool("exec_command", "cmd")})
+			if err == nil {
+				t.Fatalf("parseGemma4ToolCall accepted %q inside a tool argument", tt.token)
+			}
+			if !strings.Contains(err.Error(), tt.token) {
+				t.Fatalf("parseGemma4ToolCall error %q does not identify %q", err, tt.token)
+			}
+		})
+	}
+}
+
+func TestParseGemma4ToolCall_RejectsUnexpectedControlCharacters(t *testing.T) {
+	content := "call:exec_command{cmd:<|\"|>printf 'before\x0fafter'<|\"|>}"
+	_, err := parseGemma4ToolCall(content, []api.Tool{gemma4TestStringTool("exec_command", "cmd")})
+	if err == nil {
+		t.Fatal("parseGemma4ToolCall accepted U+000F inside a tool argument")
+	}
+	if !strings.Contains(err.Error(), "U+000F") {
+		t.Fatalf("parseGemma4ToolCall error %q does not identify U+000F", err)
+	}
+}
+
+func TestParseGemma4ToolCall_AllowsValidMultilineHereDocument(t *testing.T) {
+	command := "cat << 'EOF' > project_analysis.py\nprint('ok')\nEOF\n"
+	content := `call:exec_command{cmd:<|"|>` + command + `<|"|>}`
+
+	got, err := parseGemma4ToolCall(content, []api.Tool{gemma4TestStringTool("exec_command", "cmd")})
+	if err != nil {
+		t.Fatalf("parseGemma4ToolCall returned error: %v", err)
+	}
+
+	want := api.ToolCall{
+		Function: api.ToolCallFunction{
+			Name: "exec_command",
+			Arguments: testArgs(map[string]any{
+				"cmd": command,
+			}),
+		},
+	}
+	if diff := cmp.Diff(want, got, argsComparer); diff != "" {
+		t.Fatalf("tool call mismatch (-want +got):\n%s", diff)
 	}
 }
 
