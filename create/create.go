@@ -422,6 +422,7 @@ func (cfg sourceModelConfig) HFFP8WeightBlockSize() (rows, cols int32, ok bool) 
 type tensorImportTransformFactory func(rawConfig json.RawMessage) (quantizePolicy, error)
 
 var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
+	"ApertusForCausalLM":                    newApertusImportTransform,
 	"GptOssForCausalLM":                     newGPTOSSImportTransform,
 	"Qwen3_5ForCausalLM":                    newQwen35ImportTransform,
 	"Qwen3_5ForConditionalGeneration":       newQwen35ImportTransform,
