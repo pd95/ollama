@@ -2184,6 +2184,17 @@ func TestCreateSafetensorsRuntimeErrorHidesLoaderDetails(t *testing.T) {
 	}
 }
 
+func TestCreateSafetensorsInvalidTokenizerIsBadRequest(t *testing.T) {
+	err := fmt.Errorf("%w: tokenizer.json: duplicate added token ID 2", create.ErrInvalidTokenizer)
+	resp := createSafetensorsErrorResponse(err)
+	if got, want := resp["status"], http.StatusBadRequest; got != want {
+		t.Fatalf("status = %v, want %v", got, want)
+	}
+	if got := resp["error"]; got != err.Error() {
+		t.Fatalf("error = %q, want %q", got, err.Error())
+	}
+}
+
 func TestCreateSafetensorsRejectsMissingBlob(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("OLLAMA_MODELS", t.TempDir())

@@ -38,6 +38,10 @@ func createDraftLayers(ctx context.Context, modelDir, tensorPrefix, configPrefix
 	if err := validateMLXSource(inv.Config, true, validation); err != nil {
 		return nil, err
 	}
+	validatedTokenizer, err := validateTokenizerSource(modelDir)
+	if err != nil {
+		return nil, err
+	}
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -61,7 +65,7 @@ func createDraftLayers(ctx context.Context, modelDir, tensorPrefix, configPrefix
 		return nil, err
 	}
 
-	configLayers, _, err := importConfigBlobs(ctx, modelDir, configPrefix, store, fn)
+	configLayers, _, err := importConfigBlobs(ctx, modelDir, configPrefix, validatedTokenizer, store, fn)
 	if err != nil {
 		return nil, err
 	}

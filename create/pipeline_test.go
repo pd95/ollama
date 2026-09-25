@@ -1,6 +1,7 @@
 package create
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -69,6 +70,93 @@ func TestCreatePipeline(t *testing.T) {
 		if _, ok := store.blobs[n]; !ok {
 			t.Errorf("missing written blob %q (have %v)", n, store.names())
 		}
+	}
+}
+
+func TestCreatePipelineRejectsUnsafeTokenizerBeforeWriting(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data string
+	}{
+		{"collision", `{"model":{"type":"BPE","vocab":{"base":0}},"added_tokens":[{"id":0,"content":"other"}]}`},
+		{"negative", `{"model":{"type":"BPE","vocab":{"base":0}},"added_tokens":[{"id":-1,"content":"bad"}]}`},
+		{"oversized", `{"model":{"type":"BPE","vocab":{"base":0}},"added_tokens":[{"id":1048576,"content":"bad"}]}`},
+		{"malformed JSON", `{"model":`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeConfigJSON(t, dir, `{"architectures":["Qwen3ForCausalLM"]}`)
+			createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
+				st.NewTensorDataFromBytes("model.norm.weight", "BF16", []int32{8}, make([]byte, 16)),
+			})
+			if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), []byte(tt.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store := newCaptureStore()
+			manifestCalled := false
+			err := Create(context.Background(), "mymodel", dir, testPipelineOptions(), store, func(context.Context, string, ManifestInfo) error {
+				manifestCalled = true
+				return nil
+			}, func(string) {})
+			if !errors.Is(err, ErrInvalidTokenizer) || !strings.Contains(err.Error(), "tokenizer.json") {
+				t.Fatalf("Create() error = %v, want tokenizer.json rejection", err)
+			}
+			if len(store.blobs) != 0 || manifestCalled {
+				t.Fatalf("invalid tokenizer wrote blobs %v or manifest=%v", store.names(), manifestCalled)
+			}
+		})
+	}
+}
+
+func TestCreatePipelinePreservesValidatedSparseTokenizerBytes(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigJSON(t, dir, `{"architectures":["Qwen3ForCausalLM"]}`)
+	createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
+		st.NewTensorDataFromBytes("model.norm.weight", "BF16", []int32{8}, make([]byte, 16)),
+	})
+	data := []byte("{\n  \"model\": {\"type\": \"BPE\", \"vocab\": {\"base\": 0}},\n  \"added_tokens\": [{\"id\": 1000, \"content\": \"added\"}]\n}\n")
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := newCaptureStore()
+	if err := Create(context.Background(), "mymodel", dir, testPipelineOptions(), store, func(context.Context, string, ManifestInfo) error {
+		return nil
+	}, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.blobs["tokenizer.json"]; !bytes.Equal(got, data) {
+		t.Fatalf("imported tokenizer bytes differ: got %q, want %q", got, data)
+	}
+}
+
+func TestCreatePipelineImportsPreflightTokenizerBytesIfSourceChanges(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigJSON(t, dir, `{"architectures":["Qwen3ForCausalLM"]}`)
+	createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
+		st.NewTensorDataFromBytes("model.norm.weight", "BF16", []int32{8}, make([]byte, 16)),
+	})
+	path := filepath.Join(dir, "tokenizer.json")
+	validated := []byte(`{"model":{"type":"BPE","vocab":{"base":0}},"added_tokens":[{"id":1000,"content":"added"}]}`)
+	if err := os.WriteFile(path, validated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capture := newCaptureStore()
+	store := blobStoreFunc(func(r io.Reader, mediaType, name string) (LayerInfo, error) {
+		layer, err := capture.WriteBlob(r, mediaType, name)
+		if err == nil && name == "model.norm.weight" {
+			if writeErr := os.WriteFile(path, []byte(`{"model":{"type":"BPE","vocab":{"base":0}},"added_tokens":[{"id":0,"content":"bad"}]}`), 0o600); writeErr != nil {
+				return LayerInfo{}, writeErr
+			}
+		}
+		return layer, err
+	})
+	if err := Create(context.Background(), "mymodel", dir, testPipelineOptions(), store, func(context.Context, string, ManifestInfo) error {
+		return nil
+	}, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if got := capture.blobs["tokenizer.json"]; !bytes.Equal(got, validated) {
+		t.Fatalf("imported tokenizer bytes differ from preflight: got %q, want %q", got, validated)
 	}
 }
 
