@@ -150,6 +150,24 @@ func TestInferSafetensorsConfigFamilies(t *testing.T) {
 			wantCaps:     []string{"completion", "vision", "audio", "tools", "thinking"},
 		},
 		{
+			name:       "gpt-oss architecture",
+			config:     `{"architectures":["GptOssForCausalLM"],"model_type":"gpt_oss"}`,
+			wantParser: "harmony", wantRenderer: "harmony",
+			wantCaps: []string{"completion", "tools", "thinking"},
+		},
+		{
+			name:       "gpt-oss model type",
+			config:     `{"model_type":"gpt-oss"}`,
+			wantParser: "harmony", wantRenderer: "harmony",
+			wantCaps: []string{"completion", "tools", "thinking"},
+		},
+		{
+			name:       "gpt-oss nested llm model type",
+			config:     `{"model_type":"wrapper","llm_config":{"model_type":"gpt_oss"}}`,
+			wantParser: "harmony", wantRenderer: "harmony",
+			wantCaps: []string{"completion", "tools", "thinking"},
+		},
+		{
 			name:         "glimmer vision",
 			config:       `{"architectures":["MuseGlimmerForConditionalGeneration"],"model_type":"muse_glimmer","has_vision":true}`,
 			wantParser:   "glimmer",
@@ -245,6 +263,17 @@ func TestInferSafetensorsConfigFamilies(t *testing.T) {
 				t.Errorf("capabilities = %v, want %v", config.Capabilities, tt.wantCaps)
 			}
 		})
+	}
+}
+
+func TestInferSafetensorsConfigGPTOSSFamily(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"architectures":["GptOssForCausalLM"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := inferConfigForTest(t, dir, "", "")
+	if config.ModelFamily != "gptoss" || !slices.Equal(config.ModelFamilies, []string{"gptoss"}) {
+		t.Fatalf("model family/families = %q/%v, want gptoss/[gptoss]", config.ModelFamily, config.ModelFamilies)
 	}
 }
 

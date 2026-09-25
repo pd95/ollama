@@ -39,6 +39,7 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 	}
 
 	capabilities := inferSafetensorsCapabilitiesFromConfig(cfg, chatTemplate, parserName)
+	modelFamily := inferModelFamilyFromConfig(cfg)
 	generationDefaults, err := readHFGenerationDefaults(modelDir)
 	if err != nil {
 		return model.ConfigV2{}, err
@@ -46,11 +47,34 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 
 	return model.ConfigV2{
 		ModelFormat:        "safetensors",
+		ModelFamily:        modelFamily,
+		ModelFamilies:      modelFamilies(modelFamily),
 		Parser:             parserName,
 		Renderer:           rendererName,
 		Capabilities:       capabilities,
 		GenerationDefaults: generationDefaults,
 	}, nil
+}
+
+func modelFamilies(family string) []string {
+	if family == "" {
+		return nil
+	}
+	return []string{family}
+}
+
+func inferModelFamilyFromConfig(cfg sourceModelConfig) string {
+	for _, id := range sourceConfigIdentifiers(cfg) {
+		if isGPTOSSFamily(id) {
+			return "gptoss"
+		}
+	}
+	return ""
+}
+
+func isGPTOSSFamily(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "gptoss") || strings.Contains(s, "gpt_oss") || strings.Contains(s, "gpt-oss")
 }
 
 func readHFGenerationDefaults(modelDir string) (model.GenerationDefaults, error) {
@@ -225,6 +249,8 @@ func parserNameForIdentifier(modelDir, s, chatTemplate string) (string, error) {
 		return lagunaRendererParserNameFromTemplate(modelDir, chatTemplate)
 	case strings.Contains(s, "cohere2moe") || strings.Contains(s, "cohere2_moe"):
 		return "cohere", nil
+	case isGPTOSSFamily(s):
+		return "harmony", nil
 	case strings.Contains(s, "glm4") || strings.Contains(s, "glm-4"):
 		return "glm-4.7", nil
 	case strings.Contains(s, "deepseek"):
@@ -261,6 +287,8 @@ func rendererNameForIdentifier(modelDir, s, chatTemplate string) (string, error)
 		return lagunaRendererParserNameFromTemplate(modelDir, chatTemplate)
 	case strings.Contains(s, "cohere2moe") || strings.Contains(s, "cohere2_moe"):
 		return "cohere", nil
+	case isGPTOSSFamily(s):
+		return "harmony", nil
 	case strings.Contains(s, "gemma4"):
 		return "gemma4", nil
 	case strings.Contains(s, "glm4") || strings.Contains(s, "glm-4"):
