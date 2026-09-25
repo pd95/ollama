@@ -40,6 +40,9 @@ import {
   updateCloudSetting,
   updateSettings,
   getInferenceCompute,
+  checkForUpdates,
+  installUpdate,
+  type UpdateCheckResult,
 } from "@/api";
 
 function AnimatedDots() {
@@ -140,6 +143,121 @@ export async function applySettingsDefaults({
   onSaved();
 }
 
+export function UpdateSettingsControl({
+  manualUpdatesOnly,
+  updateSource = "official",
+  updateChannel,
+  updateReleaseUrl,
+  autoUpdateEnabled,
+  isPending,
+  isInstalling,
+  result,
+  error,
+  onCheck,
+  onInstall,
+  onToggle,
+}: {
+  manualUpdatesOnly: boolean;
+  updateSource?: string;
+  updateChannel?: string;
+  updateReleaseUrl?: string;
+  autoUpdateEnabled: boolean;
+  isPending: boolean;
+  isInstalling: boolean;
+  result?: UpdateCheckResult;
+  error?: Error | null;
+  onCheck: () => void;
+  onInstall: () => void;
+  onToggle: (checked: boolean) => void;
+}) {
+  const isMLXPreview = updateSource === "mlx-preview";
+  const isOfficialReplacement = !isMLXPreview && manualUpdatesOnly;
+  const updateReady = result?.status === "ready";
+  const manualStatus = isPending
+    ? isMLXPreview
+      ? "Ollama is checking and may be downloading the latest MLX preview."
+      : "Ollama is checking and may be downloading the official release."
+    : error
+      ? error.message
+      : result?.status === "up_to_date"
+        ? isMLXPreview
+          ? "This MLX preview is up to date."
+          : "No newer official Ollama release is available."
+        : result?.status === "ready"
+          ? isMLXPreview
+            ? `${result.version ? `${result.version} is` : "An MLX preview update is"} downloaded and ready to install.`
+            : isOfficialReplacement
+              ? `${result.version ? `${result.version} is` : "An official Ollama update is"} downloaded and ready. Installing this update replaces the MLX preview with official Ollama. Some preview-only features will no longer be available.`
+              : `${result.version ? `${result.version} is` : "An Ollama update is"} downloaded and ready to install.`
+          : undefined;
+
+  return (
+    <Field>
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start space-x-3 flex-1">
+          <ArrowDownTrayIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
+          <div>
+            <Label>
+              {isMLXPreview
+                ? "MLX preview updates"
+                : manualUpdatesOnly
+                  ? "Official Ollama updates"
+                  : "Auto-download updates"}
+            </Label>
+            <Description>
+              {isMLXPreview
+                ? autoUpdateEnabled
+                  ? `Automatically download signed ${updateChannel ?? "preview"} updates from pd95/ollama. You choose when to restart and install.`
+                  : "MLX preview updates are checked and downloaded only when you choose Check now."
+                : manualUpdatesOnly
+                  ? "This is a manual, one-way replacement. Official Ollama removes MLX-only functionality and these custom controls; returning to MLX requires installing an MLX release yourself."
+                  : autoUpdateEnabled
+                    ? "Automatically download updates when available."
+                    : "Updates will not be downloaded automatically."}
+            </Description>
+            {manualStatus && <Description>{manualStatus}</Description>}
+            {error && updateReleaseUrl && (
+              <Description>
+                <a
+                  href={updateReleaseUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline"
+                >
+                  View releases
+                </a>
+              </Description>
+            )}
+          </div>
+        </div>
+        <div className="flex-shrink-0">
+          <div className="flex items-center gap-3">
+            <Button
+              outline
+              type="button"
+              disabled={isPending || isInstalling}
+              onClick={updateReady ? onInstall : onCheck}
+            >
+              {isInstalling
+                ? "Opening…"
+                : isPending
+                  ? "Checking…"
+                  : updateReady
+                    ? isOfficialReplacement
+                      ? "Install official Ollama"
+                      : "Restart to update"
+                    : "Check now"}
+            </Button>
+            {!manualUpdatesOnly && (
+              <Switch checked={autoUpdateEnabled} onChange={onToggle} />
+            )}
+          </div>
+        </div>
+      </div>
+    </Field>
+  );
+}
+
 export default function Settings() {
   const queryClient = useQueryClient();
   const [showSaved, setShowSaved] = useState(false);
@@ -209,6 +327,7 @@ export default function Settings() {
   });
 
   const settings = settingsData?.settings || null;
+  const manualUpdatesOnly = settingsData?.manualUpdatesOnly ?? false;
 
   const { data: inferenceComputeResponse } = useQuery({
     queryKey: ["inferenceCompute"],
@@ -278,6 +397,36 @@ export default function Settings() {
     const requestId = ++latestCloudRequestId;
     return updateCloudMutation.mutateAsync({ enabled, requestId });
   };
+
+  const checkForUpdatesMutation = useMutation({
+    mutationFn: () =>
+      checkForUpdates(
+        settingsData?.updateSource === "mlx-preview"
+          ? "mlx-preview"
+          : "official",
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+
+  const installUpdateMutation = useMutation({
+    mutationFn: () =>
+      installUpdate(
+        settingsData?.updateSource === "mlx-preview"
+          ? "mlx-preview"
+          : "official",
+      ),
+  });
+
+  const checkOfficialMutation = useMutation({
+    mutationFn: () => checkForUpdates("official"),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
+  });
+
+  const installOfficialMutation = useMutation({
+    mutationFn: () => installUpdate("official"),
+  });
 
   useEffect(() => {
     refetchUser();
@@ -685,30 +834,116 @@ export default function Settings() {
                 </Field>
               )}
 
-              {/* Auto Update */}
-              <Field>
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex items-start space-x-3 flex-1">
-                    <ArrowDownTrayIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
-                    <div>
-                      <Label>Auto-download updates</Label>
-                      <Description>
-                        {settings.AutoUpdateEnabled
-                          ? "Automatically download updates when available."
-                          : "Updates will not be downloaded automatically."}
-                      </Description>
+              {!isWindows && (
+                <Field>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex flex-1 items-start space-x-3">
+                      <PowerIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
+                      <div>
+                        <Label>Keep running after Command-Q</Label>
+                        <Description>
+                          Hide the window and keep Ollama available in the menu
+                          bar. The menu-bar Quit Ollama action always exits fully.
+                        </Description>
+                      </div>
+                    </div>
+                    <div className="flex-shrink-0">
+                      <Switch
+                        checked={settings.QuitBehavior === "background"}
+                        onChange={(checked) =>
+                          handleChange(
+                            "QuitBehavior",
+                            checked ? "background" : "quit",
+                          )
+                        }
+                      />
                     </div>
                   </div>
-                  <div className="flex-shrink-0">
-                    <Switch
-                      checked={settings.AutoUpdateEnabled}
-                      onChange={(checked) =>
-                        handleChange("AutoUpdateEnabled", checked)
+                </Field>
+              )}
+
+              {/* MLX Preview / primary update source */}
+              <UpdateSettingsControl
+                manualUpdatesOnly={manualUpdatesOnly}
+                updateSource={settingsData?.updateSource}
+                updateChannel={settingsData?.updateChannel}
+                updateReleaseUrl={
+                  checkForUpdatesMutation.data?.status === "ready"
+                    ? checkForUpdatesMutation.data.releasePageUrl
+                    : settingsData?.updateReleaseUrl
+                }
+                autoUpdateEnabled={settings.AutoUpdateEnabled}
+                isPending={checkForUpdatesMutation.isPending}
+                isInstalling={installUpdateMutation.isPending}
+                result={
+                  checkForUpdatesMutation.data ??
+                  (settingsData?.updateReady
+                    ? {
+                        status: "ready",
+                        version: settingsData.updateVersion ?? "",
+                        buildVersion: settingsData.updateBuildVersion,
+                        source: settingsData.updateSource,
+                        channel: settingsData.updateChannel,
+                        releasePageUrl: settingsData.updateReleaseUrl,
                       }
-                    />
-                  </div>
-                </div>
-              </Field>
+                    : undefined)
+                }
+                error={
+                  installUpdateMutation.error instanceof Error
+                    ? installUpdateMutation.error
+                    : checkForUpdatesMutation.error instanceof Error
+                      ? checkForUpdatesMutation.error
+                      : null
+                }
+                onCheck={() => checkForUpdatesMutation.mutate()}
+                onInstall={() => installUpdateMutation.mutate()}
+                onToggle={(checked) =>
+                  handleChange("AutoUpdateEnabled", checked)
+                }
+              />
+
+              {settingsData?.updateSource === "mlx-preview" && (
+                <UpdateSettingsControl
+                  manualUpdatesOnly
+                  updateSource="official"
+                  updateChannel="stable"
+                  updateReleaseUrl={
+                    checkOfficialMutation.data?.status === "ready"
+                      ? checkOfficialMutation.data.releasePageUrl
+                      : (settingsData.updates.official?.releasePageUrl ??
+                        "https://ollama.com/download")
+                  }
+                  autoUpdateEnabled={false}
+                  isPending={checkOfficialMutation.isPending}
+                  isInstalling={installOfficialMutation.isPending}
+                  result={
+                    checkOfficialMutation.data ??
+                    (settingsData.updates.official?.ready
+                      ? {
+                          status: "ready",
+                          version:
+                            settingsData.updates.official.version ?? "",
+                          buildVersion:
+                            settingsData.updates.official.buildVersion,
+                          source: "official",
+                          channel: "stable",
+                          releasePageUrl:
+                            settingsData.updates.official.releasePageUrl,
+                        }
+                      : undefined)
+                  }
+                  error={
+                    installOfficialMutation.error instanceof Error
+                      ? installOfficialMutation.error
+                      : checkOfficialMutation.error instanceof Error
+                        ? checkOfficialMutation.error
+                        : null
+                  }
+                  onCheck={() => checkOfficialMutation.mutate()}
+                  onInstall={() => installOfficialMutation.mutate()}
+                  onToggle={() => undefined}
+                />
+              )}
 
               {/* Expose Ollama */}
               <Field>

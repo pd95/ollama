@@ -162,6 +162,10 @@ func UpdateAvailable(ver string) error {
 	return app.t.UpdateAvailable(ver)
 }
 
+func RequestUpdateInstall(source string) error {
+	return updater.DoUpgradeSource(source, true)
+}
+
 func osRun(shutdown func(), hasCompletedFirstRun, startHidden, showOnboarding bool, urlSchemeRequest string) {
 	var err error
 	app.shutdown = shutdown

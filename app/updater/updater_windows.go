@@ -100,32 +100,35 @@ func loadOSVersion() {
 }
 
 func getStagedUpdate() string {
+	return getStagedUpdateForSource(PrimaryUpdateSource())
+}
+
+func getStagedUpdateForSource(source string) string {
 	// When transitioning from old to new app, cleanup the update from the old staging dir
 	// This can eventually be removed once enough time has passed since the transition
 	cleanupOldDownloads(filepath.Join(os.Getenv("LOCALAPPDATA"), "Ollama", "updates"))
 
-	files, err := filepath.Glob(filepath.Join(UpdateStageDir, "*", "*.exe"))
-	if err != nil {
-		slog.Debug("failed to lookup downloads", "error", err)
-		return ""
-	}
-	if len(files) == 0 {
-		return ""
-	} else if len(files) > 1 {
-		// Shouldn't happen
-		slog.Warn("multiple update downloads found, using first one", "bundles", files)
-	}
-	return files[0]
+	return stagedUpdatePath(source, "exe")
 }
 
 func DoUpgrade(interactive bool) error {
-	bundle := getStagedUpdate()
+	return DoUpgradeSource(PrimaryUpdateSource(), interactive)
+}
+
+func DoUpgradeSource(source string, interactive bool) error {
+	bundle := getStagedUpdateForSource(source)
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
 	}
+	if candidate, err := readUpdateCandidateMetadata(bundle); err != nil {
+		return fmt.Errorf("staged update metadata failed: %w", err)
+	} else if candidateSource(candidate) != source {
+		return fmt.Errorf("staged update source %q does not match requested source %q", candidateSource(candidate), source)
+	}
 
-	if err := VerifyDownload(); err != nil {
+	if err := VerifyDownload(bundle); err != nil {
 		_ = os.Remove(bundle)
+		forgetReadyUpdate(bundle)
 		slog.Warn("verification failure", "bundle", bundle, "error", err)
 		return fmt.Errorf("staged update verification failed: %w", err)
 	}
@@ -214,8 +217,7 @@ func DoPostUpgradeCleanup() error {
 	return nil
 }
 
-func verifyDownload() error {
-	bundle := getStagedUpdate()
+func verifyDownload(bundle string) error {
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
 	}
@@ -367,6 +369,10 @@ func IsUpdatePending() bool {
 }
 
 func DoUpgradeAtStartup() error {
+	if AutomaticUpdatesDisabled() {
+		return fmt.Errorf("automatic updates disabled by build")
+	}
+
 	return DoUpgrade(false)
 }
 

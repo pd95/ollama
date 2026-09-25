@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -115,6 +116,8 @@ type Server struct {
 	UpdateAvailableFunc  func()
 	IntegrationInstalled func(string) bool
 	ListCloudModels      func(context.Context) (*api.ListResponse, error)
+	InstallUpdateFunc    func(string) error
+	installUpdateLock    sync.Mutex
 }
 
 func (s *Server) log() *slog.Logger {
@@ -293,6 +296,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/model/upstream", handle(s.modelUpstream))
 	mux.Handle("GET /api/v1/settings", handle(s.getSettings))
 	mux.Handle("POST /api/v1/settings", handle(s.settings))
+	mux.Handle("POST /api/v1/update/check", handle(s.checkForUpdates))
+	mux.Handle("POST /api/v1/update/install", handle(s.installUpdate))
 	mux.Handle("GET /api/v1/cloud", handle(s.getCloudSetting))
 	mux.Handle("POST /api/v1/cloud", handle(s.cloudSetting))
 	mux.Handle("GET /api/v1/models/cloud", handle(s.getCloudModels))
@@ -1525,9 +1530,22 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) error {
 	settings.Tools = s.Tools
 	settings.WorkingDir = s.WorkingDir
 
+	staged, updateReady := updater.StagedUpdate()
+	updateReleaseURL := staged.ReleasePageURL
+	if updateReleaseURL == "" {
+		updateReleaseURL = updater.UpdateReleaseFallbackURL()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(responses.SettingsResponse{
-		Settings: settings,
+		Settings:           settings,
+		ManualUpdatesOnly:  updater.AutomaticUpdatesDisabled(),
+		UpdateReady:        updateReady,
+		UpdateVersion:      staged.Version,
+		UpdateBuildVersion: staged.BuildVersion,
+		UpdateSource:       updater.PrimaryUpdateSource(),
+		UpdateChannel:      updater.UpdateChannel,
+		UpdateReleaseURL:   updateReleaseURL,
+		Updates:            updateSourceStatuses(),
 	})
 }
 
@@ -1583,7 +1601,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 			}
 		} else {
 			// Auto-update re-enabled: show notification if update is already staged, or trigger immediate check
-			if (updater.IsUpdatePending() || updater.UpdateDownloaded) && s.UpdateAvailableFunc != nil {
+			if updater.ReadyUpdatePending() && s.UpdateAvailableFunc != nil {
 				s.UpdateAvailableFunc()
 			} else if s.Updater != nil {
 				// Trigger the background checker to run immediately
@@ -1598,10 +1616,117 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 		s.Restart()
 	}
 
+	staged, updateReady := updater.StagedUpdate()
+	updateReleaseURL := staged.ReleasePageURL
+	if updateReleaseURL == "" {
+		updateReleaseURL = updater.UpdateReleaseFallbackURL()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(responses.SettingsResponse{
-		Settings: settings,
+		Settings:           settings,
+		ManualUpdatesOnly:  updater.AutomaticUpdatesDisabled(),
+		UpdateReady:        updateReady,
+		UpdateVersion:      staged.Version,
+		UpdateBuildVersion: staged.BuildVersion,
+		UpdateSource:       updater.PrimaryUpdateSource(),
+		UpdateChannel:      updater.UpdateChannel,
+		UpdateReleaseURL:   updateReleaseURL,
+		Updates:            updateSourceStatuses(),
 	})
+}
+
+func updateSourceStatuses() map[string]responses.UpdateSourceStatus {
+	statuses := map[string]responses.UpdateSourceStatus{}
+	for _, source := range []string{updater.MLXPreviewSource, updater.OfficialUpdateSource} {
+		available := updater.ValidUpdateSource(source)
+		if source == updater.OfficialUpdateSource && updater.CustomUpdateSourceEnabled() {
+			available = updater.OfficialReplacementAvailable()
+		}
+		status := responses.UpdateSourceStatus{
+			Available: available,
+			Automatic: source == updater.MLXPreviewSource && !updater.AutomaticUpdatesDisabled(),
+			Channel:   map[bool]string{true: updater.UpdateChannel, false: "stable"}[source == updater.MLXPreviewSource],
+		}
+		if staged, ready := updater.StagedUpdateForSource(source); ready {
+			status.Ready = true
+			status.Version = staged.Version
+			status.BuildVersion = staged.BuildVersion
+			status.ReleasePageURL = staged.ReleasePageURL
+		}
+		statuses[source] = status
+	}
+	return statuses
+}
+
+type updateSourceRequest struct {
+	Source string `json:"source"`
+}
+
+func requestedUpdateSource(r *http.Request) (string, error) {
+	request := updateSourceRequest{}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("invalid update request: %w", err)
+		}
+	}
+	if request.Source == "" {
+		request.Source = updater.PrimaryUpdateSource()
+	}
+	if !updater.ValidUpdateSource(request.Source) {
+		return "", fmt.Errorf("unsupported update source %q", request.Source)
+	}
+	return request.Source, nil
+}
+
+func (s *Server) checkForUpdates(w http.ResponseWriter, r *http.Request) error {
+	if s.Updater == nil {
+		return fmt.Errorf("updater is not available")
+	}
+
+	source, err := requestedUpdateSource(r)
+	if err != nil {
+		return err
+	}
+	result, err := s.Updater.CheckForUpdatesForSource(r.Context(), source)
+	if err != nil {
+		return fmt.Errorf("check for %s update: %w", source, err)
+	}
+	if result.Status == "ready" && result.NewlyStaged && s.UpdateAvailableFunc != nil {
+		s.UpdateAvailableFunc()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) installUpdate(w http.ResponseWriter, r *http.Request) error {
+	if !s.installUpdateLock.TryLock() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		return json.NewEncoder(w).Encode(map[string]string{"error": "an update installation prompt is already open"})
+	}
+	defer s.installUpdateLock.Unlock()
+	if err := r.Context().Err(); err != nil {
+		return err
+	}
+	source, err := requestedUpdateSource(r)
+	if err != nil {
+		return err
+	}
+	if !updater.ReadyUpdatePendingForSource(source) {
+		return fmt.Errorf("no verified update is ready to install")
+	}
+	if s.InstallUpdateFunc == nil {
+		return fmt.Errorf("update installation is not available")
+	}
+	if err := s.InstallUpdateFunc(source); err != nil {
+		if errors.Is(err, updater.ErrInstallCancelled) {
+			w.Header().Set("Content-Type", "application/json")
+			return json.NewEncoder(w).Encode(map[string]string{"status": "cancelled"})
+		}
+		return fmt.Errorf("install %s update: %w", source, err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]string{"status": "started"})
 }
 
 func (s *Server) cloudSetting(w http.ResponseWriter, r *http.Request) error {

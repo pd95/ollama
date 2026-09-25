@@ -5,12 +5,92 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
+func TestValidateBundleArchiveRejectsStructuralAbuse(t *testing.T) {
+	symlink := &zip.File{FileHeader: zip.FileHeader{Name: "Ollama.app/Contents/Linked"}}
+	symlink.SetMode(os.ModeSymlink | 0o777)
+	tests := []struct {
+		name  string
+		files []*zip.File
+		want  string
+	}{
+		{
+			name: "duplicate",
+			files: []*zip.File{
+				{FileHeader: zip.FileHeader{Name: "Ollama.app/Contents/file"}},
+				{FileHeader: zip.FileHeader{Name: "Ollama.app/Contents/file"}},
+			},
+			want: "duplicate or conflicting",
+		},
+		{
+			name: "symlink path component",
+			files: []*zip.File{
+				{FileHeader: zip.FileHeader{Name: "Ollama.app/Contents/Linked/file"}},
+				symlink,
+			},
+			want: "traverses symlink entry",
+		},
+		{
+			name: "expanded size",
+			files: []*zip.File{{FileHeader: zip.FileHeader{
+				Name:               "Ollama.app/Contents/file",
+				UncompressedSize64: maxArchiveExpandedBytes + 1,
+			}}},
+			want: "expanded size exceeds",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateBundleArchive(test.files)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+
+	tooMany := make([]*zip.File, maxArchiveEntries+1)
+	if err := validateBundleArchive(tooMany); err == nil || !strings.Contains(err.Error(), "entries") {
+		t.Fatalf("entry limit error = %v", err)
+	}
+}
+
+func TestPinnedVerifierRejectsValidWrongSigner(t *testing.T) {
+	path := "/System/Applications/Calculator.app"
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("system Calculator app unavailable: %v", err)
+	}
+	readPlist := func(key string) string {
+		t.Helper()
+		output, err := exec.Command("/usr/bin/plutil", "-extract", key, "raw", "-o", "-", filepath.Join(path, "Contents", "Info.plist")).Output()
+		if err != nil {
+			t.Fatalf("read %s: %v", key, err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	for _, teamID := range []string{"P8CC95REUG", ExpectedOfficialAppleTeamID} {
+		err := verifyExtractedBundleWithPolicy(
+			path,
+			readPlist("CFBundleIdentifier"),
+			readPlist("CFBundleShortVersionString"),
+			readPlist("CFBundleVersion"),
+			teamID,
+			true,
+		)
+		if err == nil || !strings.Contains(err.Error(), "Signatures did not verify") {
+			t.Fatalf("valid app from the wrong signer was not rejected for team %s: %v", teamID, err)
+		}
+	}
+}
+
 func TestDoUpgrade(t *testing.T) {
+	oldVerifyDownload := VerifyDownload
+	VerifyDownload = func(_ string) error { return nil }
+	defer func() { VerifyDownload = oldVerifyDownload }()
 	tmpDir := t.TempDir()
 	BundlePath = filepath.Join(tmpDir, "Ollama.app")
 	appContents := filepath.Join(BundlePath, "Contents")
@@ -147,6 +227,62 @@ func TestDoUpgrade(t *testing.T) {
 	}
 }
 
+func TestDoUpgradeInstallsHeldArchiveAfterStagedPathReplacement(t *testing.T) {
+	oldVerifyDownload := VerifyDownload
+	defer func() { VerifyDownload = oldVerifyDownload }()
+
+	tmpDir := t.TempDir()
+	BundlePath = filepath.Join(tmpDir, "Ollama.app")
+	appBackupDir = filepath.Join(tmpDir, "backup")
+	UpdateStageDir = filepath.Join(tmpDir, "updates")
+	UpgradeMarkerFile = filepath.Join(tmpDir, "upgraded")
+	bundle := filepath.Join(UpdateStageDir, "foo", "ollama-darwin.zip")
+	replacement := filepath.Join(tmpDir, "replacement.zip")
+
+	if err := os.MkdirAll(filepath.Join(BundlePath, "Contents", "MacOS"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(BundlePath, "Contents", "MacOS", "Ollama"), []byte("old app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(bundle), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := zipCreationHelper(bundle, []testPayload{{
+		Name: "Ollama.app/Contents/MacOS/Ollama",
+		Body: []byte("verified app"),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zipCreationHelper(replacement, []testPayload{{
+		Name: "Ollama.app/Contents/MacOS/Ollama",
+		Body: []byte("replacement app"),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	VerifyDownload = func(path string) error {
+		if !strings.HasPrefix(path, "/dev/fd/") {
+			t.Fatalf("verifier received reopenable staged path %q", path)
+		}
+		if err := os.Rename(replacement, bundle); err != nil {
+			t.Fatalf("replace staged pathname: %v", err)
+		}
+		return nil
+	}
+
+	if err := DoUpgrade(false); err != nil {
+		t.Fatalf("upgrade failed: %v", err)
+	}
+	installed, err := os.ReadFile(filepath.Join(BundlePath, "Contents", "MacOS", "Ollama"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(installed) != "verified app" {
+		t.Fatalf("installed %q after staged pathname replacement", installed)
+	}
+}
+
 func TestDoUpgradeRejectsInvalidBundlePath(t *testing.T) {
 	tmpDir := t.TempDir()
 	BundlePath = filepath.Join(tmpDir, "Ollama.app")
@@ -223,8 +359,8 @@ func TestDoUpgradeAtStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := DoUpgradeAtStartup(); err != nil {
-		t.Fatalf("unexpected error with verification failure: %s", err)
+	if err := DoUpgradeAtStartup(); err == nil || !strings.Contains(err.Error(), "verification failed") {
+		t.Fatalf("expected verification failure, got %v", err)
 	}
 	if _, err := os.Stat(bundle); err == nil {
 		t.Fatalf("unverified bundle still exists %s", bundle)
@@ -298,7 +434,7 @@ func TestVerifyDownloadFailures(t *testing.T) {
 			if err := zipCreationHelper(bundle, tt.in); err != nil {
 				t.Fatal(err)
 			}
-			err := VerifyDownload()
+			err := VerifyDownload(bundle)
 			if err == nil || !strings.Contains(err.Error(), tt.expected) {
 				t.Fatalf("expected \"%s\" got %s", tt.expected, err)
 			}

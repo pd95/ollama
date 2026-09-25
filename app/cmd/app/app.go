@@ -163,8 +163,12 @@ func main() {
 		}
 		// We never prompt to move the app after an upgrade
 		skipMove = true
-		// Start hidden after updates to prevent UI from opening automatically
-		startHidden = true
+		// A custom update is installed only after the user chooses Restart to
+		// update, so reopen the normal UI afterward. Preserve both explicit
+		// hidden launches and the official updater's historical hidden restart.
+		if !updater.CustomUpdateSourceEnabled() {
+			startHidden = true
+		}
 	}
 
 	if !skipMove && !fastStartup {
@@ -274,6 +278,7 @@ func main() {
 		UpdateAvailableFunc: func() {
 			UpdateAvailable("")
 		},
+		InstallUpdateFunc: RequestUpdateInstall,
 	}
 
 	srv := &http.Server{
@@ -294,7 +299,7 @@ func main() {
 	upd.StartBackgroundUpdaterChecker(ctx, UpdateAvailable)
 
 	// Check for pending updates on startup (show tray notification if update is ready)
-	if updater.IsUpdatePending() {
+	if updater.ReadyUpdatePending() {
 		// On Windows, the tray is initialized in osRun(). Calling UpdateAvailable
 		// before that would dereference a nil tray callback.
 		// TODO: refactor so the update check runs after platform init on all platforms.
@@ -395,11 +400,16 @@ func startHiddenTasks() {
 	// If an upgrade is ready and we're in hidden mode, perform it at startup.
 	// If we're not in hidden mode, we want to start as fast as possible and not
 	// slow the user down with an upgrade.
-	if updater.IsUpdatePending() {
+	if updater.ReadyUpdatePending() {
 		if fastStartup {
 			// CLI triggered app startup use-case
 			slog.Info("deferring pending update for fast startup")
 		} else {
+			if updater.AutomaticUpdatesDisabled() || !updater.AutomaticInstallAllowed() {
+				slog.Info("manual update is staged; waiting for user to install it")
+				UpdateAvailable("")
+				return
+			}
 			// Check if auto-update is enabled before automatically upgrading
 			settings, err := appStore.Settings()
 			if err != nil {

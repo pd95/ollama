@@ -398,6 +398,7 @@ static NSImage *integrationAppIcon(NSString *appName,
 - (void)applyShowAppsInMenu:(BOOL)visible;
 - (void)requestQuit;
 - (void)completeSystemTermination;
+- (BOOL)confirmUpdateInstall:(BOOL)official;
 @end
 
 @implementation AppDelegate
@@ -508,7 +509,7 @@ static NSImage *ollamaApplicationIcon(void) {
 
     NSMenuItem *appsMenuItem =
         [[NSMenuItem alloc] initWithTitle:@"Open Ollama"
-                                   action:@selector(appsUI)
+                                   action:@selector(openUI)
                             keyEquivalent:@""];
     [appsMenuItem setTarget:self];
     [menu addItem:appsMenuItem];
@@ -656,10 +657,10 @@ static NSImage *ollamaApplicationIcon(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (hidden || startHidden) {
             darwinStartHiddenTasks();
-        } else if (showOnboarding) {
-            StartUI("/");
         } else {
-            StartUI("/connect");
+            // The root route preserves onboarding for fresh installations and
+            // resolves returning launches to the new-chat experience.
+            StartUI("/");
         }
     });
 }
@@ -1412,12 +1413,12 @@ didCompleteWithError:(NSError *)error {
     });
 }
 
-- (void)appsUI {
-    [self uiRequest:@"/connect"];
-}
-
 - (void)newChat {
     [self uiRequest:@"/c/new"];
+}
+
+- (void)appsUI {
+    [self uiRequest:@"/connect"];
 }
 
 - (void)uiRequest:(NSString *)path {
@@ -1430,7 +1431,28 @@ didCompleteWithError:(NSError *)error {
     StartUI([path UTF8String]);
 }
 
+- (BOOL)confirmUpdateInstall:(BOOL)official {
+    if (!UpdateInstallRequiresConfirmation()) {
+        return YES;
+    }
+    NSAlert *alert = [[NSAlert alloc] init];
+    if (official) {
+        alert.messageText = @"Install official Ollama?";
+        alert.informativeText = @"This will replace the MLX preview build with the latest official Ollama release. Features available only in this preview will no longer be available.";
+    } else {
+        alert.messageText = @"Install the MLX preview update?";
+        alert.informativeText = @"Ollama will verify the downloaded update, restart, and reopen when installation is complete.";
+    }
+    [alert addButtonWithTitle:@"Install and Restart"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [NSApp activateIgnoringOtherApps:YES];
+    return [alert runModal] == NSAlertFirstButtonReturn;
+}
+
 - (void)startUpdate {
+    if (![self confirmUpdateInstall:!IsMLXPreviewUpdateSource()]) {
+        return;
+    }
     StartUpdate();
     [NSApp activateIgnoringOtherApps:YES];
 }
@@ -1641,6 +1663,23 @@ didCompleteWithError:(NSError *)error {
 }
 
 /// Remove ollama from the deprecated Login Items list as we now use LaunchAgents
+- (void)unregisterSelfAsLoginItem {
+    appLogInfo(@"using v13+ SMAppService for login unregistration");
+    SMAppService* service = [SMAppService agentServiceWithPlistName:@"com.ollama.ollama.plist"];
+    if (!service) {
+        appLogInfo(@"SMAppService failed to find service for com.ollama.ollama.plist");
+        return;
+    }
+    SMAppServiceStatus status = [service status];
+    if (status == SMAppServiceStatusNotRegistered || status == SMAppServiceStatusNotFound) {
+        return;
+    }
+    NSError *error = nil;
+    if (![service unregisterAndReturnError:&error]) {
+        appLogInfo([NSString stringWithFormat:@"Failed to unregister %@ as a login item: %@", NSBundle.mainBundle.bundleURL, error]);
+    }
+}
+
 - (void)unregisterSelfFromLoginItem {
     NSURL *bundleURL = NSBundle.mainBundle.bundleURL;
     NSString *bundlePrefix = [SystemWidePath stringByDeletingPathExtension];
@@ -2379,6 +2418,23 @@ void unregisterSelfFromLoginItem() {
     dispatch_async(dispatch_get_main_queue(), ^{
         [appDelegate unregisterSelfFromLoginItem];
     });
+}
+
+void unregisterSelfAsLoginItem() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [appDelegate unregisterSelfAsLoginItem];
+    });
+}
+
+int confirmUpdateInstall(bool official) {
+    __block BOOL confirmed = NO;
+    if ([NSThread isMainThread]) {
+        return [appDelegate confirmUpdateInstall:official] ? 1 : 0;
+    }
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        confirmed = [appDelegate confirmUpdateInstall:official];
+    });
+    return confirmed ? 1 : 0;
 }
 
 static WKWebView *FindWKWebView(NSView *root) {

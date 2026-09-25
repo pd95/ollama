@@ -12,5 +12,6 @@ AuthorizationRef getAuthorization(NSString *authorizationPrompt,
 
 AuthorizationRef getAppInstallAuthorization();
 
-const char* verifyExtractedBundle(char *path);
+const char* verifyExtractedBundle(char *path, char *bundleID, char *marketingVersion,
+                                  char *buildVersion, char *teamID, bool requirePinnedIdentity);
 bool chownWithAuthorization(const char *user);
