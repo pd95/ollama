@@ -3767,6 +3767,17 @@ func TestLlamaServerChatMessageConvertsMediaParts(t *testing.T) {
 	}
 }
 
+func TestLlamaServerWebPRejectsOversizedInput(t *testing.T) {
+	data, err := base64.StdEncoding.DecodeString("UklGRhwAAABXRUJQVlA4TA8AAAAvAAAAAAcQ/Y/+ByKi/wEA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, make([]byte, 32<<20)...)
+	if _, err := llamaServerMediaBytes(data); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("oversized WebP conversion = %v, want input limit", err)
+	}
+}
+
 func TestFindLlamaServer(t *testing.T) {
 	// This just tests that the function doesn't panic and returns a reasonable error
 	// when the binary doesn't exist in the expected locations
