@@ -3785,6 +3785,23 @@ func TestLlamaServerWebPRejectsOversizedInput(t *testing.T) {
 	}
 }
 
+func TestLlamaServerChatRequestRejectsCumulativeMediaAcrossMessages(t *testing.T) {
+	data := make(api.ImageData, 22<<20)
+	copy(data, "ID3")
+	opts := api.DefaultOptions()
+	_, err := (&llamaServerRunner{}).llamaServerChatRequest(ChatRequest{
+		Options: &opts,
+		Messages: []api.Message{
+			{Role: "user", Images: []api.ImageData{data}},
+			{Role: "user", Images: []api.ImageData{data}},
+			{Role: "user", Images: []api.ImageData{data}},
+		},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "cumulative") {
+		t.Fatalf("cross-message media limit error = %v", err)
+	}
+}
+
 func TestLlamaServerChatMessageConvertsWebPToPNG(t *testing.T) {
 	webpData := testLlamaServerWebP(t)
 	msg, err := llamaServerChatMessage(Message{Role: "user", Media: []MediaData{NewMediaData(0, webpData)}})
