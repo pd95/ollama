@@ -17,7 +17,7 @@ func TestForwardCachedChunksMatchFullPrefill(t *testing.T) {
 	if err := mlx.CheckInit(); err != nil {
 		t.Skipf("MLX not available: %v", err)
 	}
-	base, err := model.New(minimalManifestRoot(t))
+	base, err := model.New(minimalManifestRoot(t, "ApertusForCausalLM"))
 	if err != nil {
 		t.Fatal(err)
 	}
