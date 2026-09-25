@@ -24,6 +24,13 @@ func TestLoadFromBytesRejectsWordPiece(t *testing.T) {
 	}
 }
 
+func TestLoadFromBytesRejectsConflictingAddedTokenID(t *testing.T) {
+	data := []byte(`{"model":{"type":"BPE","vocab":{"base":0}},"added_tokens":[{"id":0,"content":"replacement"}]}`)
+	if _, err := LoadFromBytes(data); err == nil || !strings.Contains(err.Error(), "conflicting base and added content") {
+		t.Fatalf("error = %v, want conflicting base and added content", err)
+	}
+}
+
 func TestExtractPretokenizerSkipsUnsupportedSequenceSplit(t *testing.T) {
 	data := []byte(`{
 		"type": "Sequence",
