@@ -1,12 +1,41 @@
 package create
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ollama/ollama/mlxrunner/tokenizer"
 )
+
+// ErrInvalidTokenizer marks tokenizer metadata that cannot be safely imported.
+var ErrInvalidTokenizer = errors.New("invalid tokenizer")
+
+type validatedTokenizerSource struct {
+	data []byte
+}
+
+// validateTokenizerSource checks the exact tokenizer.json bytes that will be
+// imported. Some test and legacy sources do not contain this optional file.
+func validateTokenizerSource(modelDir string) (*validatedTokenizerSource, error) {
+	path := filepath.Join(modelDir, "tokenizer.json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read tokenizer.json: %w", err)
+	}
+	if err := tokenizer.ValidateTokenizerJSONIDs(data); err != nil {
+		return nil, fmt.Errorf("%w: tokenizer.json: %v", ErrInvalidTokenizer, err)
+	}
+	return &validatedTokenizerSource{data: data}, nil
+}
 
 // PipelineOptions controls the source-specific stages of a safetensors import.
 type PipelineOptions struct {
@@ -48,6 +77,10 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if err := validateMLXSource(inv.Config, false, opts.Validation); err != nil {
 		return err
 	}
+	validatedTokenizer, err := validateTokenizerSource(modelDir)
+	if err != nil {
+		return err
+	}
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
@@ -79,7 +112,7 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	}
 
 	// Import config files (config.json, tokenizer, etc.) as JSON blobs.
-	configLayers, configLayer, err := importConfigBlobs(ctx, modelDir, "", store, fn)
+	configLayers, configLayer, err := importConfigBlobs(ctx, modelDir, "", validatedTokenizer, store, fn)
 	if err != nil {
 		return err
 	}
@@ -113,14 +146,16 @@ const mediaTypeImageJSON = "application/vnd.ollama.image.json"
 // image.json blob, prefixing each blob name with namePrefix, and returns the
 // resulting layers along with the config.json layer (zero value if absent). The
 // target import passes "" for namePrefix; a draft import passes "draft/" so its
-// config sits beside the target's.
-func importConfigBlobs(ctx context.Context, modelDir, namePrefix string, store BlobStore, fn func(status string)) ([]LayerInfo, LayerInfo, error) {
+// config sits beside the target's. tokenizer.json is written from the exact
+// bytes validated before tensor import, even if the source file changes later.
+func importConfigBlobs(ctx context.Context, modelDir, namePrefix string, validatedTokenizer *validatedTokenizerSource, store BlobStore, fn func(status string)) ([]LayerInfo, LayerInfo, error) {
 	entries, err := os.ReadDir(modelDir)
 	if err != nil {
 		return nil, LayerInfo{}, err
 	}
 	var layers []LayerInfo
 	var configLayer LayerInfo
+	seenTokenizer := false
 	for _, entry := range entries {
 		if err := checkContext(ctx); err != nil {
 			return nil, LayerInfo{}, err
@@ -130,12 +165,27 @@ func importConfigBlobs(ctx context.Context, modelDir, namePrefix string, store B
 		}
 		name := entry.Name()
 		fn(fmt.Sprintf("importing config %s", name))
-		f, err := os.Open(filepath.Join(modelDir, name))
-		if err != nil {
-			return nil, LayerInfo{}, fmt.Errorf("open %s: %w", name, err)
+		var source io.Reader
+		var closeSource func() error
+		if name == "tokenizer.json" {
+			if validatedTokenizer == nil {
+				return nil, LayerInfo{}, fmt.Errorf("%w: tokenizer.json appeared after preflight", ErrInvalidTokenizer)
+			}
+			seenTokenizer = true
+			source = bytes.NewReader(validatedTokenizer.data)
+		} else {
+			f, err := os.Open(filepath.Join(modelDir, name))
+			if err != nil {
+				return nil, LayerInfo{}, fmt.Errorf("open %s: %w", name, err)
+			}
+			source = f
+			closeSource = f.Close
 		}
-		layer, err := store.WriteBlob(ReaderWithContext(ctx, f), mediaTypeImageJSON, namePrefix+name)
-		closeErr := f.Close()
+		layer, err := store.WriteBlob(ReaderWithContext(ctx, source), mediaTypeImageJSON, namePrefix+name)
+		var closeErr error
+		if closeSource != nil {
+			closeErr = closeSource()
+		}
 		if err != nil {
 			return nil, LayerInfo{}, fmt.Errorf("write config %s: %w", name, err)
 		}
@@ -146,6 +196,9 @@ func importConfigBlobs(ctx context.Context, modelDir, namePrefix string, store B
 			configLayer = layer
 		}
 		layers = append(layers, layer)
+	}
+	if validatedTokenizer != nil && !seenTokenizer {
+		return nil, LayerInfo{}, fmt.Errorf("%w: tokenizer.json disappeared after preflight", ErrInvalidTokenizer)
 	}
 	return layers, configLayer, nil
 }

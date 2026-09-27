@@ -358,7 +358,7 @@ func createSafetensorsErrorResponse(err error) gin.H {
 	}
 
 	status := http.StatusInternalServerError
-	for _, badReq := range []error{errNoFilesProvided, errFilePath, errSafetensorsFrom, errInvalidCreateInfo, manifest.ErrInvalidDigestFormat, create.ErrBadTemplate, create.ErrInvalidRequires, create.ErrInvalidLicense, create.ErrUnsupportedMLXArchitecture, os.ErrNotExist} {
+	for _, badReq := range []error{errNoFilesProvided, errFilePath, errSafetensorsFrom, errInvalidCreateInfo, manifest.ErrInvalidDigestFormat, create.ErrBadTemplate, create.ErrInvalidRequires, create.ErrInvalidLicense, create.ErrInvalidTokenizer, create.ErrUnsupportedMLXArchitecture, os.ErrNotExist} {
 		if errors.Is(err, badReq) {
 			status = http.StatusBadRequest
 			break
