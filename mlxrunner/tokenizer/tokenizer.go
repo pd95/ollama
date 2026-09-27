@@ -90,6 +90,20 @@ func (t *Tokenizer) EOSTokens() []int32 {
 	return t.vocab.EOS
 }
 
+// SetEOSTokens replaces EOS IDs in declaration order, preserving duplicates.
+func (t *Tokenizer) SetEOSTokens(ids ...int32) {
+	if t == nil || t.vocab == nil {
+		return
+	}
+	eos := make([]int32, 0, len(ids))
+	for _, id := range ids {
+		if id >= 0 {
+			eos = append(eos, id)
+		}
+	}
+	t.vocab.EOS = eos
+}
+
 // PAD returns the padding token ID, or -1 if not set
 func (t *Tokenizer) PAD() int32 {
 	return t.vocab.PAD

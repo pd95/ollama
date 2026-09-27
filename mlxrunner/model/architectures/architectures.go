@@ -6,6 +6,7 @@ import (
 	_ "github.com/ollama/ollama/mlxrunner/model/gemma4"
 	_ "github.com/ollama/ollama/mlxrunner/model/glimmer"
 	_ "github.com/ollama/ollama/mlxrunner/model/glm4_moe_lite"
+	_ "github.com/ollama/ollama/mlxrunner/model/gptoss"
 	_ "github.com/ollama/ollama/mlxrunner/model/laguna"
 	_ "github.com/ollama/ollama/mlxrunner/model/llama"
 	_ "github.com/ollama/ollama/mlxrunner/model/nemotron_h"

@@ -46,6 +46,15 @@ const (
 	// sources are the N weights followed by the N scales, in expert-index order;
 	// the result is a BF16 tensor, which Quantize (if set) then re-quantizes.
 	TransformDecodeStackFP8 Transform = "decode_stack_fp8"
+
+	TransformGPTOSSPackedExpertWeight Transform = "gptoss_packed_expert_weight"
+	TransformGPTOSSPackedExpertScale  Transform = "gptoss_packed_expert_scale"
+	TransformGPTOSSGateUpWeight       Transform = "gptoss_gate_up_gate_weight"
+	TransformGPTOSSUpWeight           Transform = "gptoss_gate_up_up_weight"
+	TransformGPTOSSGateUpScale        Transform = "gptoss_gate_up_gate_scale"
+	TransformGPTOSSUpScale            Transform = "gptoss_gate_up_up_scale"
+	TransformGPTOSSGateUpBias         Transform = "gptoss_gate_up_gate_bias"
+	TransformGPTOSSUpBias             Transform = "gptoss_gate_up_up_bias"
 )
 
 // TensorSpec describes one output tensor within a blob: the source tensor(s)
@@ -87,6 +96,13 @@ type quantizePolicy interface {
 // weights are quantized and to what; pass defaultQuantPolicy{} for the generic
 // policy.
 func Plan(inv Inventory, class Classification, policy quantizePolicy) ([]BlobSpec, error) {
+	if inv.Config.Architecture() == "GptOssForCausalLM" {
+		specs, err := planGPTOSS(inv, class, policy)
+		if err != nil {
+			return nil, err
+		}
+		return specs, checkOutputCollisions(specs)
+	}
 	var (
 		specs []BlobSpec
 		err   error
