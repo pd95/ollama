@@ -597,7 +597,7 @@ func TestWebSearchResponsesWriterStreamingMixedFollowUpDoesNotLatchText(t *testi
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	stream := true
-	request := openai.ResponsesRequest{Model: "test-model", Stream: &stream, Tools: []openai.ResponsesTool{{Type: "web_search"}, {Type: "function", Name: "get_weather", Description: ptr("weather"), Parameters: map[string]any{"type": "object"}}}}
+	request := openai.ResponsesRequest{Model: "test-model", Stream: &stream, Tools: []openai.ResponsesTool{{Type: "web_search"}, {Type: "function", Name: "get_weather", Description: ptr("weather"), Parameters: map[string]any{"type": "object"}}, {Type: "custom", Name: "apply_patch"}}}
 	inner := &ResponsesWriter{BaseWriter: BaseWriter{ResponseWriter: ctx.Writer}, converter: openai.NewResponsesStreamConverter("resp_test", "msg_test", request.Model, request), model: request.Model, stream: true, responseID: "resp_test", itemID: "msg_test", request: request}
 	writer := &WebSearchResponsesWriter{
 		BaseWriter: BaseWriter{ResponseWriter: ctx.Writer}, inner: inner, req: request,
@@ -925,7 +925,7 @@ func TestWebSearchResponsesWriterNonStreamingSurfacesMixedToolCalls(t *testing.T
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
-	request := openai.ResponsesRequest{Model: "test-model", Tools: []openai.ResponsesTool{{Type: "web_search"}, {Type: "namespace", Name: "weather", Tools: []openai.ResponsesTool{{Type: "function", Name: "lookup", Description: ptr("weather"), Parameters: map[string]any{"type": "object"}}}}}}
+	request := openai.ResponsesRequest{Model: "test-model", Tools: []openai.ResponsesTool{{Type: "web_search"}, {Type: "namespace", Name: "weather", Tools: []openai.ResponsesTool{{Type: "function", Name: "lookup", Description: ptr("weather"), Parameters: map[string]any{"type": "object"}}}}, {Type: "custom", Name: "apply_patch"}}}
 	inner := &ResponsesWriter{BaseWriter: BaseWriter{ResponseWriter: ctx.Writer}, model: request.Model, responseID: "resp_test", itemID: "msg_test", request: request}
 	writer := &WebSearchResponsesWriter{
 		BaseWriter: BaseWriter{ResponseWriter: ctx.Writer}, inner: inner, req: request,
@@ -948,9 +948,11 @@ func TestWebSearchResponsesWriterNonStreamingSurfacesMixedToolCalls(t *testing.T
 	}
 
 	// Non-streaming response with both web_search and namespaced tool calls.
+	patch := "*** Begin Patch\n*** Add File: weather.txt\n+sunny\n*** End Patch\n"
 	initial := api.ChatResponse{Done: true, Message: api.Message{ToolCalls: []api.ToolCall{
 		{ID: "call_1", Function: api.ToolCallFunction{Name: "web_search", Arguments: testArgs(map[string]any{"query": "weather"})}},
 		{ID: "call_2", Function: api.ToolCallFunction{Name: "weather.lookup", Arguments: testArgs(map[string]any{"city": "SF"})}},
+		{ID: "call_3", Function: api.ToolCallFunction{Name: "apply_patch", Arguments: testArgs(map[string]any{"input": patch})}},
 	}}}
 	data, _ := json.Marshal(initial)
 	if _, err := writer.Write(data); err != nil {
@@ -963,14 +965,20 @@ func TestWebSearchResponsesWriterNonStreamingSurfacesMixedToolCalls(t *testing.T
 	}
 
 	// Output should restore the request-scoped namespace on the mixed call.
-	var hasFunctionCall bool
+	var hasFunctionCall, hasCustomCall bool
 	for _, item := range response.Output {
 		if item.Type == "function_call" && item.Name == "lookup" && item.Namespace == "weather" && item.ID == "fc_mixed_0" {
 			hasFunctionCall = true
 		}
+		if item.Type == "custom_tool_call" && item.Name == "apply_patch" && item.Input == patch {
+			hasCustomCall = true
+		}
 	}
 	if !hasFunctionCall {
 		t.Fatalf("mixed namespaced tool call was not restored: %#v", response.Output)
+	}
+	if !hasCustomCall {
+		t.Fatalf("mixed custom tool call was not restored: %#v", response.Output)
 	}
 }
 
@@ -979,7 +987,7 @@ func TestWebSearchResponsesWriterStreamingSurfacesMixedToolCalls(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	stream := true
-	request := openai.ResponsesRequest{Model: "test-model", Stream: &stream, Tools: []openai.ResponsesTool{{Type: "web_search"}, {Type: "function", Name: "get_weather", Description: ptr("weather"), Parameters: map[string]any{"type": "object"}}}}
+	request := openai.ResponsesRequest{Model: "test-model", Stream: &stream, Tools: []openai.ResponsesTool{{Type: "web_search"}, {Type: "function", Name: "get_weather", Description: ptr("weather"), Parameters: map[string]any{"type": "object"}}, {Type: "custom", Name: "apply_patch"}}}
 	inner := &ResponsesWriter{BaseWriter: BaseWriter{ResponseWriter: ctx.Writer}, converter: openai.NewResponsesStreamConverter("resp_test", "msg_test", request.Model, request), model: request.Model, stream: true, responseID: "resp_test", itemID: "msg_test", request: request}
 	writer := &WebSearchResponsesWriter{
 		BaseWriter: BaseWriter{ResponseWriter: ctx.Writer}, inner: inner, req: request,
@@ -996,10 +1004,12 @@ func TestWebSearchResponsesWriterStreamingSurfacesMixedToolCalls(t *testing.T) {
 		},
 	}
 
-	// Streaming: initial response has both web_search and get_weather tool calls.
+	patch := "*** Begin Patch\n*** Add File: weather.txt\n+sunny\n*** End Patch\n"
+	// Streaming: initial response has web_search, function, and custom calls.
 	initial := api.ChatResponse{Done: true, Message: api.Message{ToolCalls: []api.ToolCall{
 		{ID: "call_1", Function: api.ToolCallFunction{Name: "web_search", Arguments: testArgs(map[string]any{"query": "weather"})}},
 		{ID: "call_2", Function: api.ToolCallFunction{Name: "get_weather", Arguments: testArgs(map[string]any{"city": "SF"})}},
+		{ID: "call_3", Function: api.ToolCallFunction{Name: "apply_patch", Arguments: testArgs(map[string]any{"input": patch})}},
 	}}}
 	data, _ := json.Marshal(initial)
 	if _, err := writer.Write(data); err != nil {
@@ -1016,20 +1026,27 @@ func TestWebSearchResponsesWriterStreamingSurfacesMixedToolCalls(t *testing.T) {
 	if !strings.Contains(body, "get_weather") {
 		t.Fatalf("get_weather function name not found: %s", body)
 	}
+	for _, event := range []string{"response.custom_tool_call_input.delta", "response.custom_tool_call_input.done"} {
+		if !strings.Contains(body, event) {
+			t.Fatalf("missing %s: %s", event, body)
+		}
+	}
 
 	output := completedResponseOutput(t, body)
-	var hasFunctionCall, hasFinalMessage bool
+	var hasFunctionCall, hasCustomCall, hasFinalMessage bool
 	for _, item := range output {
 		switch item["type"] {
 		case "function_call":
 			hasFunctionCall = item["name"] == "get_weather"
+		case "custom_tool_call":
+			hasCustomCall = item["name"] == "apply_patch" && item["input"] == patch
 		case "message":
 			content := item["content"].([]any)
 			part := content[0].(map[string]any)
 			hasFinalMessage = part["text"] == "done"
 		}
 	}
-	if !hasFunctionCall || !hasFinalMessage {
+	if !hasFunctionCall || !hasCustomCall || !hasFinalMessage {
 		t.Fatalf("terminal output missing mixed call or final message: %#v", output)
 	}
 }
