@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/model/apertusnames"
 	"github.com/ollama/ollama/types/model"
 )
 
@@ -125,7 +126,7 @@ func renderApertus(messages []api.Message, tools []api.Tool, think *api.ThinkVal
 	}
 	for _, message := range messages[start:] {
 		switch message.Role {
-		case "user", "system":
+		case "user", "system", "developer":
 			if pendingToolResults > 0 && toolResultsStarted {
 				return "", fmt.Errorf("apertus tool results are incomplete")
 			}
@@ -246,7 +247,8 @@ func renderApertusTools(sb *strings.Builder, tools []api.Tool) {
 			sb.WriteString("\n")
 		}
 		sb.WriteString("type ")
-		sb.WriteString(tool.Function.Name)
+		name, _ := apertusnames.Encode(tool.Function.Name) // validated before rendering
+		sb.WriteString(name)
 		if tool.Function.Parameters.Properties == nil || tool.Function.Parameters.Properties.Len() == 0 {
 			sb.WriteString(" = () => any;")
 		} else {
@@ -378,8 +380,9 @@ func renderApertusToolCalls(sb *strings.Builder, calls []api.ToolCall) error {
 	sb.WriteString(apertusToolsPrefix)
 	sb.WriteString("[")
 	for i, call := range calls {
-		if !apertusIdentifier(call.Function.Name) {
-			return fmt.Errorf("invalid apertus tool name %q", call.Function.Name)
+		encodedName, err := apertusnames.Encode(call.Function.Name)
+		if err != nil {
+			return err
 		}
 		if i > 0 {
 			sb.WriteString(", ")
@@ -388,7 +391,7 @@ func renderApertusToolCalls(sb *strings.Builder, calls []api.ToolCall) error {
 		if err != nil {
 			return err
 		}
-		name, err := json.Marshal(call.Function.Name)
+		name, err := json.Marshal(encodedName)
 		if err != nil {
 			return err
 		}
@@ -407,8 +410,8 @@ func validateApertusTools(tools []api.Tool) error {
 	names := make(map[string]struct{}, len(tools))
 	for _, tool := range tools {
 		name := tool.Function.Name
-		if !apertusIdentifier(name) {
-			return fmt.Errorf("invalid apertus tool name %q", name)
+		if _, err := apertusnames.Encode(name); err != nil {
+			return err
 		}
 		if _, ok := names[name]; ok {
 			return fmt.Errorf("duplicate apertus tool name %q", name)
