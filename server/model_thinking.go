@@ -76,8 +76,9 @@ func (m *Model) Thinking() *model.Thinking {
 		if !slices.Contains(m.Capabilities(), model.CapabilityThinking) {
 			return &model.Thinking{Values: []any{false}, Default: false}
 		}
-		// Preserve the local endpoint's historical default-on behavior.
-		if thinking.Default == false && thinking.Supports(true) {
+		// Preserve historical default-on behavior except for Apertus 1.5,
+		// whose default-off mode also permits tool calling.
+		if thinking.Default == false && thinking.Supports(true) && name != "apertus1p5" {
 			thinking.Default = true
 		}
 		// true currently reaches Qwen3.8 as medium via ThinkValue.String().
