@@ -116,8 +116,8 @@ func TestApertusRendererRejectsAmbiguousOrUnsafeSchema(t *testing.T) {
 	if _, err := r.Render(nil, []api.Tool{apertusRendererTool("same"), apertusRendererTool("same")}, nil); err == nil {
 		t.Fatal("duplicate tools accepted")
 	}
-	if _, err := r.Render(nil, []api.Tool{apertusRendererTool("bad.name")}, nil); err == nil {
-		t.Fatal("separator-bearing tool accepted")
+	if _, err := r.Render(nil, []api.Tool{apertusRendererTool("bad..name")}, nil); err == nil {
+		t.Fatal("empty namespace segment accepted")
 	}
 	missing := apertusRendererTool("missing")
 	missing.Function.Parameters.Required = []string{"not_declared"}
@@ -214,6 +214,30 @@ func TestApertus1p5RendererAssistantToolCallAndOutput(t *testing.T) {
 	}
 	if !strings.Contains(history, `<|tool_output_start|>{"temperature":22}<|tool_output_end|>`) {
 		t.Fatalf("missing 1.5 output framing: %q", history)
+	}
+}
+
+func TestApertus1p5RendererNamespacedToolHistory(t *testing.T) {
+	tools := []api.Tool{apertusRendererTool("multi_agent_v1.close_agent"), apertusRendererTool("multi_agent_v1$2Eclose_agent")}
+	call := api.ToolCall{Function: api.ToolCallFunction{Name: "multi_agent_v1.close_agent", Arguments: api.NewToolCallFunctionArguments()}}
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "assistant", ToolCalls: []api.ToolCall{call}}, {Role: "tool", Content: `{"ok":true}`}}, tools, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"type multi_agent_v1$2Eclose_agent =", "type multi_agent_v1$242Eclose_agent =", `<|tools_prefix|>[{"multi_agent_v1$2Eclose_agent": {}}]<|tools_suffix|>`, `<|tool_output_start|>{"ok":true}<|tool_output_end|>`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestApertus1p5RendererDeveloperInstruction(t *testing.T) {
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "system", Content: "system"}, {Role: "developer", Content: "developer"}, {Role: "user", Content: "question"}}, []api.Tool{apertusRendererTool("functions.exec")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "<|system_start|>developer<|system_end|>") {
+		t.Fatalf("developer instruction missing: %q", got)
 	}
 }
 

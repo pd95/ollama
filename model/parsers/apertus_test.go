@@ -170,9 +170,18 @@ func TestApertusParserMultipleUnknownMalformedAndDuplicateDeclarations(t *testin
 		t.Fatal("duplicate declaration accepted")
 	}
 	p = &ApertusParser{}
-	p.Init([]api.Tool{apertusParserTool("bad.name")}, nil, nil)
+	p.Init([]api.Tool{apertusParserTool("bad..name")}, nil, nil)
 	if _, _, _, err := p.Add("anything", true); err == nil {
-		t.Fatal("separator-bearing declaration accepted")
+		t.Fatal("empty namespace segment accepted")
+	}
+}
+
+func TestApertusParserNamespacedToolIdentity(t *testing.T) {
+	p := &ApertusParser{}
+	p.Init([]api.Tool{apertusParserTool("multi_agent_v1.close_agent"), apertusParserTool("multi_agent_v1$2Eclose_agent")}, nil, nil)
+	_, _, calls, err := p.Add(`<|tools_prefix|>[{"multi_agent_v1$2Eclose_agent":{}},{"multi_agent_v1$242Eclose_agent":{}}]<|tools_suffix|>`, true)
+	if err != nil || len(calls) != 2 || calls[0].Function.Name != "multi_agent_v1.close_agent" || calls[1].Function.Name != "multi_agent_v1$2Eclose_agent" {
+		t.Fatalf("calls=%#v err=%v", calls, err)
 	}
 }
 
