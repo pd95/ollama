@@ -943,10 +943,9 @@ func (l *Layer) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positions *
 }
 
 func (a *Attention) Forward(x *mlx.Array, b *batch.Batch, c cache.Cache, positions *mlx.Array, B, L int32, cfg *Config) *mlx.Array {
-	q := mlx.Transpose(mlx.Reshape(a.QProj.Forward(x), B, L, cfg.NumAttentionHeads, cfg.HeadDim), 0, 2, 1, 3)
-	q = headRMSNorm(a.QNorm, q, B, cfg.NumAttentionHeads, L, cfg.HeadDim, cfg.RMSNormEps)
-	k := mlx.Transpose(mlx.Reshape(a.KProj.Forward(x), B, L, cfg.NumKeyValueHeads, cfg.HeadDim), 0, 2, 1, 3)
-	k = headRMSNorm(a.KNorm, k, B, cfg.NumKeyValueHeads, L, cfg.HeadDim, cfg.RMSNormEps)
+	// Normalize contiguous head rows before transposing to attention layout.
+	q := a.QNorm.Forward(mlx.Reshape(a.QProj.Forward(x), B, L, cfg.NumAttentionHeads, cfg.HeadDim), cfg.RMSNormEps).Transpose(0, 2, 1, 3)
+	k := a.KNorm.Forward(mlx.Reshape(a.KProj.Forward(x), B, L, cfg.NumKeyValueHeads, cfg.HeadDim), cfg.RMSNormEps).Transpose(0, 2, 1, 3)
 	v := mlx.Transpose(mlx.Reshape(a.VProj.Forward(x), B, L, cfg.NumKeyValueHeads, cfg.HeadDim), 0, 2, 1, 3)
 	q = mlx.Reshape(mlx.RoPEWithFreqs(q, int(cfg.HeadDim), false, cfg.RopeTheta, 1, positions, cfg.RopeFreqs), B, cfg.NumAttentionHeads, L, cfg.HeadDim)
 	k = mlx.Reshape(mlx.RoPEWithFreqs(k, int(cfg.HeadDim), false, cfg.RopeTheta, 1, positions, cfg.RopeFreqs), B, cfg.NumKeyValueHeads, L, cfg.HeadDim)
