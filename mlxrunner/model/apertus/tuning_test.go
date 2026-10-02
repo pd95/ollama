@@ -147,3 +147,32 @@ func TestTuningProfile(t *testing.T) {
 		}
 	})
 }
+
+// Paired component timings screen hypotheses before expensive API qualification.
+func tuningProfilePair(results map[string][]float64, name string, before, after func() *mlx.Array) {
+	for range 3 {
+		mlx.Scoped(func() { mlx.Eval(before()) })
+		mlx.Scoped(func() { mlx.Eval(after()) })
+	}
+	funcs := []func() *mlx.Array{before, after}
+	labels := []string{name + "-before", name + "-after"}
+	for block := range 10 {
+		for j := range 2 {
+			i := (j + block) % 2
+			start := time.Now()
+			mlx.Scoped(func() { mlx.Eval(funcs[i]()) })
+			results[labels[i]] = append(results[labels[i]], float64(time.Since(start).Nanoseconds())/1e6)
+		}
+	}
+}
+
+func tuningWriteProfile(t *mlxtest.T, path string, results map[string][]float64) {
+	t.Helper()
+	data, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
