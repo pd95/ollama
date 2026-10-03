@@ -116,6 +116,13 @@ func TestInferSafetensorsConfigFamilies(t *testing.T) {
 			wantCaps:     []string{"completion", "tools"},
 		},
 		{
+			name:         "apertus 1.5 multimodal",
+			config:       `{"architectures":["Apertus1p5ForConditionalGeneration"],"model_type":"apertus_1_5","vision_config":{},"audio_config":{}}`,
+			wantParser:   "apertus",
+			wantRenderer: "apertus1p5",
+			wantCaps:     []string{"completion", "tools", "thinking"},
+		},
+		{
 			name:         "qwen3",
 			config:       `{"architectures":["Qwen3ForCausalLM"]}`,
 			wantParser:   "qwen3",

@@ -42,20 +42,25 @@ type Request struct {
 }
 
 type Runner struct {
-	Model         model.Model
-	weights       *mlx.Scope
-	Tokenizer     *tokenizer.Tokenizer
-	Requests      chan Request
-	Sampler       *sample.Sampler
-	cache         *prefixCache
-	contextLength int
-	mlxThread     *mlxthread.Thread
+	Model            model.Model
+	weights          *mlx.Scope
+	Tokenizer        *tokenizer.Tokenizer
+	Requests         chan Request
+	Sampler          *sample.Sampler
+	cache            *prefixCache
+	contextLength    int
+	mlxThread        *mlxthread.Thread
+	mediaMemoryLimit uint64
 	// grammarEngine is the structured-output subsystem; nil when the grammar
 	// library or vocabulary failed to load.
 	grammarEngine *grammarEngine
 	// spec is the speculative-decoding subsystem. Nil when the model ships no
 	// draft head.
 	spec *speculation
+}
+
+type mediaMemoryConfigurer interface {
+	ConfigureMediaMemory(limit, resident uint64)
 }
 
 func (r *Runner) Load(modelName string) error {
@@ -68,6 +73,13 @@ func (r *Runner) Load(modelName string) error {
 	r.weights = mlx.NewScope()
 	r.weights.Attach(weights...)
 	configureWiredMemory()
+	if configurer, ok := r.Model.(mediaMemoryConfigurer); ok {
+		limit := r.mediaMemoryLimit
+		if limit == 0 {
+			limit = uint64(mlx.MemoryLimit()) * 3 / 4
+		}
+		configurer.ConfigureMediaMemory(limit, uint64(mlx.ActiveMemory()+mlx.CacheMemory()))
+	}
 	return nil
 }
 
