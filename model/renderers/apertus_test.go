@@ -222,3 +222,162 @@ func apertusRendererTool(name string) api.Tool {
 	props.Set("city", api.ToolProperty{Type: api.PropertyType{"string"}})
 	return api.Tool{Type: "function", Function: api.ToolFunction{Name: name, Parameters: api.ToolFunctionParameters{Type: "object", Required: []string{"city"}, Properties: props}}}
 }
+
+func TestApertus1p1RendererPlainChat(t *testing.T) {
+	got, err := (&Apertus1p1Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "Hello"},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "<SPECIAL_61><SPECIAL_62>" +
+		"<SPECIAL_63>Deliberation: disabled\nTool Capabilities: disabled<SPECIAL_64>" +
+		"<SPECIAL_65>Hello<SPECIAL_66><SPECIAL_67>"
+	if got != want {
+		t.Fatalf("rendered prompt mismatch\nwant: %q\n got: %q", want, got)
+	}
+}
+
+func TestApertus1p1RendererSystemAndThinking(t *testing.T) {
+	think := &api.ThinkValue{Value: true}
+	got, err := (&Apertus1p1Renderer{}).Render([]api.Message{
+		{Role: "system", Content: "Be concise."},
+		{Role: "user", Content: "Question"},
+		{Role: "assistant", Thinking: "Reason.", Content: "Answer."},
+	}, nil, think)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "<SPECIAL_61>Be concise.<SPECIAL_62>" +
+		"<SPECIAL_63>Deliberation: enabled\nTool Capabilities: disabled<SPECIAL_64>" +
+		"<SPECIAL_65>Question<SPECIAL_66>" +
+		"<SPECIAL_67><SPECIAL_69>Reason.<SPECIAL_70>Answer.<SPECIAL_68>"
+	if got != want {
+		t.Fatalf("rendered prompt mismatch\nwant: %q\n got: %q", want, got)
+	}
+}
+
+func TestApertus1p1RendererToolsAndOutputs(t *testing.T) {
+	think := &api.ThinkValue{Value: true}
+	args := api.NewToolCallFunctionArguments()
+	args.Set("location", "Zurich")
+	got, err := (&Apertus1p1Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "Weather?"},
+		{Role: "assistant", Thinking: "I should check.", ToolCalls: []api.ToolCall{{
+			Function: api.ToolCallFunction{Name: "get_weather", Arguments: args},
+		}}},
+		{Role: "tool", Content: `{"temperature":22}`},
+		{Role: "assistant", Content: "It is 22 degrees."},
+	}, []api.Tool{apertusWeatherTool()}, think)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"<SPECIAL_63>Deliberation: enabled\nTool Capabilities:\n",
+		"<SPECIAL_67><SPECIAL_69>I should check.<SPECIAL_71>" +
+			`[{"get_weather": {"location":"Zurich"}}]` + "<SPECIAL_72>" +
+			`[{"temperature":22}] ` + "<SPECIAL_70>It is 22 degrees.<SPECIAL_68>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestApertus1p1RendererToolHistoryKeepsInnerOpen(t *testing.T) {
+	think := &api.ThinkValue{Value: true}
+	args := api.NewToolCallFunctionArguments()
+	args.Set("location", "Zurich")
+	got, err := (&Apertus1p1Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "Weather?"},
+		{Role: "assistant", Thinking: "I should check.", ToolCalls: []api.ToolCall{{
+			Function: api.ToolCallFunction{Name: "get_weather", Arguments: args},
+		}}},
+		{Role: "tool", Content: `{"temperature":22}`},
+	}, []api.Tool{apertusWeatherTool()}, think)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSuffix := "<SPECIAL_69>I should check.<SPECIAL_71>" +
+		`[{"get_weather": {"location":"Zurich"}}]` + "<SPECIAL_72>" +
+		`[{"temperature":22}]` + "<SPECIAL_68><SPECIAL_67>"
+	if !strings.HasSuffix(got, wantSuffix) || strings.Contains(got, "I should check.<SPECIAL_70><SPECIAL_71>") {
+		t.Fatalf("tool history did not preserve the official inner span:\n%s", got)
+	}
+}
+
+func TestApertus1p1RendererDisplayAnswersClosesInner(t *testing.T) {
+	think := &api.ThinkValue{Value: true}
+	args := api.NewToolCallFunctionArguments()
+	args.Set("answer", "done")
+	got, err := (&Apertus1p1Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "Answer"},
+		{Role: "assistant", Thinking: "Ready.", ToolCalls: []api.ToolCall{{
+			Function: api.ToolCallFunction{Name: "display_answers", Arguments: args},
+		}}},
+	}, nil, think)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `<SPECIAL_69>Ready.<SPECIAL_70><SPECIAL_71>[{"display_answers": {"answer":"done"}}]<SPECIAL_72>`) {
+		t.Fatalf("display_answers should close the inner span before its tool call:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "<SPECIAL_72><SPECIAL_68>") {
+		t.Fatalf("display_answers should complete the assistant turn:\n%s", got)
+	}
+}
+
+func TestApertus1p1RendererMapsLeadingDeveloperInstructionsToSystem(t *testing.T) {
+	got, err := (&Apertus1p1Renderer{}).Render([]api.Message{
+		{Role: "system", Content: "System policy."},
+		{Role: "developer", Content: "Developer policy."},
+		{Role: "user", Content: "Hello"},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, "<SPECIAL_61>System policy.\n\nDeveloper policy.<SPECIAL_62><SPECIAL_63>") {
+		t.Fatalf("developer instructions were not mapped into the system portion:\n%s", got)
+	}
+}
+
+func TestApertus1p1RendererAlwaysPromptsToolDecision(t *testing.T) {
+	got, err := (&Apertus1p1Renderer{}).Render(
+		[]api.Message{{Role: "user", Content: "Weather?"}},
+		[]api.Tool{apertusWeatherTool()},
+		&api.ThinkValue{Value: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, "<SPECIAL_67>") {
+		t.Fatalf("tool decision prompt should append assistant generation marker:\n%s", got)
+	}
+}
+
+func apertusWeatherTool() api.Tool {
+	properties := api.NewToolPropertiesMap()
+	properties.Set("location", api.ToolProperty{
+		Type:        api.PropertyType{"string"},
+		Description: "City name.",
+	})
+	properties.Set("unit", api.ToolProperty{
+		Type: api.PropertyType{"string"},
+		Enum: []any{"celsius", "fahrenheit"},
+	})
+	return api.Tool{
+		Type: "function",
+		Function: api.ToolFunction{
+			Name:        "get_weather",
+			Description: "Get current weather.",
+			Parameters: api.ToolFunctionParameters{
+				Type:       "object",
+				Required:   []string{"location"},
+				Properties: properties,
+			},
+		},
+	}
+}

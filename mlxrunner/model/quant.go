@@ -150,38 +150,17 @@ func inferQuantTypeFromShapes(header map[string]json.RawMessage, tensorName stri
 		return "", 0
 	}
 
-	weightCols := int(mainInfo.Shape[len(mainInfo.Shape)-1])
-	scalesCols := int(scaleInfo.Shape[len(scaleInfo.Shape)-1])
+	weightCols := mainInfo.Shape[len(mainInfo.Shape)-1]
+	scalesCols := scaleInfo.Shape[len(scaleInfo.Shape)-1]
 	if weightCols <= 0 || scalesCols <= 0 {
 		return "", 0
 	}
-
-	groupSize4 := weightCols * 8 / scalesCols
-	groupSize8 := weightCols * 4 / scalesCols
-
-	switch {
-	case groupSize4 == 32:
-		return "INT4", 32
-	case groupSize8 == 64:
-		return "INT8", 64
-	case groupSize4 == 64 && groupSize8 == 32:
-		h := strings.ToUpper(hintQuantType)
-		if strings.Contains(h, "8") {
-			return "INT8", 32
-		}
-		if strings.Contains(h, "4") {
-			return "INT4", 64
-		}
+	hintBits := quant.Bits(hintQuantType)
+	groupSize, bits, ok := quant.InferAffineParams(uint64(weightCols), uint64(scalesCols), hintBits)
+	if !ok {
+		return "", 0
 	}
-
-	if isCommonGroupSize(groupSize4) && !isCommonGroupSize(groupSize8) {
-		return "INT4", groupSize4
-	}
-	if isCommonGroupSize(groupSize8) && !isCommonGroupSize(groupSize4) {
-		return "INT8", groupSize8
-	}
-
-	return "", 0
+	return strings.ToUpper(fmt.Sprintf("int%d", bits)), groupSize
 }
 
 func defaultGroupSize(quantType string) int {
@@ -264,39 +243,5 @@ func InferAffineQuantParamsFromShapes(weight, scales *mlx.Array, hintBits int) (
 	if weightCols <= 0 || scalesCols <= 0 {
 		return 0, 0, false
 	}
-
-	groupSize4 := weightCols * 8 / scalesCols
-	groupSize8 := weightCols * 4 / scalesCols
-
-	switch {
-	case groupSize4 == 32:
-		return 32, 4, true
-	case groupSize8 == 64:
-		return 64, 8, true
-	case groupSize4 == 64 && groupSize8 == 32:
-		if hintBits == 8 {
-			return 32, 8, true
-		}
-		if hintBits == 4 {
-			return 64, 4, true
-		}
-	}
-
-	if isCommonGroupSize(groupSize4) && !isCommonGroupSize(groupSize8) {
-		return groupSize4, 4, true
-	}
-	if isCommonGroupSize(groupSize8) && !isCommonGroupSize(groupSize4) {
-		return groupSize8, 8, true
-	}
-
-	return 0, 0, false
-}
-
-func isCommonGroupSize(v int) bool {
-	switch v {
-	case 16, 32, 64, 128:
-		return true
-	default:
-		return false
-	}
+	return quant.InferAffineParams(uint64(weightCols), uint64(scalesCols), hintBits)
 }
