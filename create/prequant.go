@@ -72,10 +72,13 @@ var prequantPatterns = []prequantPattern{
 // its scale companions into one blob, companions are not emitted on their own,
 // and any remaining tensors (norms, embeddings) pass through at source
 // precision.
-func planPrequantized(inv Inventory) ([]BlobSpec, error) {
+func planPrequantized(inv Inventory, policy quantizePolicy) ([]BlobSpec, error) {
 	fused := make(map[string]BlobSpec)
 	consumed := make(map[string]bool)
 	for _, name := range sortedTensorNames(inv) {
+		if !tensorIncluded(policy, name) {
+			continue
+		}
 		spec, sources, ok := matchPrequant(name, inv)
 		if !ok {
 			continue
@@ -88,6 +91,9 @@ func planPrequantized(inv Inventory) ([]BlobSpec, error) {
 
 	specs := make([]BlobSpec, 0, len(inv.Tensors))
 	for _, name := range sortedTensorNames(inv) {
+		if !tensorIncluded(policy, name) {
+			continue
+		}
 		if spec, ok := fused[name]; ok {
 			specs = append(specs, spec)
 			continue
