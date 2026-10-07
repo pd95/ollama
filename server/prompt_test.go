@@ -21,6 +21,27 @@ func testConfigWithRendererAndType(renderer, modelType string) model.ConfigV2 {
 	return model.ConfigV2{Renderer: renderer, ModelType: modelType}
 }
 
+func TestRenderPromptGPTOSSHarmonyParserUsesGoTemplate(t *testing.T) {
+	tmpl, err := template.Parse(`{{ range .Messages }}<|start|>{{ .Role }}<|message|>{{ .Content }}<|end|>{{ end }}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Model{
+		Config:   model.ConfigV2{ModelFamily: "gptoss", Parser: "harmony"},
+		Template: tmpl,
+	}
+	if !shouldUseHarmony(m) {
+		t.Fatal("GPT-OSS template should select Harmony response parsing")
+	}
+	got, err := renderPrompt(m, []api.Message{{Role: "user", Content: "Hello"}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "<|start|>user<|message|>Hello<|end|>"; got != want {
+		t.Fatalf("prompt = %q, want %q", got, want)
+	}
+}
+
 func TestChatPrompt(t *testing.T) {
 	type expect struct {
 		prompt string
