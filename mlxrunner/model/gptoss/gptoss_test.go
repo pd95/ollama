@@ -3492,10 +3492,15 @@ func explicitExpertProjectionForTest(t *testing.T, p *ExpertProjection, expert, 
 	if dims := weight.Dims(); !slices.Equal(dims, []int{1, outDim, inDim}) {
 		t.Fatalf("expert %d reference weight dimensions = %v, want [1 %d %d]", expert, dims, outDim, inDim)
 	}
-	values := materializedFloats(weight.Transpose(0, 2, 1).AsType(mlx.DTypeFloat32))
+	// Floats reads contiguous storage without applying a transposed view's
+	// strides. Transpose the materialized coefficients explicitly on the CPU.
+	values := materializedFloats(weight.AsType(mlx.DTypeFloat32))
 	rows := make([][]float32, inDim)
 	for row := range inDim {
-		rows[row] = values[row*outDim : (row+1)*outDim]
+		rows[row] = make([]float32, outDim)
+		for col := range outDim {
+			rows[row][col] = values[col*inDim+row]
+		}
 	}
 	bias := materializedFloats(p.Bias.TakeAxis(index, 0).AsType(mlx.DTypeFloat32))
 	return rows, bias
