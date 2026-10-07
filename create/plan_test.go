@@ -11,12 +11,16 @@ func TestPlanRejectsOutputNameCollision(t *testing.T) {
 	// A source shipping both an MLX-pattern weight (foo.weight + foo.scales)
 	// and a compressed-tensors weight (foo.weight_packed + foo.weight_scale)
 	// fuses both to the output name foo.weight.
-	inv := newInventory(sourceModelConfig{}, map[string]string{
+	inv := newInventory(sourceModelConfig{Quantization: sourceQuantization{Bits: 4, Mode: "affine", GroupSize: 32}}, map[string]string{
 		"model.a.weight":        "U32",
 		"model.a.scales":        "BF16",
+		"model.a.biases":        "BF16",
 		"model.a.weight_packed": "U8",
 		"model.a.weight_scale":  "F8_E4M3",
 	})
+	inv.Tensors["model.a.weight"] = SourceTensor{Name: "model.a.weight", Dtype: "U32", Shape: []int32{128, 16}, File: "model.safetensors"}
+	inv.Tensors["model.a.scales"] = SourceTensor{Name: "model.a.scales", Dtype: "BF16", Shape: []int32{128, 4}, File: "model.safetensors"}
+	inv.Tensors["model.a.biases"] = SourceTensor{Name: "model.a.biases", Dtype: "BF16", Shape: []int32{128, 4}, File: "model.safetensors"}
 	_, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{})
 	if err == nil || !strings.Contains(err.Error(), "clashing name") {
 		t.Fatalf("Plan() error = %v, want a clashing-name error", err)
