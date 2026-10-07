@@ -140,8 +140,6 @@ func TestDecodeErrors(t *testing.T) {
 	}{
 		{"garbage", []byte("not audio at all"), "unrecognized audio format"},
 		{"empty", nil, "unrecognized audio format"},
-		{"mp3 id3", []byte("ID3\x04\x00rest"), "unrecognized audio format"},
-		{"mp3 sync", []byte{0xff, 0xfb, 0x90, 0x00}, "unrecognized audio format"},
 		{"truncated riff", []byte("RIFF\x00\x00\x00\x00WAVE"), "no fmt chunk"},
 		{"no data chunk", noData, "no data chunk"},
 		{"adpcm", adpcm, "unsupported format 2"},
@@ -155,6 +153,18 @@ func TestDecodeErrors(t *testing.T) {
 				t.Fatalf("error %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestDecodeMalformedMP3Recognized(t *testing.T) {
+	for _, data := range [][]byte{
+		[]byte("ID3\x04\x00rest"),
+		{0xff, 0xfb, 0x90, 0x00},
+	} {
+		_, _, err := Decode(data)
+		if err == nil || !strings.Contains(err.Error(), "MP3") {
+			t.Fatalf("malformed MP3 decode = %v, want MP3-specific error", err)
+		}
 	}
 }
 
