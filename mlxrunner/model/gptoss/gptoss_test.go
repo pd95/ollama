@@ -2076,7 +2076,7 @@ func TestExpertsForwardMatchesExplicitRealImportedModel(t *testing.T) {
 
 	got := layer.Experts.Forward(x, router, cfg, 0)
 	gotVals := materializedFloats(got.AsType(mlx.DTypeFloat32))
-	wantVals := explicitExpertsForwardFromLoadedWeights(t, layer.Experts, cfg, x, routerVals)
+	wantVals := explicitExpertsForwardFromLoadedWeights(t, layer.Experts, cfg, x, referenceImportedRound(routerVals))
 
 	if len(gotVals) != len(wantVals) {
 		t.Fatalf("Experts.Forward() output length = %d, want %d", len(gotVals), len(wantVals))
@@ -2124,7 +2124,7 @@ func TestAttentionForwardMatchesExplicitRealImportedModel(t *testing.T) {
 
 	got := layer.Attention.Forward(x, nil, 1, 2, cfg, 0)
 	gotVals := materializedFloats(got.AsType(mlx.DTypeFloat32))
-	wantVals := explicitAttentionForwardFromLoadedWeights(t, layer.Attention, cfg, xVals)
+	wantVals := explicitAttentionForwardFromLoadedWeights(t, layer.Attention, cfg, referenceImportedRound(xVals))
 
 	if len(gotVals) != len(wantVals) {
 		t.Fatalf("Attention.Forward() output length = %d, want %d", len(gotVals), len(wantVals))
@@ -2172,7 +2172,7 @@ func TestLayerForwardMatchesExplicitRealImportedModel(t *testing.T) {
 
 	got := layer.Forward(x, nil, 1, 2, cfg, 0)
 	gotVals := materializedFloats(got.AsType(mlx.DTypeFloat32))
-	wantVals := explicitLayerForwardFromLoadedWeights(t, layer, cfg, xVals)
+	wantVals := explicitLayerForwardFromLoadedWeights(t, layer, cfg, referenceImportedRound(xVals))
 
 	if len(gotVals) != len(wantVals) {
 		t.Fatalf("Layer.Forward() output length = %d, want %d", len(gotVals), len(wantVals))
@@ -2541,39 +2541,6 @@ func explicitExpertsForwardFromLoadedWeights(t *testing.T, experts *Experts, cfg
 	xVals := materializedFloats(x.AsType(mlx.DTypeFloat32))
 	out := make([]float32, seqLen*hidden)
 
-	gateW := materializedFloats(experts.GateUp.Gate.Weight.AsType(mlx.DTypeFloat32))
-	gateB := materializedFloats(experts.GateUp.Gate.Bias.AsType(mlx.DTypeFloat32))
-	upW := materializedFloats(experts.GateUp.Up.Weight.AsType(mlx.DTypeFloat32))
-	upB := materializedFloats(experts.GateUp.Up.Bias.AsType(mlx.DTypeFloat32))
-	downW := materializedFloats(experts.Down.Weight.AsType(mlx.DTypeFloat32))
-	downB := materializedFloats(experts.Down.Bias.AsType(mlx.DTypeFloat32))
-
-	gateWMats := make([][][]float32, int(cfg.NumLocalExperts))
-	gateBMats := make([][]float32, int(cfg.NumLocalExperts))
-	upWMats := make([][][]float32, int(cfg.NumLocalExperts))
-	upBMats := make([][]float32, int(cfg.NumLocalExperts))
-	downWMats := make([][][]float32, int(cfg.NumLocalExperts))
-	downBMats := make([][]float32, int(cfg.NumLocalExperts))
-
-	for expert := range int(cfg.NumLocalExperts) {
-		gateWMats[expert] = make([][]float32, int(cfg.IntermediateSize))
-		upWMats[expert] = make([][]float32, int(cfg.IntermediateSize))
-		downWMats[expert] = make([][]float32, int(cfg.HiddenSize))
-		gateBMats[expert] = append([]float32(nil), gateB[expert*int(cfg.IntermediateSize):(expert+1)*int(cfg.IntermediateSize)]...)
-		upBMats[expert] = append([]float32(nil), upB[expert*int(cfg.IntermediateSize):(expert+1)*int(cfg.IntermediateSize)]...)
-		downBMats[expert] = append([]float32(nil), downB[expert*int(cfg.HiddenSize):(expert+1)*int(cfg.HiddenSize)]...)
-
-		for row := range int(cfg.IntermediateSize) {
-			start := (expert*int(cfg.IntermediateSize) + row) * hidden
-			gateWMats[expert][row] = append([]float32(nil), gateW[start:start+hidden]...)
-			upWMats[expert][row] = append([]float32(nil), upW[start:start+hidden]...)
-		}
-		for row := range int(cfg.HiddenSize) {
-			start := (expert*int(cfg.HiddenSize) + row) * int(cfg.IntermediateSize)
-			downWMats[expert][row] = append([]float32(nil), downW[start:start+int(cfg.IntermediateSize)]...)
-		}
-	}
-
 	for pos := range seqLen {
 		selected := make([]routedExpert, int(cfg.NumLocalExperts))
 		for expert := range int(cfg.NumLocalExperts) {
@@ -2597,6 +2564,24 @@ func explicitExpertsForwardFromLoadedWeights(t *testing.T, experts *Experts, cfg
 			topK = len(selected)
 		}
 		selected = selected[:topK]
+		logits := mlx.FromValues(routerVals[pos*int(cfg.NumLocalExperts):(pos+1)*int(cfg.NumLocalExperts)], 1, 1, int(cfg.NumLocalExperts)).AsType(mlx.DTypeBFloat16)
+		ids := mlx.Argpartition(mlx.Neg(logits), topK-1, -1)
+		ids = mlx.SliceStartStop(ids, []int32{0, 0, 0}, []int32{1, 1, int32(topK)})
+		order := materializedFloats(ids.AsType(mlx.DTypeFloat32))
+		expected := make([]int, topK)
+		actual := make([]int, topK)
+		for i := range selected {
+			expected[i] = selected[i].index
+			actual[i] = int(order[i])
+		}
+		slices.Sort(expected)
+		slices.Sort(actual)
+		if !slices.Equal(expected, actual) {
+			t.Fatalf("routed expert set %v != scalar top-k %v", actual, expected)
+		}
+		for i, index := range order {
+			selected[i] = routedExpert{index: int(index), logit: routerVals[pos*int(cfg.NumLocalExperts)+int(index)]}
+		}
 
 		xRow := xVals[pos*hidden : (pos+1)*hidden]
 		routerRow := make([]float32, len(selected))
@@ -2605,36 +2590,34 @@ func explicitExpertsForwardFromLoadedWeights(t *testing.T, experts *Experts, cfg
 			routerRow[i] = s.logit
 			selectedIndices[i] = s.index
 		}
-		expertOut := referenceExpertsForward(
+		gateWMats := make([][][]float32, len(selected))
+		upWMats := make([][][]float32, len(selected))
+		downWMats := make([][][]float32, len(selected))
+		gateBMats := make([][]float32, len(selected))
+		upBMats := make([][]float32, len(selected))
+		downBMats := make([][]float32, len(selected))
+		// Materialize only the routed experts. Packed MXFP4 words are not
+		// dense coefficients, and dense GatherMM stores transposed weights.
+		for i, expert := range selectedIndices {
+			gateWMats[i], gateBMats[i] = explicitExpertProjectionForTest(t, experts.GateUp.Gate, expert, int(cfg.IntermediateSize), hidden)
+			upWMats[i], upBMats[i] = explicitExpertProjectionForTest(t, experts.GateUp.Up, expert, int(cfg.IntermediateSize), hidden)
+			downWMats[i], downBMats[i] = explicitExpertProjectionForTest(t, experts.Down, expert, hidden, int(cfg.IntermediateSize))
+		}
+		expertOut := referenceImportedExpertsForward(
+			seqLen == 1,
 			xRow,
 			routerRow,
 			topK,
-			pickExpertMatrices(gateWMats, selectedIndices),
-			pickExpertBiases(gateBMats, selectedIndices),
-			pickExpertMatrices(upWMats, selectedIndices),
-			pickExpertBiases(upBMats, selectedIndices),
-			pickExpertMatrices(downWMats, selectedIndices),
-			pickExpertBiases(downBMats, selectedIndices),
+			gateWMats,
+			gateBMats,
+			upWMats,
+			upBMats,
+			downWMats,
+			downBMats,
 		)
 		copy(out[pos*hidden:(pos+1)*hidden], expertOut)
 	}
 
-	return out
-}
-
-func pickExpertMatrices(src [][][]float32, selected []int) [][][]float32 {
-	out := make([][][]float32, len(selected))
-	for i, index := range selected {
-		out[i] = src[index]
-	}
-	return out
-}
-
-func pickExpertBiases(src [][]float32, selected []int) [][]float32 {
-	out := make([][]float32, len(selected))
-	for i, index := range selected {
-		out[i] = src[index]
-	}
 	return out
 }
 
@@ -2662,25 +2645,25 @@ func explicitAttentionForwardFromLoadedWeights(t *testing.T, attn *Attention, cf
 
 	denoms := referenceGPTOSSRoPEDenominators(cfg)
 	concentration := testGPTOSSYarnScale(cfg)
-	scale := float32(1 / math.Sqrt(float64(headDim)))
+	scale := float32(1/math.Sqrt(float64(headDim))) * concentration * concentration
 
 	query := make([][][]float32, seqLen)
 	key := make([][][]float32, seqLen)
 	value := make([][][]float32, seqLen)
 	for pos := range seqLen {
 		x := xVals[pos*hidden : (pos+1)*hidden]
-		qVec := affineFlatRef(x, qW, qB, qOut, hidden)
-		kVec := affineFlatRef(x, kW, kB, kvOut, hidden)
-		vVec := affineFlatRef(x, vW, vB, kvOut, hidden)
+		qVec := referenceImportedRound(affineFlatRef(x, qW, qB, qOut, hidden))
+		kVec := referenceImportedRound(affineFlatRef(x, kW, kB, kvOut, hidden))
+		vVec := referenceImportedRound(affineFlatRef(x, vW, vB, kvOut, hidden))
 
 		query[pos] = make([][]float32, numHeads)
 		for h := range numHeads {
-			query[pos][h] = applyRoPEGeneric(qVec[h*headDim:(h+1)*headDim], pos, denoms, concentration)
+			query[pos][h] = referenceImportedHalfSplitRoPE(qVec[h*headDim:(h+1)*headDim], pos, denoms, concentration)
 		}
 		key[pos] = make([][]float32, numKVHeads)
 		value[pos] = make([][]float32, numKVHeads)
 		for h := range numKVHeads {
-			key[pos][h] = applyRoPEGeneric(kVec[h*headDim:(h+1)*headDim], pos, denoms, concentration)
+			key[pos][h] = referenceImportedHalfSplitRoPE(kVec[h*headDim:(h+1)*headDim], pos, denoms, concentration)
 			value[pos][h] = append([]float32(nil), vVec[h*headDim:(h+1)*headDim]...)
 		}
 	}
@@ -2716,7 +2699,7 @@ func explicitAttentionForwardFromLoadedWeights(t *testing.T, attn *Attention, cf
 				}
 			}
 		}
-		projected := affineFlatRef(attnHidden, oW, oB, hidden, numHeads*headDim)
+		projected := referenceImportedRound(affineFlatRef(referenceImportedRound(attnHidden), oW, oB, hidden, numHeads*headDim))
 		copy(out[pos*hidden:(pos+1)*hidden], projected)
 	}
 	return out
@@ -2735,18 +2718,18 @@ func explicitLayerForwardFromLoadedWeights(t *testing.T, layer *Layer, cfg *Conf
 
 	attnIn := make([]float32, len(xVals))
 	for pos := range seqLen {
-		copy(attnIn[pos*hidden:(pos+1)*hidden], referenceRMSNorm(xVals[pos*hidden:(pos+1)*hidden], attnNormWeight, cfg.RMSNormEps))
+		copy(attnIn[pos*hidden:(pos+1)*hidden], referenceImportedRMSNorm(xVals[pos*hidden:(pos+1)*hidden], attnNormWeight, cfg.RMSNormEps))
 	}
 	attnOut := explicitAttentionForwardFromLoadedWeights(t, layer.Attention, cfg, attnIn)
 
 	postAttn := make([]float32, len(xVals))
 	for i := range xVals {
-		postAttn[i] = xVals[i] + attnOut[i]
+		postAttn[i] = referenceImportedBF16(xVals[i] + attnOut[i])
 	}
 
 	ffnIn := make([]float32, len(postAttn))
 	for pos := range seqLen {
-		copy(ffnIn[pos*hidden:(pos+1)*hidden], referenceRMSNorm(postAttn[pos*hidden:(pos+1)*hidden], ffnNormWeight, cfg.RMSNormEps))
+		copy(ffnIn[pos*hidden:(pos+1)*hidden], referenceImportedRMSNorm(postAttn[pos*hidden:(pos+1)*hidden], ffnNormWeight, cfg.RMSNormEps))
 	}
 
 	routerVals := make([]float32, seqLen*int(cfg.NumLocalExperts))
@@ -2758,7 +2741,7 @@ func explicitLayerForwardFromLoadedWeights(t *testing.T, layer *Layer, cfg *Conf
 			int(cfg.NumLocalExperts),
 			hidden,
 		)
-		copy(routerVals[pos*int(cfg.NumLocalExperts):(pos+1)*int(cfg.NumLocalExperts)], row)
+		copy(routerVals[pos*int(cfg.NumLocalExperts):(pos+1)*int(cfg.NumLocalExperts)], referenceImportedRound(row))
 	}
 
 	xArr := mlx.FromValues(ffnIn, 1, seqLen, hidden).AsType(mlx.DTypeBFloat16)
@@ -2766,20 +2749,7 @@ func explicitLayerForwardFromLoadedWeights(t *testing.T, layer *Layer, cfg *Conf
 
 	out := make([]float32, len(postAttn))
 	for i := range out {
-		out[i] = postAttn[i] + expertOut[i]
-	}
-	return out
-}
-
-func referenceRMSNorm(x, weight []float32, eps float32) []float32 {
-	ss := float32(0)
-	for _, v := range x {
-		ss += v * v
-	}
-	inv := float32(1 / math.Sqrt(float64(ss/float32(len(x))+eps)))
-	out := make([]float32, len(x))
-	for i := range x {
-		out[i] = x[i] * inv * weight[i]
+		out[i] = referenceImportedBF16(postAttn[i] + expertOut[i])
 	}
 	return out
 }
@@ -3502,4 +3472,199 @@ func testRootWithExtraConfigs(t *testing.T, configJSON, tokenizerJSON []byte, ex
 		MediaType:     "application/vnd.ollama.image.model",
 		Layers:        layers,
 	}}
+}
+
+// Real imported-model scalar references retain runtime BF16 boundaries.
+func explicitExpertProjectionForTest(t *testing.T, p *ExpertProjection, expert, outDim, inDim int) ([][]float32, []float32) {
+	t.Helper()
+	index := mlx.FromValues([]int32{int32(expert)}, 1)
+	weight := p.Weight.TakeAxis(index, 0)
+	if p.Scales != nil {
+		var qbias *mlx.Array
+		if p.QBiases != nil {
+			qbias = p.QBiases.TakeAxis(index, 0)
+		}
+		weight = mlx.Dequantize(weight, p.Scales.TakeAxis(index, 0), qbias, p.GroupSize, p.Bits, p.Mode, nil)
+	}
+	if !p.Transpose {
+		weight = weight.Transpose(0, 2, 1)
+	}
+	if dims := weight.Dims(); !slices.Equal(dims, []int{1, outDim, inDim}) {
+		t.Fatalf("expert %d reference weight dimensions = %v, want [1 %d %d]", expert, dims, outDim, inDim)
+	}
+	values := materializedFloats(weight.Transpose(0, 2, 1).AsType(mlx.DTypeFloat32))
+	rows := make([][]float32, inDim)
+	for row := range inDim {
+		rows[row] = values[row*outDim : (row+1)*outDim]
+	}
+	bias := materializedFloats(p.Bias.TakeAxis(index, 0).AsType(mlx.DTypeFloat32))
+	return rows, bias
+}
+
+func referenceImportedBF16(v float32) float32 {
+	bits := math.Float32bits(v)
+	return math.Float32frombits((bits + 0x7fff + ((bits >> 16) & 1)) & 0xffff0000)
+}
+
+func referenceImportedRound(v []float32) []float32 {
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = referenceImportedBF16(x)
+	}
+	return out
+}
+
+func referenceImportedExpertsForward(
+	fused bool,
+	x []float32,
+	router []float32,
+	topK int,
+	gateW [][][]float32,
+	gateB [][]float32,
+	upW [][][]float32,
+	upB [][]float32,
+	downW [][][]float32,
+	downB [][]float32,
+) []float32 {
+	type routedExpert struct {
+		index int
+		logit float32
+	}
+
+	selected := make([]routedExpert, len(router))
+	for i, v := range router {
+		selected[i] = routedExpert{index: i, logit: v}
+	}
+	if topK > 0 && topK < len(selected) {
+		selected = selected[:topK]
+	}
+
+	maxLogit := float32(math.Inf(-1))
+	for _, s := range selected {
+		if s.logit > maxLogit {
+			maxLogit = s.logit
+		}
+	}
+
+	scores := make([]float32, len(selected))
+	sum := float32(0)
+	for i, s := range selected {
+		scores[i] = float32(math.Exp(float64(s.logit - maxLogit)))
+		sum += scores[i]
+	}
+	for i := range scores {
+		scores[i] = referenceImportedBF16(scores[i] / sum)
+	}
+
+	out := make([]float32, len(x))
+	for i, score := range scores {
+		e := selected[i].index
+		gate := referenceImportedAffine(x, gateW[e], gateB[e], fused)
+		up := referenceImportedAffine(x, upW[e], upB[e], fused)
+
+		hidden := make([]float32, len(gate))
+		for i := range gate {
+			clippedGate := gate[i]
+			if clippedGate > 7 {
+				clippedGate = 7
+			}
+
+			clippedUp := up[i]
+			if clippedUp < -7 {
+				clippedUp = -7
+			}
+			if clippedUp > 7 {
+				clippedUp = 7
+			}
+
+			gated := clippedGate / (1 + float32(math.Exp(float64(-1.702*clippedGate))))
+			hidden[i] = gated * (clippedUp + 1)
+			if !fused {
+				product := referenceImportedBF16(referenceImportedBF16(1.702) * clippedGate)
+				sigmoid := referenceImportedBF16Sigmoid(product)
+
+				swish := referenceImportedBF16(clippedGate * sigmoid)
+				hidden[i] = referenceImportedBF16(swish * referenceImportedBF16(clippedUp+1))
+			}
+		}
+
+		down := referenceImportedRound(referenceImportedAffine(hidden, downW[e], downB[e], fused))
+		for i := range out {
+			out[i] = referenceImportedBF16(out[i] + referenceImportedBF16(score*down[i]))
+		}
+	}
+
+	return referenceImportedRound(out)
+}
+
+func referenceImportedAffine(x []float32, w [][]float32, b []float32, fused bool) []float32 {
+	out := affineRef(x, w, nil)
+	for i := range out {
+		if !fused {
+			out[i] = referenceImportedBF16(out[i])
+		}
+		out[i] += b[i]
+		if !fused {
+			out[i] = referenceImportedBF16(out[i])
+		}
+	}
+	return out
+}
+
+func referenceImportedHalfSplitRoPE(v []float32, position int, denoms []float32, concentration float32) []float32 {
+	out := make([]float32, len(v))
+	half := len(v) / 2
+	for i := range half {
+		theta := float64(position) / float64(denoms[i])
+		c := float32(math.Cos(theta))
+		sn := float32(math.Sin(theta))
+		out[i] = referenceImportedBF16(v[i]*c - v[i+half]*sn)
+		out[i+half] = referenceImportedBF16(v[i]*sn + v[i+half]*c)
+	}
+	return out
+}
+
+func referenceImportedRMSNorm(x, weight []float32, eps float32) []float32 {
+	var ss float64
+	for _, v := range x {
+		ss += float64(v) * float64(v)
+	}
+	inv := float32(1 / math.Sqrt(ss/float64(len(x))+float64(eps)))
+	out := make([]float32, len(x))
+	for i := range x {
+		out[i] = referenceImportedBF16(referenceImportedBF16(x[i]*inv) * weight[i])
+	}
+	return out
+}
+
+// The pinned Metal sigmoid evaluates exp, add, divide and subtraction in BF16.
+func referenceImportedBF16Sigmoid(product float32) float32 {
+	exp := referenceImportedBF16(float32(math.Exp(math.Abs(float64(product)))))
+	y := referenceImportedBF16(1 / referenceImportedBF16(1+exp))
+	if product >= 0 {
+		y = referenceImportedBF16(1 - y)
+	}
+	return y
+}
+
+func TestImportedReferenceSigmoidKeepsBF16Stages(t *testing.T) {
+	if got := referenceImportedBF16Sigmoid(2.96875); got != 0.953125 {
+		t.Fatalf("BF16 sigmoid=%g, want 0.953125", got)
+	}
+}
+
+func TestImportedReferenceAffineLayoutIsInputByOutput(t *testing.T) {
+	// A non-square matrix prevents a silent transposition from passing.
+	got := referenceImportedAffine([]float32{2, 3}, [][]float32{{1, 2, 4}, {5, 6, 8}}, []float32{1, 2, 3}, true)
+	if !slices.Equal(got, []float32{18, 24, 35}) {
+		t.Fatalf("reference affine=%v, want [18 24 35]", got)
+	}
+}
+
+func TestImportedReferenceRoPEUsesHalfSplitPairs(t *testing.T) {
+	got := referenceImportedHalfSplitRoPE([]float32{1, 2, 3, 4}, 1, []float32{1, 2}, 1)
+	want := []float32{-1.984375, -0.162109375, 2.46875, 4.46875}
+	if !slices.Equal(got, want) {
+		t.Fatalf("half-split RoPE=%v, want %v", got, want)
+	}
 }
