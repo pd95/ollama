@@ -1,7 +1,10 @@
 package create
 
 import (
+	"encoding/json"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -47,6 +50,9 @@ func TestPlanPrequantizedMLX(t *testing.T) {
 		"l.biases":    "BF16",
 		"norm.weight": "BF16",
 	})
+	inv.Tensors["l.weight"] = SourceTensor{Name: "l.weight", Dtype: "U32", Shape: []int32{128, 16}, File: "model.safetensors"}
+	inv.Tensors["l.scales"] = SourceTensor{Name: "l.scales", Dtype: "BF16", Shape: []int32{128, 4}, File: "model.safetensors"}
+	inv.Tensors["l.biases"] = SourceTensor{Name: "l.biases", Dtype: "BF16", Shape: []int32{128, 4}, File: "model.safetensors"}
 
 	specs, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{})
 	if err != nil {
@@ -75,6 +81,221 @@ func TestPlanPrequantizedMLX(t *testing.T) {
 	}
 	if _, ok := specByName(specs, "norm.weight"); !ok {
 		t.Error("norm.weight should pass through as its own blob")
+	}
+}
+
+func TestPlanPrequantizedMLXNonAffineRemainsSupported(t *testing.T) {
+	for _, tc := range []struct {
+		mode      string
+		bits      int
+		groupSize int
+	}{
+		{"mxfp4", 4, 32},
+		{"mxfp8", 8, 32},
+	} {
+		cfg := sourceModelConfig{Quantization: sourceQuantization{Bits: tc.bits, Mode: tc.mode, GroupSize: tc.groupSize}}
+		inv := newInventory(cfg, map[string]string{
+			"l.weight": "U32",
+			"l.scales": "U8",
+		})
+		specs, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{})
+		if err != nil {
+			t.Fatalf("%s Plan() error = %v", tc.mode, err)
+		}
+		if got := specs[0].Metadata["quant_type"]; got != tc.mode {
+			t.Fatalf("%s quant_type = %q", tc.mode, got)
+		}
+		if _, ok := inputByOutput(specs[0], "l.weight.bias"); ok {
+			t.Fatalf("%s unexpectedly gained affine bias", tc.mode)
+		}
+	}
+}
+
+func mlxAffineInventory(t *testing.T, config string, tensors map[string]SourceTensor) Inventory {
+	t.Helper()
+	var cfg sourceModelConfig
+	if err := json.Unmarshal([]byte(config), &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	return Inventory{Dir: "test", Config: cfg, Tensors: tensors}
+}
+
+func mlxAffineTensors(bits int, names ...string) map[string]SourceTensor {
+	tensors := make(map[string]SourceTensor)
+	for _, base := range names {
+		packed := int32(64 * bits / 32)
+		for name, tensor := range map[string]SourceTensor{
+			base + ".weight": {Name: base + ".weight", Dtype: "U32", Shape: []int32{2, packed}, File: "model.safetensors"},
+			base + ".scales": {Name: base + ".scales", Dtype: "BF16", Shape: []int32{2, 1}, File: "model.safetensors"},
+			base + ".biases": {Name: base + ".biases", Dtype: "BF16", Shape: []int32{2, 1}, File: "model.safetensors"},
+		} {
+			tensors[name] = tensor
+		}
+	}
+	return tensors
+}
+
+func TestPlanPrequantizedMLXAffineWidths(t *testing.T) {
+	for _, bits := range []int{2, 3, 4, 5, 6, 8} {
+		t.Run(strconv.Itoa(bits)+"bit", func(t *testing.T) {
+			config := `{"quantization":{"group_size":64,"bits":` + strconv.Itoa(bits) + `,"mode":"affine"}}`
+			inv := mlxAffineInventory(t, config, mlxAffineTensors(bits, "model.layers.0.proj"))
+			specs, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{})
+			if err != nil {
+				t.Fatalf("Plan() error = %v", err)
+			}
+			if got := specs[0].Metadata["quant_type"]; got != "int"+strconv.Itoa(bits) {
+				t.Fatalf("quant_type = %q", got)
+			}
+		})
+	}
+}
+
+func TestPlanPrequantizedMLXMixedOverrides(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     string
+		defaultBit int
+		overrides  []string
+	}{
+		{
+			name:       "0.5B int3 with tied embedding",
+			config:     `{"quantization":{"group_size":64,"bits":3,"mode":"affine","model.embed_tokens":{"bits":6,"group_size":64}}}`,
+			defaultBit: 3,
+			overrides:  []string{"model.embed_tokens"},
+		},
+		{
+			name:       "0.5B mixed int4 int6 omitted mode",
+			config:     `{"quantization":{"group_size":64,"bits":4,"model.embed_tokens":{"bits":6}}}`,
+			defaultBit: 4,
+			overrides:  []string{"model.embed_tokens"},
+		},
+		{
+			name:       "4B int4 with embedding and head overrides",
+			config:     `{"quantization":{"group_size":64,"bits":4,"mode":"affine","model.embed_tokens":{"bits":6,"group_size":64},"lm_head":{"bits":6,"group_size":64}}}`,
+			defaultBit: 4,
+			overrides:  []string{"model.embed_tokens", "lm_head"},
+		},
+		{
+			name:       "text config metadata",
+			config:     `{"text_config":{"quantization_config":{"group_size":64,"bits":6}}}`,
+			defaultBit: 6,
+		},
+		{
+			name:       "top level precedence over text config",
+			config:     `{"quantization":{"group_size":64,"bits":4},"text_config":{"quantization":{"group_size":64,"bits":6}}}`,
+			defaultBit: 4,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tensors := mlxAffineTensors(tt.defaultBit, "model.layers.0.proj")
+			for _, base := range tt.overrides {
+				for name, tensor := range mlxAffineTensors(6, base) {
+					tensors[name] = tensor
+				}
+			}
+			inv := mlxAffineInventory(t, tt.config, tensors)
+			specs, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{})
+			if err != nil {
+				t.Fatalf("Plan() error = %v", err)
+			}
+			for _, spec := range specs {
+				if !strings.HasSuffix(spec.Name, ".weight") || spec.Metadata == nil {
+					continue
+				}
+				want := "int" + strconv.Itoa(tt.defaultBit)
+				for _, override := range tt.overrides {
+					if spec.Name == override+".weight" {
+						want = "int6"
+					}
+				}
+				if spec.Metadata["quant_type"] != want || spec.Metadata["group_size"] != "64" {
+					t.Errorf("%s metadata = %v, want %s group 64", spec.Name, spec.Metadata, want)
+				}
+			}
+		})
+	}
+}
+
+func TestPlanPrequantizedMLXValidationErrors(t *testing.T) {
+	baseConfig := `{"quantization":{"group_size":64,"bits":3,"mode":"affine"}}`
+	valid := func() map[string]SourceTensor { return mlxAffineTensors(3, "proj") }
+	tests := []struct {
+		name    string
+		config  string
+		mutate  func(map[string]SourceTensor)
+		wantErr string
+	}{
+		{"missing scales", baseConfig, func(ts map[string]SourceTensor) { delete(ts, "proj.scales") }, "missing required scale"},
+		{"missing biases", baseConfig, func(ts map[string]SourceTensor) { delete(ts, "proj.biases") }, "missing required bias"},
+		{"unsupported bits", `{"quantization":{"group_size":64,"bits":7,"mode":"affine"}}`, func(map[string]SourceTensor) {}, "unsupported MLX quantization"},
+		{"unsupported group", `{"quantization":{"group_size":48,"bits":3,"mode":"affine"}}`, func(map[string]SourceTensor) {}, "unsupported affine group_size"},
+		{"packed dtype", baseConfig, func(ts map[string]SourceTensor) { v := ts["proj.weight"]; v.Dtype = "U8"; ts["proj.weight"] = v }, "want U32"},
+		{"scale shape", baseConfig, func(ts map[string]SourceTensor) {
+			v := ts["proj.scales"]
+			v.Shape = []int32{1, 1}
+			ts["proj.scales"] = v
+		}, "incompatible companion shapes"},
+		{"bias shape", baseConfig, func(ts map[string]SourceTensor) {
+			v := ts["proj.biases"]
+			v.Shape = []int32{2, 2}
+			ts["proj.biases"] = v
+		}, "incompatible companion shapes"},
+		{"conflicting layout metadata", `{"quantization":{"group_size":64,"bits":6,"mode":"affine"}}`, func(map[string]SourceTensor) {}, "layout conflicts"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tensors := valid()
+			tt.mutate(tensors)
+			_, err := Plan(mlxAffineInventory(t, tt.config, tensors), Classification{Kind: SourcePrequantized}, defaultQuantPolicy{})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Plan() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPlanPrequantizedMLXRejectsOrphanScale(t *testing.T) {
+	inv := mlxAffineInventory(t, `{"quantization":{"group_size":64,"bits":4}}`, map[string]SourceTensor{
+		"proj.scales": {Name: "proj.scales", Dtype: "BF16", Shape: []int32{2, 1}, File: "model.safetensors"},
+	})
+	if _, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{}); err == nil || !strings.Contains(err.Error(), "missing weight companion") {
+		t.Fatalf("Plan() error = %v, want orphan scale rejection", err)
+	}
+}
+
+func TestPlanPrequantizedMLXLegacyFallback(t *testing.T) {
+	for _, tc := range []struct {
+		bits      int
+		groupSize int
+	}{
+		{4, 32},
+		{8, 64},
+	} {
+		inv := Inventory{Dir: "test", Tensors: mlxAffineTensors(tc.bits, "proj")}
+		// mlxAffineTensors uses group 64; adjust int4 to the unambiguous
+		// historical group-32 layout.
+		if tc.groupSize == 32 {
+			s := inv.Tensors["proj.scales"]
+			s.Shape = []int32{2, 2}
+			inv.Tensors["proj.scales"] = s
+			b := inv.Tensors["proj.biases"]
+			b.Shape = []int32{2, 2}
+			inv.Tensors["proj.biases"] = b
+		}
+		specs, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{})
+		if err != nil {
+			t.Fatalf("legacy int%d Plan() error = %v", tc.bits, err)
+		}
+		if specs[0].Metadata["quant_type"] != "int"+strconv.Itoa(tc.bits) {
+			t.Fatalf("legacy metadata = %v", specs[0].Metadata)
+		}
+	}
+
+	inv := Inventory{Dir: "test", Tensors: mlxAffineTensors(3, "proj")}
+	if _, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{}); err == nil || !strings.Contains(err.Error(), "requires explicit") {
+		t.Fatalf("metadata-free int3 Plan() error = %v", err)
 	}
 }
 
