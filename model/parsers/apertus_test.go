@@ -170,9 +170,18 @@ func TestApertusParserMultipleUnknownMalformedAndDuplicateDeclarations(t *testin
 		t.Fatal("duplicate declaration accepted")
 	}
 	p = &ApertusParser{}
-	p.Init([]api.Tool{apertusParserTool("bad.name")}, nil, nil)
+	p.Init([]api.Tool{apertusParserTool("bad..name")}, nil, nil)
 	if _, _, _, err := p.Add("anything", true); err == nil {
-		t.Fatal("separator-bearing declaration accepted")
+		t.Fatal("empty namespace segment accepted")
+	}
+}
+
+func TestApertusParserNamespacedToolIdentity(t *testing.T) {
+	p := &ApertusParser{}
+	p.Init([]api.Tool{apertusParserTool("multi_agent_v1.close_agent"), apertusParserTool("multi_agent_v1$2Eclose_agent")}, nil, nil)
+	_, _, calls, err := p.Add(`<|tools_prefix|>[{"multi_agent_v1$2Eclose_agent":{}},{"multi_agent_v1$242Eclose_agent":{}}]<|tools_suffix|>`, true)
+	if err != nil || len(calls) != 2 || calls[0].Function.Name != "multi_agent_v1.close_agent" || calls[1].Function.Name != "multi_agent_v1$2Eclose_agent" {
+		t.Fatalf("calls=%#v err=%v", calls, err)
 	}
 }
 
@@ -360,6 +369,35 @@ func TestApertusParserSplitThinkingTags(t *testing.T) {
 	}
 	if thinking != "reason" || content != "answer" {
 		t.Fatalf("thinking=%q content=%q", thinking, content)
+	}
+}
+
+func TestApertusParserStripsApertus1p5ContinuationFraming(t *testing.T) {
+	parser := &ApertusParser{}
+	parser.Init(nil, nil, nil)
+
+	content, thinking, calls, err := parser.Add(`<|tool_output_start|>{"temperature":22}<|tool_output_end|><|assistant_start|>It is mild.<|assistant_end|>`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != `{"temperature":22}It is mild.` || thinking != "" || len(calls) != 0 {
+		t.Fatalf("content=%q thinking=%q calls=%d, want cleaned continuation text", content, thinking, len(calls))
+	}
+}
+
+func TestApertusParserStripsAssistantEndAfterToolCall(t *testing.T) {
+	parser := &ApertusParser{}
+	parser.Init([]api.Tool{apertusParserTool("get_weather")}, nil, nil)
+
+	content, _, calls, err := parser.Add(`<|tools_prefix|>[{"get_weather": {"location":"Zurich"}}]<|tools_suffix|><|assistant_end|>`, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" {
+		t.Fatalf("content = %q, want empty", content)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("len(calls) = %d, want 1", len(calls))
 	}
 }
 

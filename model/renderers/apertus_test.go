@@ -99,8 +99,7 @@ func TestApertusRendererRepeatedCallRoundTripAndPendingTransitions(t *testing.T)
 	}
 	partial := append(append([]api.Message{}, terminal...), api.Message{Role: "tool", Content: `{}`})
 	for _, next := range []api.Message{{Role: "user", Content: "next"}, {Role: "system", Content: "next"}, {Role: "assistant", Content: "next"}} {
-		messages := append(append([]api.Message{}, partial...), next)
-		if _, err := r.Render(messages, []api.Tool{tool}, nil); err == nil {
+		if _, err := r.Render(append(append([]api.Message{}, partial...), next), []api.Tool{tool}, nil); err == nil {
 			t.Fatalf("partial tool results followed by %s accepted", next.Role)
 		}
 	}
@@ -117,8 +116,8 @@ func TestApertusRendererRejectsAmbiguousOrUnsafeSchema(t *testing.T) {
 	if _, err := r.Render(nil, []api.Tool{apertusRendererTool("same"), apertusRendererTool("same")}, nil); err == nil {
 		t.Fatal("duplicate tools accepted")
 	}
-	if _, err := r.Render(nil, []api.Tool{apertusRendererTool("bad.name")}, nil); err == nil {
-		t.Fatal("separator-bearing tool accepted")
+	if _, err := r.Render(nil, []api.Tool{apertusRendererTool("bad..name")}, nil); err == nil {
+		t.Fatal("empty namespace segment accepted")
 	}
 	missing := apertusRendererTool("missing")
 	missing.Function.Parameters.Required = []string{"not_declared"}
@@ -148,6 +147,104 @@ func TestApertusRendererRejectsAmbiguousOrUnsafeSchema(t *testing.T) {
 	}
 	if _, err := r.Render([]api.Message{{Role: "tool", Content: "orphan"}}, nil, nil); err == nil {
 		t.Fatal("orphan tool accepted")
+	}
+}
+
+func TestApertus1p5RendererContract(t *testing.T) {
+	think := ResolveThinking(nil, ThinkingForRenderer("apertus1p5"))
+	if think == nil || think.Value != false {
+		t.Fatalf("omitted thinking resolved to %v, want false", think)
+	}
+	if _, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "user", Content: "Weather?"}}, []api.Tool{apertusRendererTool("get_weather")}, think); err != nil {
+		t.Fatalf("default thinking must permit tools: %v", err)
+	}
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "user", Content: "Hello"}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "You are Apertus 1.5 Omni") || !strings.HasSuffix(got, apertusAssistantStart) {
+		t.Fatalf("unexpected 1.5 plain prompt: %q", got)
+	}
+	if _, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "user", Content: "Weather?"}}, []api.Tool{apertusRendererTool("get_weather")}, &api.ThinkValue{Value: true}); err == nil {
+		t.Fatal("1.5 tools with thinking accepted")
+	}
+
+	want := "<|system_start|>You are Apertus 1.5 Omni, a multimodal assistant developed by the Swiss AI Initiative. Extended from Apertus 1 via continued pretraining, you understand images and audio and respond in text.<|system_end|>" +
+		"<|developer_start|>Deliberation: disabled\nTool Capabilities: disabled<|developer_end|>" +
+		"<|user_start|>Hello<|user_end|><|assistant_start|>"
+	if got != want {
+		t.Fatalf("rendered prompt mismatch\nwant: %q\n got: %q", want, got)
+	}
+}
+
+func TestApertus1p5RendererPreservesStableMediaOrder(t *testing.T) {
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "first", Images: []api.ImageData{api.ImageData("a")}},
+		{Role: "assistant", Content: "seen"},
+		{Role: "user", Content: "second", Images: []api.ImageData{api.ImageData("b"), api.ImageData("c")}},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[img-0] first", "[img-1][img-2] second"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered prompt missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, apertusImageToken) {
+		t.Fatalf("renderer leaked architecture placeholder before media preparation:\n%s", got)
+	}
+}
+
+func TestApertus1p5RendererToolsAppendGenerationPromptForToolDecision(t *testing.T) {
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{
+		{Role: "user", Content: "What is the weather in Zurich?"},
+	}, []api.Tool{apertusRendererTool("get_weather")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(got, "Tool Capabilities:\ntype get_weather") {
+		t.Fatalf("rendered prompt missing tools:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "<|assistant_start|>") {
+		t.Fatalf("tool decision prompt should append assistant generation prompt:\n%s", got)
+	}
+}
+
+func TestApertus1p5RendererAssistantToolCallAndOutput(t *testing.T) {
+	args := api.NewToolCallFunctionArguments()
+	args.Set("city", "Zurich")
+	history, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "assistant", ToolCalls: []api.ToolCall{{Function: api.ToolCallFunction{Name: "get_weather", Arguments: args}}}}, {Role: "tool", Content: `{"temperature":22}`}}, []api.Tool{apertusRendererTool("get_weather")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(history, `<|tool_output_start|>{"temperature":22}<|tool_output_end|>`) {
+		t.Fatalf("missing 1.5 output framing: %q", history)
+	}
+}
+
+func TestApertus1p5RendererNamespacedToolHistory(t *testing.T) {
+	tools := []api.Tool{apertusRendererTool("multi_agent_v1.close_agent"), apertusRendererTool("multi_agent_v1$2Eclose_agent")}
+	call := api.ToolCall{Function: api.ToolCallFunction{Name: "multi_agent_v1.close_agent", Arguments: api.NewToolCallFunctionArguments()}}
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "assistant", ToolCalls: []api.ToolCall{call}}, {Role: "tool", Content: `{"ok":true}`}}, tools, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"type multi_agent_v1$2Eclose_agent =", "type multi_agent_v1$242Eclose_agent =", `<|tools_prefix|>[{"multi_agent_v1$2Eclose_agent": {}}]<|tools_suffix|>`, `<|tool_output_start|>{"ok":true}<|tool_output_end|>`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestApertus1p5RendererDeveloperInstruction(t *testing.T) {
+	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "system", Content: "system"}, {Role: "developer", Content: "developer"}, {Role: "user", Content: "question"}}, []api.Tool{apertusRendererTool("functions.exec")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "<|system_start|>developer<|system_end|>") {
+		t.Fatalf("developer instruction missing: %q", got)
 	}
 }
 
