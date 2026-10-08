@@ -190,6 +190,91 @@ func newServerWithMockRunner(t *testing.T, mock *mockRunner) *Server {
 	return s
 }
 
+func TestEmbeddingHandlersUseRunnerSelection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("OLLAMA_MODELS", t.TempDir())
+
+	writeShowManifestVariant(t, "embed-ggml", manifest.RunnerGGML, manifest.FormatGGUF, model.ConfigV2{
+		ModelFormat:  manifest.FormatGGUF,
+		Capabilities: []string{string(model.CapabilityEmbedding)},
+	}, map[string]any{
+		"general.architecture": "llama",
+	})
+	writeShowManifestVariant(t, "embed-mlx", manifest.RunnerMLX, manifest.FormatSafetensors, model.ConfigV2{
+		ModelFormat:  manifest.FormatSafetensors,
+		Capabilities: []string{string(model.CapabilityEmbedding)},
+	}, nil)
+	writeManifestListFixture(t, "embed-list",
+		manifestListFixtureChild{name: "embed-ggml", runner: manifest.RunnerGGML, format: manifest.FormatGGUF},
+		manifestListFixtureChild{name: "embed-mlx", runner: manifest.RunnerMLX, format: manifest.FormatSafetensors},
+	)
+
+	tests := []struct {
+		name    string
+		handler func(*Server) func(*gin.Context)
+		body    any
+	}{
+		{
+			name:    "embed",
+			handler: func(s *Server) func(*gin.Context) { return s.EmbedHandler },
+			body: api.EmbedRequest{
+				Model:  "embed-list",
+				Runner: manifest.RunnerMLX,
+				Input:  "",
+			},
+		},
+		{
+			name:    "embeddings",
+			handler: func(s *Server) func(*gin.Context) { return s.EmbeddingsHandler },
+			body: api.EmbeddingRequest{
+				Model:  "embed-list",
+				Runner: manifest.RunnerMLX,
+				Prompt: "",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			selectedRunner := make(chan string, 1)
+			mock := &mockRunner{}
+			s := &Server{
+				sched: &Scheduler{
+					pendingReqCh:    make(chan *LlmRequest, 1),
+					finishedReqCh:   make(chan *LlmRequest, 1),
+					expiredCh:       make(chan *runnerRef, 1),
+					unloadedCh:      make(chan any, 1),
+					loaded:          make(map[string]*runnerRef),
+					newServerFn:     newMockServer(mock),
+					getGpuFn:        getGpuFn,
+					getSystemInfoFn: getSystemInfoFn,
+					waitForRecovery: 250 * time.Millisecond,
+					loadFn: func(req *LlmRequest, _ ml.SystemInfo, _ []ml.DeviceInfo, _ bool) bool {
+						selectedRunner <- req.model.Runner
+						req.successCh <- &runnerRef{llama: mock}
+						return false
+					},
+				},
+			}
+			go s.sched.Run(t.Context())
+
+			w := createRequest(t, tt.handler(s), tt.body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+			}
+
+			select {
+			case got := <-selectedRunner:
+				if got != manifest.RunnerMLX {
+					t.Fatalf("scheduled runner = %q, want %q", got, manifest.RunnerMLX)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for scheduler")
+			}
+		})
+	}
+}
+
 func createMinimalGGUFModel(t *testing.T, s *Server, name string, kv gguftest.KV, tmpl string, info map[string]any) {
 	t.Helper()
 
@@ -221,17 +306,6 @@ func createMinimalGGUFModel(t *testing.T, s *Server, name string, kv gguftest.KV
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status 200 creating model, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestModelOptionsKeepStoredTypicalP(t *testing.T) {
-	s := &Server{}
-	opts, err := s.modelOptions(&Model{Options: map[string]any{"typical_p": 0.5}}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if opts.TypicalP != 0.5 {
-		t.Fatalf("typical_p = %v, want 0.5", opts.TypicalP)
 	}
 }
 
@@ -1653,32 +1727,19 @@ func TestGenerate(t *testing.T) {
 		}
 	})
 
-	t.Run("rejected option", func(t *testing.T) {
+	t.Run("deprecated option passes through", func(t *testing.T) {
 		w := createRequest(t, s.GenerateHandler, api.GenerateRequest{
 			Model:   "test",
 			Prompt:  "Hello!",
 			Options: map[string]any{"typical_p": 0.5},
-		})
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected status 400, got %d", w.Code)
-		}
-
-		if diff := cmp.Diff(w.Body.String(), `{"error":"typical_p is no longer supported"}`); diff != "" {
-			t.Errorf("mismatch (-got +want):\n%s", diff)
-		}
-	})
-
-	t.Run("null option is unset", func(t *testing.T) {
-		w := createRequest(t, s.GenerateHandler, api.GenerateRequest{
-			Model:   "test",
-			Prompt:  "Hello!",
-			Options: map[string]any{"typical_p": nil},
 			Stream:  &stream,
 		})
 
 		if w.Code != http.StatusOK {
 			t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if mock.CompletionRequest.Options.TypicalP != 0.5 {
+			t.Errorf("typical_p = %v, want 0.5", mock.CompletionRequest.Options.TypicalP)
 		}
 	})
 

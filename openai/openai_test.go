@@ -3,6 +3,7 @@ package openai
 import (
 	"encoding/base64"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -153,6 +154,118 @@ func TestFromChatRequest_WithImage(t *testing.T) {
 
 	if string(result.Messages[1].Images[0]) != string(imgData) {
 		t.Error("image data mismatch")
+	}
+}
+
+func TestFromChatRequest_ToolMessageArrayContent(t *testing.T) {
+	var req ChatCompletionRequest
+	if err := json.Unmarshal([]byte(`{"model":"test-model","messages":[
+		{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"sunny [img]"},{"type":"text","text":", 72F [img-99]"}]}
+	]}`), &req); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := FromChatRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// text parts are merged into one result; tool text is kept as sent
+	if len(result.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(result.Messages))
+	}
+	tool := result.Messages[1]
+	if tool.Role != "tool" || tool.ToolCallID != "call_1" || tool.ToolName != "get_weather" || tool.Content != "sunny [img], 72F [img-99]" {
+		t.Errorf("expected tool message for call_1/get_weather, got role=%q id=%q name=%q content=%q", tool.Role, tool.ToolCallID, tool.ToolName, tool.Content)
+	}
+}
+
+func TestFromChatRequest_ToolMessageArrayContentWithImages(t *testing.T) {
+	const image2 = `iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==`
+	imgData, _ := base64.StdEncoding.DecodeString(image)
+	img2Data, _ := base64.StdEncoding.DecodeString(image2)
+
+	req := ChatCompletionRequest{
+		Model: "test-model",
+		Messages: []Message{
+			{Role: "user", Content: "What's in the screenshot?"},
+			{
+				Role: "assistant",
+				ToolCalls: []ToolCall{{
+					ID:   "call_1",
+					Type: "function",
+					Function: struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					}{Name: "screenshot", Arguments: "{}"},
+				}},
+			},
+			{
+				Role:       "tool",
+				ToolCallID: "call_1",
+				Content: []any{
+					map[string]any{"type": "text", "text": "Before: "},
+					map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": prefix + image},
+					},
+					map[string]any{"type": "text", "text": " After: "},
+					map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": prefix + image2},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := FromChatRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// parts with images stay split in order, each answering the same call
+	if len(result.Messages) != 6 {
+		t.Fatalf("expected 6 messages, got %d", len(result.Messages))
+	}
+	wantContent := []string{"Before: ", "", " After: ", ""}
+	wantImages := [][]byte{nil, imgData, nil, img2Data}
+	for i, msg := range result.Messages[2:] {
+		if msg.Role != "tool" || msg.ToolCallID != "call_1" || msg.ToolName != "screenshot" {
+			t.Errorf("part %d: expected tool message for call_1/screenshot, got role=%q id=%q name=%q", i, msg.Role, msg.ToolCallID, msg.ToolName)
+		}
+		if msg.Content != wantContent[i] {
+			t.Errorf("part %d: expected content %q, got %q", i, wantContent[i], msg.Content)
+		}
+		if wantImages[i] == nil && len(msg.Images) != 0 || wantImages[i] != nil && (len(msg.Images) != 1 || string(msg.Images[0]) != string(wantImages[i])) {
+			t.Errorf("part %d: unexpected images, got %d", i, len(msg.Images))
+		}
+	}
+}
+
+func TestFromChatRequest_ToolMessageEmptyArrayContent(t *testing.T) {
+	var req ChatCompletionRequest
+	if err := json.Unmarshal([]byte(`{"model":"test-model","messages":[
+		{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"screenshot","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"call_1","content":[]},
+		{"role":"tool","content":[]}
+	]}`), &req); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := FromChatRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// the empty result without a call id or name is skipped
+	if len(result.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(result.Messages))
+	}
+	tool := result.Messages[1]
+	if tool.Role != "tool" || tool.ToolCallID != "call_1" || tool.ToolName != "screenshot" || tool.Content != "" {
+		t.Errorf("expected empty tool message for call_1/screenshot, got role=%q id=%q name=%q content=%q", tool.Role, tool.ToolCallID, tool.ToolName, tool.Content)
 	}
 }
 
@@ -1119,5 +1232,83 @@ func TestFromChatRequest_TopLogprobsRange(t *testing.T) {
 				t.Errorf("expected TopLogprobs %d, got %d", tt.topLogprobs, result.TopLogprobs)
 			}
 		})
+	}
+}
+
+func TestFromChatRequest_KeepAlive(t *testing.T) {
+	// keep_alive is how an OpenAI-API client releases a model; 0 unloads
+	// immediately and a negative value pins it. Both arrive as JSON numbers.
+	for _, tt := range []struct {
+		name string
+		body string
+		want *api.Duration
+	}{
+		{"absent", `{"model":"m","messages":[]}`, nil},
+		{"unload", `{"model":"m","messages":[],"keep_alive":0}`, &api.Duration{Duration: 0}},
+		{"forever", `{"model":"m","messages":[],"keep_alive":-1}`, &api.Duration{Duration: time.Duration(math.MaxInt64)}},
+		{"seconds", `{"model":"m","messages":[],"keep_alive":30}`, &api.Duration{Duration: 30 * time.Second}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var req ChatCompletionRequest
+			if err := json.Unmarshal([]byte(tt.body), &req); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, err := FromChatRequest(req)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			switch {
+			case tt.want == nil && got.KeepAlive != nil:
+				t.Fatalf("expected no KeepAlive, got %v", got.KeepAlive)
+			case tt.want != nil && got.KeepAlive == nil:
+				t.Fatal("expected KeepAlive to be carried through, got nil")
+			case tt.want != nil && got.KeepAlive.Duration != tt.want.Duration:
+				t.Errorf("KeepAlive = %v, want %v", got.KeepAlive.Duration, tt.want.Duration)
+			}
+		})
+	}
+}
+
+func TestToTimings(t *testing.T) {
+	if got := ToTimings(api.Metrics{}); got != nil {
+		t.Fatalf("ToTimings(empty) = %+v, want nil", got)
+	}
+
+	got := ToTimings(api.Metrics{
+		PromptEvalCount:    20,
+		PromptEvalDuration: 2 * time.Second,
+		EvalCount:          10,
+		EvalDuration:       time.Second,
+	})
+	if got == nil {
+		t.Fatal("ToTimings(populated) = nil")
+	}
+	if got.PromptN != 20 || got.PromptMS != 2000 || got.PromptPerSecond != 10 {
+		t.Errorf("unexpected prompt timings: %+v", got)
+	}
+	if got.PredictedN != 10 || got.PredictedMS != 1000 || got.PredictedPerSecond != 10 {
+		t.Errorf("unexpected generation timings: %+v", got)
+	}
+}
+
+func TestNonStreamingResponsesOmitTimings(t *testing.T) {
+	chat, err := json.Marshal(ToChatCompletion("id", api.ChatResponse{
+		Metrics: api.Metrics{PromptEvalCount: 1, PromptEvalDuration: time.Second},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(chat), `"timings"`) {
+		t.Errorf("chat completion unexpectedly contains timings: %s", chat)
+	}
+
+	completion, err := json.Marshal(ToCompletion("id", api.GenerateResponse{
+		Metrics: api.Metrics{PromptEvalCount: 1, PromptEvalDuration: time.Second},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(completion), `"timings"`) {
+		t.Errorf("completion unexpectedly contains timings: %s", completion)
 	}
 }
