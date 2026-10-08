@@ -1,6 +1,7 @@
 package architectures
 
 import (
+	_ "github.com/ollama/ollama/mlxrunner/model/apertus"
 	_ "github.com/ollama/ollama/mlxrunner/model/clef"
 	_ "github.com/ollama/ollama/mlxrunner/model/cohere2_moe"
 	_ "github.com/ollama/ollama/mlxrunner/model/dflash"
