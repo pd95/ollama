@@ -1,0 +1,28 @@
+name: Feedback or question
+description: Discuss your experience or ask about the MLX preview.
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |-
+        This tracker is for the custom Ollama MLX preview in pd95/ollama.
+        Bug reports, suggestions, questions, and feedback are welcome.
+        This is an experimental project maintained in spare time; responses and fixes are not guaranteed.
+        Submitting an issue does not mean it has been accepted for implementation or a release.
+        Please search existing issues first and remove private information from any material you share.
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Feedback or question
+      description: Share your experience, question, or topic for discussion.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Relevant context
+      description: Include your preview version, model, hardware, and client when relevant. Screenshots
+        and small non-sensitive examples are welcome.
+    validations:
+      required: false

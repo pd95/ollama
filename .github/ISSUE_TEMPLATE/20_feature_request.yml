@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest an improvement or support for a model.
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |-
+        This tracker is for the custom Ollama MLX preview in pd95/ollama.
+        Bug reports, suggestions, questions, and feedback are welcome.
+        This is an experimental project maintained in spare time; responses and fixes are not guaranteed.
+        Submitting an issue does not mean it has been accepted for implementation or a release.
+        Please search existing issues first and remove private information from any material you share.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would this help you do?
+      description: Describe the task or limitation you encounter.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired result and, if useful, an example.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and alternatives
+      description: Include your preview version, model/source link if relevant, and any current workaround.
+        A model request belongs here; do not upload weights or credentials.
+    validations:
+      required: false
