@@ -149,26 +149,52 @@ func (b *apertureVisionResBlock) forward(x *mlx.Array) *mlx.Array {
 	return mlx.Add(residual, h)
 }
 
-func (b *apertureVisionResBlock) forwardStaged(x *mlx.Array, materialize func(...*mlx.Array)) *mlx.Array {
-	if materialize == nil {
+func (b *apertureVisionResBlock) forwardStaged(x *mlx.Array, stages *apertureVisionStages) *mlx.Array {
+	if stages.materialize == nil {
 		return b.forward(x)
 	}
-	normalized := mlx.SiLU(b.norm1.forward(x))
-	materialize(normalized, x)
-	h := b.conv1.forward(normalized)
-	materialize(h, x)
-	normalized = mlx.SiLU(b.norm2.forward(h))
-	materialize(normalized, x)
-	h = b.conv2.forward(normalized)
-	materialize(h, x)
+	normalized := stages.forward(func() *mlx.Array { return mlx.SiLU(b.norm1.forward(x)) }, x)
+	h := stages.forward(func() *mlx.Array { return b.conv1.forward(normalized) }, x)
+	normalized = stages.forward(func() *mlx.Array { return mlx.SiLU(b.norm2.forward(h)) }, x)
+	h = stages.forward(func() *mlx.Array { return b.conv2.forward(normalized) }, x)
 	residual := x
 	if b.shortcut != nil {
-		residual = b.shortcut.forward(x)
-		materialize(residual, h)
+		residual = stages.forward(func() *mlx.Array { return b.shortcut.forward(x) }, h)
 	}
-	output := mlx.Add(residual, h)
-	materialize(output)
-	return output
+	return stages.forward(func() *mlx.Array { return mlx.Add(residual, h) })
+}
+
+// Evaluating inside a single encoder scope keeps every realized temporary
+// alive until the whole image completes. Build each stage in a function scope
+// that ends before evaluation, and hold only its outputs and explicit residuals
+// across stages. Closing the previous holder after evaluation also releases
+// consumed stage outputs rather than leaving them in the caller's scope.
+type apertureVisionStages struct {
+	materialize func(...*mlx.Array)
+	scope       *mlx.Scope
+	live        []*mlx.Array
+}
+
+func (s *apertureVisionStages) run(build func() []*mlx.Array) []*mlx.Array {
+	if s.materialize == nil {
+		return build()
+	}
+	outputs := mlx.ScopedArrays(build)
+	s.materialize(outputs...)
+	next := mlx.NewScope()
+	for _, output := range outputs {
+		if slices.Contains(s.live, output) {
+			s.scope.Detach(output)
+		}
+		next.Attach(output)
+	}
+	s.scope.Close()
+	s.scope, s.live = next, outputs
+	return outputs
+}
+
+func (s *apertureVisionStages) forward(build func() *mlx.Array, keep ...*mlx.Array) *mlx.Array {
+	return s.run(func() []*mlx.Array { return append([]*mlx.Array{build()}, keep...) })[0]
 }
 
 type apertureVisionAttention struct {
@@ -346,76 +372,54 @@ func (v *VisionTokenizer) encode(data *mlx.Array, width, height int) (*mlx.Array
 }
 
 func (v *VisionTokenizer) encodeStaged(data *mlx.Array, width, height int, materialize func(...*mlx.Array)) (*mlx.Array, error) {
-	x := mlx.Reshape(data, 1, int32(height), int32(width), 3)
-	h := v.convIn.forward(x)
-	if materialize != nil {
-		materialize(h)
-	}
+	stages := &apertureVisionStages{materialize: materialize}
+	defer func() { stages.scope.Close() }()
+	h := stages.forward(func() *mlx.Array {
+		return v.convIn.forward(mlx.Reshape(data, 1, int32(height), int32(width), 3))
+	})
 	for _, level := range v.levels {
 		for i, block := range level.blocks {
-			h = block.forwardStaged(h, materialize)
+			h = block.forwardStaged(h, stages)
 			if len(level.attn) > 0 {
-				h = level.attn[i].forward(h)
-				if materialize != nil {
-					materialize(h)
-				}
+				h = stages.forward(func() *mlx.Array { return level.attn[i].forward(h) })
 			}
 		}
 		if level.downsample != nil {
-			h = mlx.PadConstant(h, []int{1, 2}, []int{0, 0}, []int{1, 1})
-			h = level.downsample.forward(h)
-			if materialize != nil {
-				materialize(h)
-			}
+			h = stages.forward(func() *mlx.Array {
+				padded := mlx.PadConstant(h, []int{1, 2}, []int{0, 0}, []int{1, 1})
+				return level.downsample.forward(padded)
+			})
 		}
 	}
-	h = v.mid1.forward(h)
-	if materialize != nil {
-		materialize(h)
-	}
-	h = v.midAttn.forward(h)
-	if materialize != nil {
-		materialize(h)
-	}
-	h = v.mid2.forward(h)
-	if materialize != nil {
-		materialize(h)
-	}
-	h = v.convOut.forward(mlx.SiLU(v.normOut.forward(h)))
-	if materialize != nil {
-		materialize(h)
-	}
-	h = v.quantConv.forward(h)
-	if materialize != nil {
-		materialize(h)
-	}
+	h = v.mid1.forwardStaged(h, stages)
+	h = stages.forward(func() *mlx.Array { return v.midAttn.forward(h) })
+	h = v.mid2.forwardStaged(h, stages)
+	h = stages.forward(func() *mlx.Array { return v.convOut.forward(mlx.SiLU(v.normOut.forward(h))) })
+	h = stages.forward(func() *mlx.Array { return v.quantConv.forward(h) })
 	d := h.Dims()
 	count := int32(d[1] * d[2])
-	flat := mlx.Reshape(h, count, v.config.EmbedDim)
-	if materialize != nil {
-		materialize(flat)
-	}
+	flat := stages.forward(func() *mlx.Array { return mlx.Reshape(h, count, v.config.EmbedDim) })
 	var bestScore, bestID *mlx.Array
 	for start := int32(0); start < v.config.CodebookSize; start += visionCodebookChunk {
 		end := min(start+visionCodebookChunk, v.config.CodebookSize)
-		book := v.codebook.Slice(mlx.Slice(int(start), int(end)), mlx.Slice())
-		scores := mlx.Matmul(flat, mlx.Transpose(book, 1, 0))
-		chunkScore := scores.MaxAxis(1, false)
-		chunkID := mlx.Add(scores.Argmax(1, false).AsType(mlx.DTypeInt32), mlx.NewScalarArray(float32(start)).AsType(mlx.DTypeInt32))
-		if bestScore == nil {
-			bestScore, bestID = chunkScore, chunkID
-		} else {
+		outputs := stages.run(func() []*mlx.Array {
+			book := v.codebook.Slice(mlx.Slice(int(start), int(end)), mlx.Slice())
+			scores := mlx.Matmul(flat, mlx.Transpose(book, 1, 0))
+			chunkScore := scores.MaxAxis(1, false)
+			chunkID := mlx.Add(scores.Argmax(1, false).AsType(mlx.DTypeInt32), mlx.NewScalarArray(float32(start)).AsType(mlx.DTypeInt32))
+			if bestScore == nil {
+				return []*mlx.Array{chunkScore, chunkID, flat}
+			}
 			better := chunkScore.Greater(bestScore)
-			bestScore = mlx.Where(better, chunkScore, bestScore)
-			bestID = mlx.Where(better, chunkID, bestID)
-		}
-		if materialize != nil {
-			// Every codebook chunk reuses the realized latent row. Keep it
-			// across runner-owned sweeps until the search is complete.
-			materialize(bestScore, bestID, flat)
-		}
+			return []*mlx.Array{mlx.Where(better, chunkScore, bestScore), mlx.Where(better, chunkID, bestID), flat}
+		})
+		bestScore, bestID = outputs[0], outputs[1]
 	}
-	return mlx.Reshape(bestID, 1, count), nil
+	codes := stages.forward(func() *mlx.Array { return mlx.Reshape(bestID, 1, count) })
+	if stages.scope != nil {
+		stages.scope.Detach(codes)
+	}
+	return codes, nil
 }
 
 type apertusImageInput struct {
