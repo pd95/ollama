@@ -1,57 +1,30 @@
 import { forwardRef, useState, useRef, useEffect } from "react";
-import type { ThinkingLevel } from "./ChatForm";
-
-const THINKING_LEVELS = {
-  LOW: "low",
-  MEDIUM: "medium",
-  HIGH: "high",
-} as const;
-
-const THINKING_LEVEL_LABELS = {
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-} as const;
+import { thinkingLabel, type ThinkingValue } from "@/utils/thinking";
 
 interface ThinkButtonProps {
-  mode: "think" | "thinkingLevel";
-  isVisible?: boolean;
-  isActive?: boolean;
-  currentLevel?: ThinkingLevel;
-  onToggle?: () => void;
-  onLevelChange?: (level: ThinkingLevel) => void;
+  values: ThinkingValue[];
+  value: ThinkingValue;
+  onChange: (value: ThinkingValue) => void;
   onDropdownToggle?: (isOpen: boolean) => void;
 }
 
 export const ThinkButton = forwardRef<HTMLButtonElement, ThinkButtonProps>(
-  function ThinkButton(
-    {
-      mode,
-      isVisible,
-      isActive,
-      currentLevel,
-      onToggle,
-      onLevelChange,
-      onDropdownToggle,
-    },
-    ref,
-  ) {
+  function ThinkButton({ values, value, onChange, onDropdownToggle }, ref) {
+    const isToggle =
+      values.length === 2 && values.every((v) => typeof v === "boolean");
+    const isFixed = values.length === 1;
+    const isVisible = values.length > 0 && !(isFixed && values[0] === false);
     const [isDropdownOpen, setIsDropdownOpen] = useState(false);
     const dropdownRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-      if (
-        ref &&
-        typeof ref === "object" &&
-        ref.current &&
-        mode === "thinkingLevel"
-      ) {
+      if (ref && typeof ref === "object" && ref.current) {
         (ref.current as any).closeDropdown = () => setIsDropdownOpen(false);
       }
-    }, [ref, mode]);
+    }, [ref, isToggle, isFixed, isVisible]);
 
     useEffect(() => {
-      if (mode !== "thinkingLevel" || !isDropdownOpen) return;
+      if (!isDropdownOpen) return;
 
       function handleClickOutside(event: MouseEvent) {
         if (
@@ -65,18 +38,21 @@ export const ThinkButton = forwardRef<HTMLButtonElement, ThinkButtonProps>(
       document.addEventListener("mousedown", handleClickOutside);
       return () =>
         document.removeEventListener("mousedown", handleClickOutside);
-    }, [isDropdownOpen, mode]);
+    }, [isDropdownOpen]);
 
     if (!isVisible) return null;
 
-    if (mode === "think") {
+    if (isToggle) {
       return (
         <button
           ref={ref}
-          title={isActive ? "Disable think mode" : "Enable think mode"}
-          onClick={onToggle}
+          type="button"
+          aria-label="Thinking"
+          aria-pressed={value === true}
+          title={value ? "Disable think mode" : "Enable think mode"}
+          onClick={() => onChange(!value)}
           className={`select-none flex items-center justify-center rounded-full h-9 w-9 bg-white dark:bg-neutral-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer transition-all whitespace-nowrap border border-transparent ${
-            isActive
+            value
               ? "text-[rgba(0,115,255,1)] dark:text-[rgba(70,155,255,1)]"
               : "text-neutral-500 dark:text-neutral-400"
           }`}
@@ -93,16 +69,19 @@ export const ThinkButton = forwardRef<HTMLButtonElement, ThinkButtonProps>(
       );
     }
 
-    // thinkingLevel mode
-    const displayLabel = currentLevel
-      ? THINKING_LEVEL_LABELS[currentLevel]
-      : "";
+    const displayLabel = thinkingLabel(value);
     return (
       <div className="relative" ref={dropdownRef}>
         <button
           ref={ref}
-          title={`Thinking level: ${displayLabel}`}
+          type="button"
+          aria-label={`Thinking: ${displayLabel}`}
+          aria-haspopup={isFixed ? undefined : "menu"}
+          aria-expanded={isFixed ? undefined : isDropdownOpen}
+          disabled={isFixed}
+          title={`Thinking: ${displayLabel}${isFixed ? " (fixed by model)" : ""}`}
           onClick={() => {
+            if (isFixed) return;
             const newState = !isDropdownOpen;
             setIsDropdownOpen(newState);
             onDropdownToggle?.(newState);
@@ -120,37 +99,44 @@ export const ThinkButton = forwardRef<HTMLButtonElement, ThinkButtonProps>(
             </svg>
             <span className="text-sm">{displayLabel}</span>
           </div>
-          <svg
-            className={`w-3 h-3`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M19 9l-7 7-7-7"
-            />
-          </svg>
+          {!isFixed && (
+            <svg
+              className={`w-3 h-3`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M19 9l-7 7-7-7"
+              />
+            </svg>
+          )}
         </button>
 
-        {isDropdownOpen && (
-          <div className="absolute bottom-full mb-2 text-[15px] rounded-2xl overflow-hidden bg-white border border-neutral-100 text-neutral-800 shadow-xl shadow-black/5 backdrop-blur-lg dark:border-neutral-600/40 dark:bg-neutral-800 dark:text-white dark:ring-black/20 min-w-[120px]">
-            {Object.entries(THINKING_LEVELS).map(([, level]) => (
+        {!isFixed && isDropdownOpen && (
+          <div
+            role="menu"
+            aria-label="Thinking"
+            className="absolute bottom-full mb-2 text-[15px] rounded-2xl overflow-hidden bg-white border border-neutral-100 text-neutral-800 shadow-xl shadow-black/5 backdrop-blur-lg dark:border-neutral-600/40 dark:bg-neutral-800 dark:text-white dark:ring-black/20 min-w-[120px]"
+          >
+            {values.map((level) => (
               <button
-                key={level}
+                key={`${typeof level}:${level}`}
+                type="button"
+                role="menuitemradio"
+                aria-checked={value === level}
                 className={`w-full text-left px-3 py-2 cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-colors text-neutral-700 dark:text-neutral-300 ${
-                  currentLevel === level
-                    ? "bg-neutral-100 dark:bg-neutral-700/60"
-                    : ""
+                  value === level ? "bg-neutral-100 dark:bg-neutral-700/60" : ""
                 }`}
                 onClick={() => {
-                  onLevelChange?.(level);
+                  onChange(level);
                   setIsDropdownOpen(false);
                 }}
               >
-                {THINKING_LEVEL_LABELS[level]}
+                {thinkingLabel(level)}
               </button>
             ))}
           </div>
