@@ -2,18 +2,35 @@ import {
   useState,
   useRef,
   useEffect,
+  useId,
   forwardRef,
   type JSX,
+  type Ref,
+  type KeyboardEvent,
   useImperativeHandle,
 } from "react";
 import { Model } from "@/gotypes";
 import { useSelectedModel } from "@/hooks/useSelectedModel";
 import { useCloudStatus } from "@/hooks/useCloudStatus";
+import { useModelCapabilitySummary } from "@/hooks/useModelCapabilities";
 import { useQueryClient } from "@tanstack/react-query";
 import { getModelUpstreamInfo } from "@/api";
-import { ArrowDownTrayIcon } from "@heroicons/react/24/outline";
+import { capabilityLabels } from "@/lib/modelCapabilities";
+import {
+  ArrowDownTrayIcon,
+  CloudIcon,
+  InformationCircleIcon,
+} from "@heroicons/react/24/outline";
 
 const stalenessCheckCache = new Map<string, number>();
+const panelClass =
+  "absolute right-0 text-[15px] bottom-full mb-2 z-50 w-[360px] max-w-[calc(100vw-2rem)] rounded-2xl overflow-hidden bg-white border border-neutral-100 text-neutral-800 shadow-xl shadow-black/5 dark:border-neutral-600/40 dark:bg-neutral-800 dark:text-white";
+
+type ModelListHandle = {
+  scrollToSelectedModel: () => void;
+  scrollToTop: () => void;
+  handleKeyDown: (event: KeyboardEvent) => void;
+};
 
 export const ModelPicker = forwardRef<
   HTMLButtonElement,
@@ -23,154 +40,149 @@ export const ModelPicker = forwardRef<
     onEscape?: () => void;
     onDropdownToggle?: (isOpen: boolean) => void;
     isDisabled?: boolean;
+    detailsButtonRef?: Ref<HTMLButtonElement>;
   }
 >(function ModelPicker(
-  { chatId, onModelSelect, onEscape, onDropdownToggle, isDisabled },
+  {
+    chatId,
+    onModelSelect,
+    onEscape,
+    onDropdownToggle,
+    isDisabled,
+    detailsButtonRef,
+  },
   ref,
 ): JSX.Element {
-  const [isOpen, setIsOpen] = useState(false);
+  const [panel, setPanel] = useState<"models" | "details" | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [activeOptionId, setActiveOptionId] = useState<string>();
+  const isOpen = panel === "models";
   const { selectedModel, setSettings, models, loading } = useSelectedModel(
     chatId,
     searchQuery,
   );
   const { cloudDisabled } = useCloudStatus();
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const selectorRef = useRef<HTMLButtonElement>(null);
+  const detailsRef = useRef<HTMLButtonElement>(null);
+  const detailsPanelRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const modelListRef = useRef<ModelListHandle>(null);
   const queryClient = useQueryClient();
-  const modelListRef = useRef<{
-    scrollToSelectedModel: () => void;
-    scrollToTop: () => void;
-  }>(null);
+  const id = useId();
+  const listId = `${id}-models`;
+  const detailsId = `${id}-details`;
 
-  const checkModelStaleness = async (model: Model) => {
-    if (
-      !model ||
-      !model.model ||
-      model.digest === undefined ||
-      model.digest === ""
-    )
-      return;
-
-    // Check cache - only check staleness every 5 minutes per model
-    const now = Date.now();
-    const lastChecked = stalenessCheckCache.get(model.model);
-    if (lastChecked && now - lastChecked < 5 * 60 * 1000) return;
-    stalenessCheckCache.set(model.model, now);
-
-    try {
-      const upstreamInfo = await getModelUpstreamInfo(model);
-
-      if (upstreamInfo.stale) {
-        const currentStaleModels =
-          queryClient.getQueryData<Map<string, boolean>>(["staleModels"]) ||
-          new Map();
-        const newMap = new Map(currentStaleModels);
-        newMap.set(model.model, true);
-        queryClient.setQueryData(["staleModels"], newMap);
-      }
-    } catch (error) {
-      console.error("Failed to check model staleness:", error);
-    }
-  };
+  useImperativeHandle(
+    ref,
+    () =>
+      Object.assign(selectorRef.current!, {
+        closeDropdown: () => setPanel(null),
+      }),
+    [],
+  );
+  useImperativeHandle(detailsButtonRef, () => detailsRef.current!, [
+    selectedModel,
+  ]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (
         dropdownRef.current &&
         !dropdownRef.current.contains(event.target as Node)
-      ) {
-        setIsOpen(false);
-      }
+      )
+        setPanel(null);
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
   useEffect(() => {
-    if (ref && typeof ref === "object" && ref.current) {
-      (ref.current as any).closeDropdown = () => setIsOpen(false);
-    }
-  }, [ref, setIsOpen]);
-
-  // Focus search when opened and refresh models
-  // Clear search when closed
-  useEffect(() => {
     if (isOpen) {
       searchInputRef.current?.focus();
       modelListRef.current?.scrollToSelectedModel();
     } else {
       setSearchQuery("");
+      setActiveOptionId(undefined);
     }
   }, [isOpen]);
 
-  // When searching, scroll to top of list
   useEffect(() => {
-    if (searchQuery && modelListRef.current) {
-      modelListRef.current.scrollToTop();
-    }
+    if (panel === "details") detailsPanelRef.current?.focus();
+  }, [panel]);
+
+  useEffect(() => {
+    if (searchQuery) modelListRef.current?.scrollToTop();
   }, [searchQuery]);
 
   useEffect(() => {
-    if (selectedModel && !loading) {
-      checkModelStaleness(selectedModel);
-    }
-  }, [selectedModel?.model, loading]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!selectedModel?.digest || loading) return;
+    const model = selectedModel;
+    const now = Date.now();
+    const lastChecked = stalenessCheckCache.get(model.model);
+    if (lastChecked && now - lastChecked < 5 * 60 * 1000) return;
+    stalenessCheckCache.set(model.model, now);
+    getModelUpstreamInfo(model)
+      .then((upstreamInfo) => {
+        if (upstreamInfo.stale) {
+          const staleModels = new Map(
+            queryClient.getQueryData<Map<string, boolean>>(["staleModels"]),
+          );
+          staleModels.set(model.model, true);
+          queryClient.setQueryData(["staleModels"], staleModels);
+        }
+      })
+      .catch((error) =>
+        console.error("Failed to check model staleness:", error),
+      );
+  }, [selectedModel?.model, selectedModel?.digest, loading, queryClient]);
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (!isOpen) return;
-
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setIsOpen(false);
-        onEscape?.();
-        return;
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onEscape]);
+  const togglePanel = (next: "models" | "details") => {
+    const opening = panel !== next;
+    setPanel(opening ? next : null);
+    onDropdownToggle?.(opening);
+  };
 
   const handleModelSelect = (model: Model) => {
     setSettings({ SelectedModel: model.model });
-    setIsOpen(false);
+    setPanel(null);
     onModelSelect?.();
   };
 
   return (
-    <div className="relative" ref={dropdownRef}>
+    <div
+      className="relative flex min-w-0 items-center gap-1"
+      ref={dropdownRef}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !panel) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setPanel(null);
+        if (panel === "details") detailsRef.current?.focus();
+        else if (onEscape) onEscape();
+        else selectorRef.current?.focus();
+      }}
+    >
       <button
-        ref={ref}
+        ref={selectorRef}
         type="button"
         title="Select model"
-        onClick={() => {
-          const newState = !isOpen;
-          setIsOpen(newState);
-          onDropdownToggle?.(newState);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            const newState = !isOpen;
-            setIsOpen(newState);
-            onDropdownToggle?.(newState);
-          }
-        }}
-        onMouseDown={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => e.stopPropagation()}
-        className="flex items-center select-none gap-1.5 rounded-full px-3.5 py-1.5 bg-white dark:bg-neutral-700 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-neutral-100 cursor-pointer"
+        aria-label={`Select model${selectedModel ? `: ${selectedModel.model}` : ""}`}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+        aria-controls={isOpen ? listId : undefined}
+        disabled={isDisabled}
+        onClick={() => togglePanel("models")}
+        onMouseDown={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+        className="flex min-w-0 items-center select-none gap-1.5 rounded-full px-3.5 py-1.5 bg-white dark:bg-neutral-700 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-neutral-100 cursor-pointer disabled:cursor-default"
       >
-        <div className="flex items-center gap-2">
-          <span>
-            {isDisabled
-              ? "Loading..."
-              : selectedModel?.model || "Select a model"}
-          </span>
-        </div>
+        <span className="truncate">
+          {isDisabled ? "Loading..." : selectedModel?.model || "Select a model"}
+        </span>
         <svg
-          className="h-3 w-3 opacity-70"
+          className="h-3 w-3 shrink-0 opacity-70"
+          aria-hidden="true"
           fill="none"
           stroke="currentColor"
           strokeWidth="2"
@@ -183,27 +195,64 @@ export const ModelPicker = forwardRef<
           />
         </svg>
       </button>
+      {selectedModel && (
+        <button
+          ref={detailsRef}
+          type="button"
+          aria-label={`Capabilities of ${selectedModel.model}`}
+          aria-haspopup="dialog"
+          aria-expanded={panel === "details"}
+          aria-controls={panel === "details" ? detailsId : undefined}
+          title="Model capabilities"
+          disabled={isDisabled}
+          onClick={() => togglePanel("details")}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-neutral-500 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer disabled:cursor-default"
+        >
+          <InformationCircleIcon className="h-4 w-4" aria-hidden="true" />
+        </button>
+      )}
+      {panel === "details" && selectedModel && (
+        <div
+          id={detailsId}
+          ref={detailsPanelRef}
+          role="dialog"
+          tabIndex={-1}
+          aria-modal="false"
+          aria-label={`Capabilities of ${selectedModel.model}`}
+          className={`${panelClass} p-4`}
+        >
+          <ModelDetails model={selectedModel} />
+        </div>
+      )}
       {isOpen && (
-        <div className="absolute right-0 text-[15px] bottom-full mb-2 z-50 w-64 rounded-2xl overflow-hidden bg-white border border-neutral-100 text-neutral-800 shadow-xl shadow-black/5 backdrop-blur-lg dark:border-neutral-600/40 dark:bg-neutral-800 dark:text-white dark:ring-black/20">
+        <div className={panelClass}>
           <div className="px-1 py-2 border-b border-neutral-100 dark:border-neutral-700">
             <input
               ref={searchInputRef}
               type="text"
+              role="combobox"
+              aria-label="Find model"
+              aria-autocomplete="list"
+              aria-expanded="true"
+              aria-controls={listId}
+              aria-activedescendant={activeOptionId}
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => modelListRef.current?.handleKeyDown(event)}
               placeholder="Find model..."
               autoCorrect="off"
-              className="w-full px-2 py-0.5 bg-transparent border-none border-neutral-200 rounded-md outline-none focus:border-neutral-400 dark:border-neutral-600 dark:focus:border-neutral-400"
+              className="w-full px-2 py-0.5 bg-transparent border-none rounded-md outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
-
           <ModelList
             ref={modelListRef}
             models={models}
             selectedModel={selectedModel}
             onModelSelect={handleModelSelect}
             cloudDisabled={cloudDisabled}
-            isOpen={isOpen}
+            isOpen
+            listId={listId}
+            onActiveChange={setActiveOptionId}
           />
         </div>
       )}
@@ -211,137 +260,247 @@ export const ModelPicker = forwardRef<
   );
 });
 
-export const ModelList = forwardRef(function ModelList(
+function ModelDetails({ model }: { model: Model }) {
+  const { capabilities, isLoading, refetch } = useModelCapabilitySummary(
+    model,
+    true,
+  );
+  return (
+    <>
+      <p className="mb-3 break-all font-medium">{model.model}</p>
+      {capabilities === undefined && (
+        <p
+          role="status"
+          className="mb-2 text-sm text-neutral-500 dark:text-neutral-400"
+        >
+          {isLoading ? "Loading capabilities…" : "Capabilities unknown"}
+        </p>
+      )}
+      <dl className="space-y-1 text-sm">
+        {capabilityLabels.map(({ capability, label }) => (
+          <div key={capability} className="flex justify-between gap-4">
+            <dt>{label}</dt>
+            <dd className="text-neutral-500 dark:text-neutral-400">
+              {capabilities === undefined
+                ? "Unknown"
+                : capabilities.includes(capability)
+                  ? "Advertised"
+                  : "Not advertised"}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      {capabilities === undefined && !isLoading && (
+        <button
+          type="button"
+          onClick={() => void refetch()}
+          className="mt-3 text-sm text-blue-600 dark:text-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          Retry discovery
+        </button>
+      )}
+    </>
+  );
+}
+
+export const ModelList = forwardRef<
+  ModelListHandle,
+  {
+    models: Model[];
+    selectedModel: Model | null;
+    onModelSelect: (model: Model) => void;
+    cloudDisabled: boolean;
+    isOpen: boolean;
+    listId?: string;
+    onActiveChange?: (id: string | undefined) => void;
+  }
+>(function ModelList(
   {
     models,
     selectedModel,
     onModelSelect,
     cloudDisabled,
     isOpen,
-  }: {
-    models: Model[];
-    selectedModel: Model | null;
-    onModelSelect: (model: Model) => void;
-    cloudDisabled: boolean;
-    isOpen: boolean;
+    listId: providedListId,
+    onActiveChange,
   },
   ref,
 ): JSX.Element {
+  const id = useId();
+  const listId = providedListId || `${id}-models`;
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const [highlightedName, setHighlightedName] = useState<string>();
+  const highlightedIndex = Math.max(
+    0,
+    models.findIndex(
+      (model) => model.model === (highlightedName ?? selectedModel?.model),
+    ),
+  );
+
+  const scrollToItem = (index: number) => {
+    const container = scrollContainerRef.current;
+    const item = container?.children[index] as HTMLElement | undefined;
+    if (container && item)
+      container.scrollTop =
+        item.offsetTop - container.clientHeight / 2 + item.clientHeight / 2;
+  };
+
+  useEffect(() => {
+    onActiveChange?.(
+      models.length ? `${listId}-option-${highlightedIndex}` : undefined,
+    );
+  }, [models.length, highlightedIndex, listId, onActiveChange]);
+
+  const handleKeyDown = (event: KeyboardEvent) => {
+    if (!isOpen || !models.length) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      onModelSelect(models[highlightedIndex]);
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const offset = event.key === "ArrowDown" ? 1 : -1;
+      const next = (highlightedIndex + offset + models.length) % models.length;
+      setHighlightedName(models[next].model);
+      scrollToItem(next);
+    }
+  };
 
   useImperativeHandle(ref, () => ({
-    scrollToSelectedModel: () => {
-      if (!selectedModel || !scrollContainerRef.current) return;
-      const selectedIndex = models.findIndex(
-        (m) => m.model === selectedModel.model,
-      );
-      if (selectedIndex !== -1) scrollToItem(selectedIndex);
-    },
+    scrollToSelectedModel: () => scrollToItem(highlightedIndex),
     scrollToTop: () => {
       if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
     },
+    handleKeyDown,
   }));
-
-  // Handle keyboard navigation
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (!isOpen || models.length === 0) return;
-
-      switch (event.key) {
-        case "ArrowDown":
-          event.preventDefault();
-          setHighlightedIndex((prev) => {
-            const next = prev < models.length - 1 ? prev + 1 : 0;
-            scrollToItem(next);
-            return next;
-          });
-          break;
-        case "ArrowUp":
-          event.preventDefault();
-          setHighlightedIndex((prev) => {
-            const next = prev > 0 ? prev - 1 : models.length - 1;
-            scrollToItem(next);
-            return next;
-          });
-          break;
-        case "Enter":
-          event.preventDefault();
-          if (highlightedIndex >= 0 && highlightedIndex < models.length) {
-            onModelSelect(models[highlightedIndex]);
-          }
-          break;
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, models, highlightedIndex, onModelSelect]);
-
-  // Scroll active item into view
-  const scrollToItem = (index: number) => {
-    if (scrollContainerRef.current && index >= 0) {
-      const container = scrollContainerRef.current;
-      const item = container.children[index] as HTMLElement;
-      if (item) {
-        // Calculate the exact scroll position to center the item
-        const containerHeight = container.clientHeight;
-        const itemTop = item.offsetTop;
-        const itemHeight = item.clientHeight;
-        // Position the item in the center of the container
-        container.scrollTop = itemTop - containerHeight / 2 + itemHeight / 2;
-      }
-    }
-  };
 
   return (
     <div
       ref={scrollContainerRef}
-      className="h-64 overflow-y-auto overflow-x-hidden"
+      id={listId}
+      role="listbox"
+      aria-label="Models"
+      onKeyDown={handleKeyDown}
+      className="max-h-80 overflow-y-auto overflow-x-hidden"
     >
       {models.length === 0 ? (
         <div className="px-3 py-2 text-neutral-500 dark:text-neutral-400">
           No models found
         </div>
       ) : (
-        models.map((model, index) => {
-          return (
-            <div key={`${model.model}-${model.digest || "no-digest"}-${index}`}>
-              <button
-                onClick={() => onModelSelect(model)}
-                onMouseEnter={() => setHighlightedIndex(index)}
-                className={`flex w-full items-center gap-2 px-3 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-700/60 focus:outline-none cursor-pointer ${
-                  highlightedIndex === index ||
-                  selectedModel?.model === model.model
-                    ? "bg-neutral-100 dark:bg-neutral-700/60"
-                    : ""
-                }`}
-              >
-                <span className="flex-1 text-left truncate min-w-0">
-                  {model.model}
-                </span>
-                {model.isCloud() && (
-                  <svg
-                    className="h-3 fill-current text-neutral-500 dark:text-neutral-400"
-                    viewBox="0 0 20 15"
-                    strokeWidth={1}
-                    xmlns="http://www.w3.org/2000/svg"
-                  >
-                    <path d="M4.01511 14.5861H14.2304C16.9183 14.5861 19.0002 12.5509 19.0002 9.9403C19.0002 7.30491 16.8911 5.3046 14.0203 5.3046C12.9691 3.23016 11.0602 2 8.69505 2C5.62816 2 3.04822 4.32758 2.72935 7.47455C1.12954 7.95356 0.0766602 9.29431 0.0766602 10.9757C0.0766602 12.9913 1.55776 14.5861 4.01511 14.5861ZM4.02056 13.1261C2.46452 13.1261 1.53673 12.2938 1.53673 11.0161C1.53673 9.91553 2.24207 9.12934 3.51367 8.79302C3.95684 8.68258 4.11901 8.48427 4.16138 8.00729C4.39317 5.3613 6.29581 3.46007 8.69505 3.46007C10.5231 3.46007 11.955 4.48273 12.8385 6.26013C13.0338 6.65439 13.2626 6.7882 13.7488 6.7882C16.1671 6.7882 17.5337 8.19719 17.5337 9.97707C17.5337 11.7526 16.1242 13.1261 14.2852 13.1261H4.02056Z" />
-                  </svg>
-                )}
-                {model.digest === undefined &&
-                  (cloudDisabled || !model.isCloud()) && (
-                    <ArrowDownTrayIcon
-                      className="h-4 w-4 text-neutral-500 dark:text-neutral-400"
-                      strokeWidth={1.75}
-                    />
-                  )}
-              </button>
-            </div>
-          );
-        })
+        models.map((model, index) => (
+          <ModelOption
+            key={`${model.model}-${model.digest || "no-digest"}`}
+            id={`${listId}-option-${index}`}
+            model={model}
+            selected={selectedModel?.model === model.model}
+            highlighted={highlightedIndex === index}
+            cloudDisabled={cloudDisabled}
+            isOpen={isOpen}
+            scrollRoot={scrollContainerRef}
+            onSelect={() => onModelSelect(model)}
+            onHighlight={() => setHighlightedName(model.model)}
+          />
+        ))
       )}
     </div>
   );
 });
+
+function ModelOption({
+  id,
+  model,
+  selected,
+  highlighted,
+  cloudDisabled,
+  isOpen,
+  scrollRoot,
+  onSelect,
+  onHighlight,
+}: {
+  id: string;
+  model: Model;
+  selected: boolean;
+  highlighted: boolean;
+  cloudDisabled: boolean;
+  isOpen: boolean;
+  scrollRoot: { current: HTMLDivElement | null };
+  onSelect: () => void;
+  onHighlight: () => void;
+}) {
+  const rowRef = useRef<HTMLButtonElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!rowRef.current || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setVisible(entry.isIntersecting),
+      { root: scrollRoot.current },
+    );
+    observer.observe(rowRef.current);
+    return () => observer.disconnect();
+  }, [scrollRoot]);
+  const { capabilities, isLoading } = useModelCapabilitySummary(
+    model,
+    isOpen && (visible || highlighted),
+  );
+  const badges = capabilityLabels.filter(({ capability }) =>
+    capabilities?.includes(capability),
+  );
+  return (
+    <button
+      ref={rowRef}
+      id={id}
+      type="button"
+      role="option"
+      aria-selected={selected}
+      tabIndex={-1}
+      onClick={onSelect}
+      onMouseEnter={onHighlight}
+      className={`block w-full px-3 py-2 text-left hover:bg-neutral-100 dark:hover:bg-neutral-700/60 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 cursor-pointer ${highlighted || selected ? "bg-neutral-100 dark:bg-neutral-700/60" : ""}`}
+    >
+      <span className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate" title={model.model}>
+          {model.model}
+        </span>
+        {model.isCloud() && (
+          <CloudIcon
+            className="h-4 w-4 shrink-0 text-neutral-500 dark:text-neutral-400"
+            aria-label="Cloud model"
+            aria-hidden={false}
+            role="img"
+          />
+        )}
+        {model.digest === undefined && (cloudDisabled || !model.isCloud()) && (
+          <ArrowDownTrayIcon
+            className="h-4 w-4 shrink-0 text-neutral-500 dark:text-neutral-400"
+            aria-label="Download required"
+            aria-hidden={false}
+            role="img"
+          />
+        )}
+      </span>
+      <span className="mt-1 flex flex-wrap gap-1 text-[11px] leading-4 text-neutral-600 dark:text-neutral-300">
+        {capabilities === undefined ? (
+          <span>
+            {isLoading ? "Loading capabilities…" : "Capabilities unknown"}
+          </span>
+        ) : badges.length ? (
+          badges.map(({ capability, label }) => (
+            <span
+              key={capability}
+              className="rounded px-1.5 bg-neutral-100 dark:bg-neutral-700"
+            >
+              {label}
+            </span>
+          ))
+        ) : (
+          <span>
+            {capabilities.length
+              ? "Other capabilities advertised"
+              : "No advertised capabilities"}
+          </span>
+        )}
+      </span>
+    </button>
+  );
+}

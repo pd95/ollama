@@ -6,7 +6,6 @@ import { useSelectedModel } from "./useSelectedModel";
 import { createQueryBatcher } from "./useQueryBatcher";
 import { useRefetchModels } from "./useModels";
 import { useStreamingContext } from "@/contexts/StreamingContext";
-import { getModelCapabilities } from "@/api";
 import { useCloudStatus } from "./useCloudStatus";
 
 export const useChats = () => {
@@ -606,23 +605,11 @@ export const useSendMessage = (chatId: string) => {
 
               queryClient.invalidateQueries({ queryKey: ["models"] });
 
-              // Fetch fresh capabilities for the downloaded model
-              getModelCapabilities(selectedModel.model)
-                .then((capabilities) => {
-                  queryClient.setQueryData(
-                    ["modelCapabilities", selectedModel.model],
-                    capabilities,
-                  );
-                })
-                .catch((error) => {
-                  console.error(
-                    "Failed to fetch capabilities after download:",
-                    error,
-                  );
-                  queryClient.invalidateQueries({
-                    queryKey: ["modelCapabilities", selectedModel.model],
-                  });
-                });
+              // Clear every identity of this tag. The refreshed list supplies
+              // its new digest; mounted discovery then uses the matching key.
+              queryClient.resetQueries({
+                queryKey: ["modelCapabilities", selectedModel.model],
+              });
             }
             break;
           }

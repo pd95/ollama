@@ -10,6 +10,7 @@ vi.mock("./lib/ollama-client", () => ({
 import {
   fetchConnectUrl,
   getModelCapabilities,
+  getModels,
   sendMessage,
   getClaudeDesktopAvailableModels,
   getClaudeDesktopModelsSettings,
@@ -50,6 +51,51 @@ describe("desktop model settings", () => {
       vi.fn().mockResolvedValue(new Response("timed out", { status: 504 })),
     );
     await expect(getCodexDesktopModelsSettings(true)).rejects.toThrow("504");
+  });
+});
+
+describe("picker capability discovery", () => {
+  it("preserves exact-tag capability metadata from the model list", async () => {
+    listModels.mockResolvedValue({
+      models: [
+        {
+          name: "my-alias:latest",
+          digest: "one",
+          capabilities: ["completion", "vision", "audio"],
+          details: {},
+        },
+        {
+          name: "my-alias:text",
+          digest: "two",
+          capabilities: ["completion"],
+          details: {},
+        },
+        { name: "unknown:latest", digest: "three", details: {} },
+      ],
+    });
+    const models = await getModels();
+    expect(models.map((model) => model.capabilities)).toEqual([
+      ["completion", "vision", "audio"],
+      ["completion"],
+      undefined,
+    ]);
+    expect(models.map((model) => model.model)).toEqual([
+      "my-alias",
+      "my-alias:text",
+      "unknown",
+    ]);
+  });
+
+  it("rejects failed discovery rather than claiming no capabilities", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(new Response("not downloaded", { status: 404 })),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(getModelCapabilities("unknown")).rejects.toThrow();
+    vi.restoreAllMocks();
   });
 });
 
@@ -219,21 +265,38 @@ describe("model thinking discovery and transport", () => {
 
   it("preserves backend thinking values for a custom model name", async () => {
     const thinking = { values: [false, "low", "xhigh"], default: "xhigh" };
-    showModel.mockResolvedValue({
-      capabilities: ["thinking"],
-      thinking,
-      renderer: "apertus1p5",
-    });
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          capabilities: ["thinking"],
+          thinking,
+          renderer: "apertus1p5",
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetch);
     const metadata = await getModelCapabilities("my-alias");
     expect(metadata.thinking).toEqual(thinking);
     expect(metadata.renderer).toBe("apertus1p5");
-    expect(showModel).toHaveBeenCalledWith({ model: "my-alias" });
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:3001/api/show",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ model: "my-alias" }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
   });
 
   it("does not invent metadata when discovery fails", async () => {
-    showModel.mockRejectedValue(new Error("not downloaded"));
     vi.spyOn(console, "error").mockImplementation(() => {});
-    expect((await getModelCapabilities("unknown")).thinking).toBeUndefined();
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(new Response("not downloaded", { status: 404 })),
+    );
+    await expect(getModelCapabilities("unknown")).rejects.toThrow("404");
   });
 
   it.each([false, true, "xhigh", "none", undefined])(
