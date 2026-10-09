@@ -79,3 +79,17 @@ export function formatModelFileSize(
   );
   return `${Number((bytes! / 1000 ** unit).toFixed(1))} ${units[unit]}`;
 }
+
+export function formatModelParameterSize(
+  value: string | undefined,
+): string | undefined {
+  const text = metadataText(value);
+  if (!text || !/^\d+(?:\.\d+)?$/.test(text)) return text;
+  const count = positiveNumber(Number(text));
+  return count === undefined
+    ? undefined
+    : new Intl.NumberFormat("en-US", {
+        notation: "compact",
+        maximumFractionDigits: 1,
+      }).format(count);
+}

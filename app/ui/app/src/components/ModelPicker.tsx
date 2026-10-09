@@ -21,7 +21,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { getModelUpstreamInfo } from "@/api";
 import { capabilityLabels } from "@/lib/modelCapabilities";
 import { planModelPickerScroll } from "@/lib/modelPickerScroll";
-import { modelRuntimeBackend, formatModelFileSize } from "@/lib/modelDetails";
+import {
+  modelRuntimeBackend,
+  formatModelFileSize,
+  formatModelParameterSize,
+} from "@/lib/modelDetails";
 import {
   ArrowDownTrayIcon,
   CheckIcon,
@@ -267,6 +271,19 @@ export const ModelPicker = forwardRef<
   );
 });
 
+function ModelInfoStatus({ reported = false }: { reported?: boolean }) {
+  return (
+    <>
+      {reported ? (
+        <CheckIcon className="h-4 w-4" aria-hidden="true" />
+      ) : (
+        <span aria-hidden="true">–</span>
+      )}
+      <span className="sr-only">{reported ? "Reported" : "Not reported"}</span>
+    </>
+  );
+}
+
 function ModelDetails({ model }: { model: Model }) {
   const query = useModelCapabilities(model.model);
   const capabilities = model.capabilities ?? query.data?.capabilities;
@@ -290,7 +307,10 @@ function ModelDetails({ model }: { model: Model }) {
       label: "File size",
       value: remote ? undefined : formatModelFileSize(model.size),
     },
-    { label: "Parameters", value: metadata.parameterSize },
+    {
+      label: "Parameters",
+      value: formatModelParameterSize(metadata.parameterSize),
+    },
     { label: "Quantization", value: metadata.quantization },
     {
       label: "Context limit",
@@ -305,7 +325,7 @@ function ModelDetails({ model }: { model: Model }) {
           <div key={label} className="flex justify-between gap-4">
             <dt className="shrink-0">{label}</dt>
             <dd className="text-right text-neutral-500 dark:text-neutral-400">
-              {value ?? (query.isFetching ? "Loading…" : "Not reported")}
+              {value ?? (query.isFetching ? "Loading…" : <ModelInfoStatus />)}
             </dd>
           </div>
         ))}
@@ -330,12 +350,12 @@ function ModelDetails({ model }: { model: Model }) {
         {capabilityLabels.map(({ capability, label }) => (
           <div key={capability} className="flex justify-between gap-4">
             <dt>{label}</dt>
-            <dd className="text-neutral-500 dark:text-neutral-400">
-              {capabilities === undefined
-                ? "Unknown"
-                : capabilities.includes(capability)
-                  ? "Reported"
-                  : "Not reported"}
+            <dd className="flex items-center text-neutral-500 dark:text-neutral-400">
+              {capabilities === undefined ? (
+                "Unknown"
+              ) : (
+                <ModelInfoStatus reported={capabilities.includes(capability)} />
+              )}
             </dd>
           </div>
         ))}

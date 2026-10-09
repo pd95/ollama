@@ -571,3 +571,44 @@ it("does not present a remote model's metadata as a local backend or file size",
   expect(content()).not.toContain("8.1 GB");
   expect(content()).toContain("Not reported");
 });
+
+it("compacts cloud parameter counts and uses accessible symbols for reported and missing facts", async () => {
+  Object.assign(state.models[0], {
+    model: "gemma4:31b-cloud",
+    capabilities: undefined,
+    isCloud: () => true,
+  });
+  vi.mocked(getModelCapabilities).mockResolvedValue({
+    capabilities: ["completion", "vision", "tools", "thinking"],
+    metadata: { parameterSize: "32682372656", quantization: "BF16" },
+  });
+  await mount(<ModelPicker />);
+  await act(async () =>
+    renderer.root.findByProps({ title: "Model information" }).props.onClick(),
+  );
+  const valueFor = (label: string) =>
+    renderer.root
+      .findAllByType("dt")
+      .find((term) => term.children[0] === label)!
+      .parent!.findByType("dd");
+  expect(valueFor("Parameters").children).toEqual(["32.7B"]);
+  expect(valueFor("Location").children).toEqual(["Cloud"]);
+  expect(valueFor("Text input").findAllByType(CheckIcon)).toHaveLength(1);
+  expect(
+    valueFor("Text input").findByProps({ className: "sr-only" }).children,
+  ).toEqual(["Reported"]);
+  for (const label of [
+    "Runtime backend",
+    "File size",
+    "Audio input",
+    "Image generation",
+  ]) {
+    const value = valueFor(label);
+    expect(value.findByProps({ "aria-hidden": "true" }).children).toEqual([
+      "–",
+    ]);
+    expect(value.findByProps({ className: "sr-only" }).children).toEqual([
+      "Not reported",
+    ]);
+  }
+});
