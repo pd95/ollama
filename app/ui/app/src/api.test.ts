@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-const { listModels } = vi.hoisted(() => ({ listModels: vi.fn() }));
+const { listModels, showModel } = vi.hoisted(() => ({
+  listModels: vi.fn(),
+  showModel: vi.fn(),
+}));
 vi.mock("./lib/ollama-client", () => ({
-  ollamaClient: { list: listModels },
+  ollamaClient: { list: listModels, show: showModel },
 }));
 
 import {
   fetchConnectUrl,
+  getModelCapabilities,
+  sendMessage,
   getClaudeDesktopAvailableModels,
   getClaudeDesktopModelsSettings,
   getCodexDesktopModelsSettings,
@@ -203,4 +208,57 @@ describe("getClaudeDesktopAvailableModels", () => {
 
     expect(models.map((model) => model.model)).toEqual(["qwen3:8b"]);
   });
+});
+
+describe("model thinking discovery and transport", () => {
+  afterEach(() => {
+    showModel.mockReset();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("preserves backend thinking values for a custom model name", async () => {
+    const thinking = { values: [false, "low", "xhigh"], default: "xhigh" };
+    showModel.mockResolvedValue({
+      capabilities: ["thinking"],
+      thinking,
+      renderer: "apertus1p5",
+    });
+    const metadata = await getModelCapabilities("my-alias");
+    expect(metadata.thinking).toEqual(thinking);
+    expect(metadata.renderer).toBe("apertus1p5");
+    expect(showModel).toHaveBeenCalledWith({ model: "my-alias" });
+  });
+
+  it("does not invent metadata when discovery fails", async () => {
+    showModel.mockRejectedValue(new Error("not downloaded"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect((await getModelCapabilities("unknown")).thinking).toBeUndefined();
+  });
+
+  it.each([false, true, "xhigh", "none", undefined])(
+    "preserves %s in the desktop chat request",
+    async (think) => {
+      const fetch = vi.fn().mockResolvedValue(new Response(""));
+      vi.stubGlobal("fetch", fetch);
+      const stream = sendMessage(
+        "new",
+        "Hello",
+        { model: "my-alias" } as never,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        false,
+        think,
+      );
+      for await (const _event of stream) {
+        /* consume the request */
+      }
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(body.think).toBe(think);
+      expect(Object.hasOwn(body, "think")).toBe(think !== undefined);
+    },
+  );
 });

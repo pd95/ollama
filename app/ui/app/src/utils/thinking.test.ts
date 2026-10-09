@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  resolveThinkingSetting,
+  legacyThinkingControls,
+  parseThinkingControls,
   supportsThinkingLevels,
   supportsThinkingToggle,
 } from "./thinking";
@@ -17,9 +18,7 @@ describe("thinking controls", () => {
 
   it("shows the toggle for Apertus 1.5 model names", () => {
     expect(supportsThinkingToggle("apertus-1.5-mlx:8b-nvfp4")).toBe(true);
-    expect(
-      supportsThinkingToggle("apertus-1.5-mlx:8b-nvfp4-media"),
-    ).toBe(true);
+    expect(supportsThinkingToggle("apertus-1.5-mlx:8b-nvfp4-media")).toBe(true);
     expect(supportsThinkingToggle("Apertus-1.5:8b")).toBe(true);
   });
 
@@ -29,7 +28,26 @@ describe("thinking controls", () => {
 
   it("sends an explicit false value when Apertus 1.5 thinking is disabled", () => {
     expect(
-      resolveThinkingSetting("apertus-1.5-mlx:8b-nvfp4", false, "medium"),
+      legacyThinkingControls("apertus-1.5-mlx:8b-nvfp4", false, "medium")
+        ?.default,
     ).toBe(false);
   });
+});
+
+it.each([
+  undefined,
+  null,
+  {},
+  { values: [], default: false },
+  { values: [false, 1], default: false },
+  { values: [false, true], default: "high" },
+  { values: [""], default: "" },
+])("rejects malformed or absent thinking metadata %j", (value) => {
+  expect(parseThinkingControls(value)).toBeUndefined();
+});
+
+it("accepts mixed values and boolean false defaults without coercion", () => {
+  expect(
+    parseThinkingControls({ values: [false, "none", "xhigh"], default: false }),
+  ).toEqual({ values: [false, "none", "xhigh"], default: false });
 });

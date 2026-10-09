@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { getModelCapabilities } from "@/api";
-import { ModelCapabilitiesResponse } from "@/gotypes";
+import type { ModelCapabilityDetails } from "@/api";
 
 export function useModelCapabilities(modelName: string | undefined) {
-  return useQuery<ModelCapabilitiesResponse, Error>({
+  return useQuery<ModelCapabilityDetails, Error>({
     queryKey: ["modelCapabilities", modelName],
     queryFn: () => {
       return getModelCapabilities(modelName!);
