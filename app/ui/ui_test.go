@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1244,5 +1245,29 @@ func TestSettingsPreservesConcurrentCodexDesktopAcknowledgment(t *testing.T) {
 	}
 	if !response.Settings.CodexDesktopUsed {
 		t.Error("settings response returned a stale acknowledgment")
+	}
+}
+
+func TestBuildChatRequestPreservesThinkingValues(t *testing.T) {
+	server := &Server{}
+	chat := &store.Chat{Messages: []store.Message{{Role: "user", Content: "Hello"}}}
+	for _, value := range []any{false, true, "xhigh", "none"} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			req, err := server.buildChatRequest(chat, "my-alias", value, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire, err := json.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(wire, &body); err != nil {
+				t.Fatal(err)
+			}
+			if body["think"] != value {
+				t.Fatalf("wire think = %#v, want %#v", body["think"], value)
+			}
+		})
 	}
 }
