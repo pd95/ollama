@@ -523,6 +523,10 @@ it("opens near the end with a complete leading row instead of a detached status"
   await act(async () => ref.current!.scrollToTop());
   expect(container.scrollTop).toBe(0);
   expect(parseFloat(container.style.paddingBottom) || 0).toBe(0);
+  // Wrapping after a manual scroll must not jump to the offscreen selected row.
+  heights[1] = 80;
+  await act(async () => resize());
+  expect(container.scrollTop).toBe(0);
 });
 
 it("shows useful model information including its local runtime backend", async () => {

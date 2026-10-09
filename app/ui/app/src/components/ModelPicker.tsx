@@ -434,7 +434,19 @@ export const ModelList = forwardRef<
       const size = sizeKey();
       if (size === previousSize) return;
       previousSize = size;
-      scrollToItem(activeIndexRef.current);
+      const top = container.getBoundingClientRect().top;
+      const items = Array.from(container.children);
+      const active = items[activeIndexRef.current]?.getBoundingClientRect();
+      // Preserve the user's browsing position if the active model is offscreen.
+      const visibleIndex =
+        active &&
+        active.bottom > top &&
+        active.top < top + container.clientHeight
+          ? activeIndexRef.current
+          : items.findIndex(
+              (item) => item.getBoundingClientRect().bottom > top,
+            );
+      scrollToItem(Math.max(0, visibleIndex));
     });
     observer.observe(container);
     Array.from(container.children).forEach((item) => observer.observe(item));

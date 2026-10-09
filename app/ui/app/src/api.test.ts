@@ -81,19 +81,17 @@ describe("picker capability discovery", () => {
     });
     vi.stubGlobal(
       "fetch",
-      vi
-        .fn()
-        .mockResolvedValue(
-          new Response(
-            JSON.stringify({
-              details: { ...details, context_length: undefined },
-              model_info: {
-                "general.architecture": "llama",
-                "llama.context_length": 65536,
-              },
-            }),
-          ),
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            details: { ...details, context_length: undefined },
+            model_info: {
+              "general.architecture": "llama",
+              "llama.context_length": 65536,
+            },
+          }),
         ),
+      ),
     );
     expect((await getModelCapabilities("my-alias")).metadata).toMatchObject({
       format: "gguf",
