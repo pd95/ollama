@@ -10,6 +10,7 @@ vi.mock("./lib/ollama-client", () => ({
 import {
   fetchConnectUrl,
   getModelCapabilities,
+  getModels,
   sendMessage,
   getClaudeDesktopAvailableModels,
   getClaudeDesktopModelsSettings,
@@ -50,6 +51,175 @@ describe("desktop model settings", () => {
       vi.fn().mockResolvedValue(new Response("timed out", { status: 504 })),
     );
     await expect(getCodexDesktopModelsSettings(true)).rejects.toThrow("504");
+  });
+});
+
+describe("picker capability discovery", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("preserves model size and runtime details from list and show metadata", async () => {
+    const details = {
+      format: "gguf",
+      runner: "ggml",
+      parameter_size: "8B",
+      quantization_level: "Q4_K_M",
+      context_length: 32768,
+    };
+    listModels.mockResolvedValue({
+      models: [
+        { name: "my-alias", digest: "one", size: 4_900_000_000, details },
+      ],
+    });
+    const models = await getModels();
+    expect(models[0].size).toBe(4_900_000_000);
+    expect(models[0].metadata).toMatchObject({
+      format: "gguf",
+      runner: "ggml",
+      parameterSize: "8B",
+      quantization: "Q4_K_M",
+      contextLength: 32768,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            details: { ...details, context_length: undefined },
+            model_info: {
+              "general.architecture": "llama",
+              "llama.context_length": 65536,
+            },
+          }),
+        ),
+      ),
+    );
+    expect((await getModelCapabilities("my-alias")).metadata).toMatchObject({
+      format: "gguf",
+      runner: "ggml",
+      contextLength: 65536,
+    });
+  });
+
+  it("preserves exact-tag capability metadata from the model list", async () => {
+    listModels.mockResolvedValue({
+      models: [
+        {
+          name: "my-alias:latest",
+          digest: "one",
+          capabilities: ["completion", "vision", "audio"],
+          details: {},
+        },
+        {
+          name: "my-alias:text",
+          digest: "two",
+          capabilities: ["completion"],
+          details: {},
+        },
+        { name: "unknown:latest", digest: "three", details: {} },
+      ],
+    });
+    const models = await getModels();
+    expect(models.map((model) => model.capabilities)).toEqual([
+      ["completion", "vision", "audio"],
+      ["completion"],
+      undefined,
+    ]);
+    expect(models.map((model) => model.model)).toEqual([
+      "my-alias",
+      "my-alias:text",
+      "unknown",
+    ]);
+  });
+
+  it("rejects failed discovery rather than claiming no capabilities", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(new Response("not downloaded", { status: 404 })),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(getModelCapabilities("unknown")).rejects.toThrow();
+    vi.restoreAllMocks();
+  });
+});
+
+describe("picker model search", () => {
+  afterEach(() => {
+    listModels.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  function installedModels() {
+    return [
+      { name: "apertus:latest", digest: "plain" },
+      {
+        name: "pd95/apertus-mlx:latest",
+        digest: "namespaced",
+        capabilities: ["completion", "vision"],
+      },
+      { name: "pd95/apertus-mini-mlx:1.5b", digest: "mini" },
+      { name: "gemma4:12b", digest: "other" },
+    ];
+  }
+
+  it("finds terms anywhere in installed names, including namespaces and tags", async () => {
+    listModels.mockResolvedValue({ models: installedModels() });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementation(
+          async () =>
+            new Response(JSON.stringify({ error: "not in registry" })),
+        ),
+    );
+    const cases: [string, string[]][] = [
+      ["apert", ["apertus", "pd95/apertus-mlx", "pd95/apertus-mini-mlx:1.5b"]],
+      [
+        " APERT ",
+        ["apertus", "pd95/apertus-mlx", "pd95/apertus-mini-mlx:1.5b"],
+      ],
+      ["MINI-MLX", ["pd95/apertus-mini-mlx:1.5b"]],
+      ["1.5b", ["pd95/apertus-mini-mlx:1.5b"]],
+      ["pd95/", ["pd95/apertus-mlx", "pd95/apertus-mini-mlx:1.5b"]],
+    ];
+    for (const [query, expected] of cases) {
+      expect((await getModels(query)).map((model) => model.model)).toEqual(
+        expected,
+      );
+    }
+  });
+
+  it("keeps exact installed matches and their metadata without registry duplicates", async () => {
+    listModels.mockResolvedValue({ models: installedModels() });
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const models = await getModels("pd95/apertus-mlx");
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({
+      model: "pd95/apertus-mlx",
+      digest: "namespaced",
+      capabilities: ["completion", "vision"],
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps substring matches when adding an available registry model", async () => {
+    listModels.mockResolvedValue({ models: installedModels().slice(1) });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ stale: false }))),
+    );
+    const models = await getModels("apertus");
+    expect(models.map((model) => model.model)).toEqual([
+      "pd95/apertus-mlx",
+      "pd95/apertus-mini-mlx:1.5b",
+      "apertus",
+    ]);
+    expect(models[0].digest).toBe("namespaced");
+    expect(models[0].capabilities).toEqual(["completion", "vision"]);
+    expect(models[2].digest).toBeUndefined();
   });
 });
 
@@ -219,21 +389,38 @@ describe("model thinking discovery and transport", () => {
 
   it("preserves backend thinking values for a custom model name", async () => {
     const thinking = { values: [false, "low", "xhigh"], default: "xhigh" };
-    showModel.mockResolvedValue({
-      capabilities: ["thinking"],
-      thinking,
-      renderer: "apertus1p5",
-    });
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          capabilities: ["thinking"],
+          thinking,
+          renderer: "apertus1p5",
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetch);
     const metadata = await getModelCapabilities("my-alias");
     expect(metadata.thinking).toEqual(thinking);
     expect(metadata.renderer).toBe("apertus1p5");
-    expect(showModel).toHaveBeenCalledWith({ model: "my-alias" });
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:3001/api/show",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ model: "my-alias" }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
   });
 
   it("does not invent metadata when discovery fails", async () => {
-    showModel.mockRejectedValue(new Error("not downloaded"));
     vi.spyOn(console, "error").mockImplementation(() => {});
-    expect((await getModelCapabilities("unknown")).thinking).toBeUndefined();
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(new Response("not downloaded", { status: 404 })),
+    );
+    await expect(getModelCapabilities("unknown")).rejects.toThrow("404");
   });
 
   it.each([false, true, "xhigh", "none", undefined])(
