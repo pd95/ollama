@@ -831,34 +831,6 @@ export default function Settings() {
                 </Field>
               )}
 
-              {!isWindows && (
-                <Field>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex flex-1 items-start space-x-3">
-                      <PowerIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
-                      <div>
-                        <Label>Keep running after Command-Q</Label>
-                        <Description>
-                          Hide the window and keep Ollama available in the menu
-                          bar. The menu-bar Quit Ollama action always exits fully.
-                        </Description>
-                      </div>
-                    </div>
-                    <div className="flex-shrink-0">
-                      <Switch
-                        checked={settings.QuitBehavior === "background"}
-                        onChange={(checked) =>
-                          handleChange(
-                            "QuitBehavior",
-                            checked ? "background" : "quit",
-                          )
-                        }
-                      />
-                    </div>
-                  </div>
-                </Field>
-              )}
-
               {/* MLX Preview / primary update source */}
               <UpdateSettingsControl
                 manualUpdatesOnly={manualUpdatesOnly}

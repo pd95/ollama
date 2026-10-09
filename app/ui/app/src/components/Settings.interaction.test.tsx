@@ -3,6 +3,8 @@ import { forwardRef, useImperativeHandle } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Settings as SettingsType } from "@/gotypes";
 import { Badge } from "./ui/badge";
+import { Field, Label } from "./ui/fieldset";
+import { Switch } from "./ui/switch";
 import Settings from "./Settings";
 
 const mocks = vi.hoisted(() => ({
@@ -252,6 +254,11 @@ describe("Settings reset interactions", () => {
       expect(
         renderer!.root.findAllByProps({ "aria-label": "ChatGPT settings" }),
       ).toHaveLength(0);
+      expect(
+        renderer!.root.findAllByType(Label).filter(
+          (label) => textContent(label) === "Keep running after Command-Q",
+        ),
+      ).toHaveLength(0);
 
       const resetButton = renderer!.root
         .findAllByType("button")
@@ -273,6 +280,71 @@ describe("Settings reset interactions", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it.each(["quit", "background"])(
+    "renders one Command-Q control and saves a change from %s",
+    async (quitBehavior) => {
+      mocks.settings = new SettingsType({
+        ContextLength: 65_536,
+        QuitBehavior: quitBehavior,
+        AutoUpdateEnabled: false,
+      });
+      mocks.updateSettings.mockImplementation(async (settings: SettingsType) => {
+        mocks.settings = settings;
+        return { settings };
+      });
+
+      let renderer;
+      const commandQControl = () => {
+        const fields = renderer!.root.findAllByType(Field).filter((field) =>
+          field.findAllByType(Label).some(
+            (label) => textContent(label) === "Keep running after Command-Q",
+          ),
+        );
+        expect(fields).toHaveLength(1);
+        return fields[0].findByType(Switch);
+      };
+
+      try {
+        await act(async () => {
+          renderer = create(<Settings />);
+          await Promise.resolve();
+        });
+
+        const checked = quitBehavior === "background";
+        expect(commandQControl().props.checked).toBe(checked);
+        await act(async () => {
+          commandQControl().props.onChange(!checked);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(mocks.updateSettings).toHaveBeenCalledOnce();
+        expect(mocks.updateSettings).toHaveBeenCalledWith(
+          expect.objectContaining({
+            QuitBehavior: checked ? "quit" : "background",
+            ContextLength: 65_536,
+            AutoUpdateEnabled: false,
+          }),
+        );
+
+        // A new Settings instance reads the value returned by the settings API.
+        await act(async () => {
+          renderer!.unmount();
+        });
+        await act(async () => {
+          renderer = create(<Settings />);
+          await Promise.resolve();
+        });
+        expect(commandQControl().props.checked).toBe(!checked);
+      } finally {
+        await act(async () => {
+          renderer?.unmount();
+          await Promise.resolve();
+        });
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it("reloads Settings after signing out", async () => {
     let renderer;
