@@ -17,6 +17,12 @@ import type { ModelResponse } from "ollama/browser";
 import { API_BASE, OLLAMA_DOT_COM } from "./lib/config";
 import { parseCapabilities } from "./lib/modelCapabilities";
 import {
+  parseModelMetadata,
+  positiveNumber,
+  metadataText,
+  type ModelMetadata,
+} from "./lib/modelDetails";
+import {
   CapabilityDiscoveryError,
   withCapabilityDiscovery,
 } from "./lib/capabilityRequests";
@@ -30,6 +36,9 @@ declare module "@/gotypes" {
   interface Model {
     isCloud(): boolean;
     capabilities?: string[];
+    metadata?: ModelMetadata;
+    size?: number;
+    remoteHost?: string;
   }
 }
 
@@ -215,6 +224,11 @@ export async function getModels(query?: string): Promise<Model[]> {
             capabilities: parseCapabilities(
               (m as ModelResponse & { capabilities?: unknown }).capabilities,
             ),
+            metadata: parseModelMetadata(m.details),
+            size: positiveNumber(m.size),
+            remoteHost: metadataText(
+              (m as ModelResponse & { remote_host?: unknown }).remote_host,
+            ),
           },
         );
       });
@@ -331,6 +345,8 @@ export async function getClaudeDesktopAvailableModels(
 
 export type ModelCapabilityDetails = {
   capabilities?: string[];
+  metadata?: ModelMetadata;
+  remoteHost?: string;
   thinking?: ThinkingControls;
   renderer?: string;
 };
@@ -350,6 +366,8 @@ export async function getModelCapabilities(
     const discovery = await response.json();
     return {
       capabilities: parseCapabilities(discovery?.capabilities),
+      metadata: parseModelMetadata(discovery?.details, discovery?.model_info),
+      remoteHost: metadataText(discovery?.remote_host),
       thinking: parseThinkingControls(discovery?.thinking),
       renderer:
         typeof discovery?.renderer === "string"

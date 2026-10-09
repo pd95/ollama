@@ -1,5 +1,6 @@
 import {
   useState,
+  useCallback,
   useRef,
   useEffect,
   useId,
@@ -12,10 +13,15 @@ import {
 import { Model } from "@/gotypes";
 import { useSelectedModel } from "@/hooks/useSelectedModel";
 import { useCloudStatus } from "@/hooks/useCloudStatus";
-import { useModelCapabilitySummary } from "@/hooks/useModelCapabilities";
+import {
+  useModelCapabilities,
+  useModelCapabilitySummary,
+} from "@/hooks/useModelCapabilities";
 import { useQueryClient } from "@tanstack/react-query";
 import { getModelUpstreamInfo } from "@/api";
 import { capabilityLabels } from "@/lib/modelCapabilities";
+import { planModelPickerScroll } from "@/lib/modelPickerScroll";
+import { modelRuntimeBackend, formatModelFileSize } from "@/lib/modelDetails";
 import {
   ArrowDownTrayIcon,
   CheckIcon,
@@ -200,11 +206,11 @@ export const ModelPicker = forwardRef<
         <button
           ref={detailsRef}
           type="button"
-          aria-label={`Capabilities of ${selectedModel.model}`}
+          aria-label={`Model information for ${selectedModel.model}`}
           aria-haspopup="dialog"
           aria-expanded={panel === "details"}
           aria-controls={panel === "details" ? detailsId : undefined}
-          title="Model capabilities"
+          title="Model information"
           disabled={isDisabled}
           onClick={() => togglePanel("details")}
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-neutral-500 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer disabled:cursor-default"
@@ -219,8 +225,8 @@ export const ModelPicker = forwardRef<
           role="dialog"
           tabIndex={-1}
           aria-modal="false"
-          aria-label={`Capabilities of ${selectedModel.model}`}
-          className={`${panelClass} p-4`}
+          aria-label={`Model information for ${selectedModel.model}`}
+          className={`${panelClass} max-h-[min(32rem,calc(100vh-8rem))] overflow-y-auto p-4`}
         >
           <ModelDetails model={selectedModel} />
         </div>
@@ -262,19 +268,62 @@ export const ModelPicker = forwardRef<
 });
 
 function ModelDetails({ model }: { model: Model }) {
-  const { capabilities, isLoading, refetch } = useModelCapabilitySummary(
-    model,
-    true,
-  );
+  const query = useModelCapabilities(model.model);
+  const capabilities = model.capabilities ?? query.data?.capabilities;
+  const metadata = { ...model.metadata, ...query.data?.metadata };
+  const remoteHost = model.remoteHost ?? query.data?.remoteHost;
+  const remote = model.isCloud() || !!remoteHost;
+  const contextLimit = metadata.contextLength?.toLocaleString("en-US");
+  const details = [
+    { label: "Runtime backend", value: modelRuntimeBackend(metadata, remote) },
+    {
+      label: "Location",
+      value: model.isCloud()
+        ? "Cloud"
+        : remoteHost
+          ? "Remote server"
+          : model.digest
+            ? "Local"
+            : "Not installed",
+    },
+    {
+      label: "File size",
+      value: remote ? undefined : formatModelFileSize(model.size),
+    },
+    { label: "Parameters", value: metadata.parameterSize },
+    { label: "Quantization", value: metadata.quantization },
+    {
+      label: "Context limit",
+      value: contextLimit ? `${contextLimit} tokens` : undefined,
+    },
+  ];
   return (
     <>
       <p className="mb-3 break-all font-medium">{model.model}</p>
+      <dl className="space-y-1 text-sm">
+        {details.map(({ label, value }) => (
+          <div key={label} className="flex justify-between gap-4">
+            <dt className="shrink-0">{label}</dt>
+            <dd className="text-right text-neutral-500 dark:text-neutral-400">
+              {value ?? (query.isFetching ? "Loading…" : "Not reported")}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      {contextLimit && (
+        <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
+          Model context limit; the chat may use less.
+        </p>
+      )}
+      <h2 className="mt-4 mb-2 text-sm font-medium">
+        Capabilities reported by the model
+      </h2>
       {capabilities === undefined && (
         <p
           role="status"
           className="mb-2 text-sm text-neutral-500 dark:text-neutral-400"
         >
-          {isLoading ? "Loading capabilities…" : "Capabilities unknown"}
+          {query.isFetching ? "Loading capabilities…" : "Capabilities unknown"}
         </p>
       )}
       <dl className="space-y-1 text-sm">
@@ -285,16 +334,16 @@ function ModelDetails({ model }: { model: Model }) {
               {capabilities === undefined
                 ? "Unknown"
                 : capabilities.includes(capability)
-                  ? "Advertised"
-                  : "Not advertised"}
+                  ? "Reported"
+                  : "Not reported"}
             </dd>
           </div>
         ))}
       </dl>
-      {capabilities === undefined && !isLoading && (
+      {(query.isError || (capabilities === undefined && !query.isFetching)) && (
         <button
           type="button"
-          onClick={() => void refetch()}
+          onClick={() => void query.refetch()}
           className="mt-3 text-sm text-blue-600 dark:text-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
           Retry discovery
@@ -338,26 +387,59 @@ export const ModelList = forwardRef<
       (model) => model.model === (highlightedName ?? selectedModel?.model),
     ),
   );
+  const activeIndexRef = useRef(highlightedIndex);
 
-  const scrollToItem = (index: number) => {
+  const scrollToItem = useCallback((index: number) => {
     const container = scrollContainerRef.current;
-    const item = container?.children[index] as HTMLElement | undefined;
-    if (!container || !item) return;
+    if (!container) return;
     const containerTop = container.getBoundingClientRect().top;
-    const itemBounds = item.getBoundingClientRect();
-    if (itemBounds.top < containerTop)
-      container.scrollTop += itemBounds.top - containerTop;
-    else if (itemBounds.bottom > containerTop + container.clientHeight)
-      container.scrollTop +=
-        itemBounds.bottom - containerTop - container.clientHeight;
+    const rows = Array.from(container.children).map((item) => {
+      const bounds = item.getBoundingClientRect();
+      return {
+        top: bounds.top - containerTop + container.scrollTop,
+        bottom: bounds.bottom - containerTop + container.scrollTop,
+      };
+    });
+    const plan = planModelPickerScroll(
+      rows,
+      index,
+      container.scrollTop,
+      container.clientHeight,
+    );
+    container.style.paddingBottom = `${plan.bottomPadding}px`;
+    container.scrollTop = plan.scrollTop;
     setScrolledFromTop(container.scrollTop > 0);
-  };
+  }, []);
 
   useEffect(() => {
+    activeIndexRef.current = highlightedIndex;
     onActiveChange?.(
       models.length ? `${listId}-option-${highlightedIndex}` : undefined,
     );
   }, [models.length, highlightedIndex, listId, onActiveChange]);
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container || !isOpen || typeof ResizeObserver === "undefined") return;
+    const sizeKey = () =>
+      [
+        container.clientWidth,
+        container.clientHeight,
+        ...Array.from(container.children).map(
+          (item) => item.getBoundingClientRect().height,
+        ),
+      ].join(",");
+    let previousSize = sizeKey();
+    const observer = new ResizeObserver(() => {
+      const size = sizeKey();
+      if (size === previousSize) return;
+      previousSize = size;
+      scrollToItem(activeIndexRef.current);
+    });
+    observer.observe(container);
+    Array.from(container.children).forEach((item) => observer.observe(item));
+    return () => observer.disconnect();
+  }, [models, isOpen, scrollToItem]);
 
   const handleKeyDown = (event: KeyboardEvent) => {
     if (!isOpen || !models.length) return;
@@ -369,6 +451,7 @@ export const ModelList = forwardRef<
       event.preventDefault();
       const offset = event.key === "ArrowDown" ? 1 : -1;
       const next = (highlightedIndex + offset + models.length) % models.length;
+      activeIndexRef.current = next;
       setHighlightedName(models[next].model);
       scrollToItem(next);
     }
@@ -377,7 +460,10 @@ export const ModelList = forwardRef<
   useImperativeHandle(ref, () => ({
     scrollToSelectedModel: () => scrollToItem(highlightedIndex),
     scrollToTop: () => {
-      if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.style.paddingBottom = "";
+        scrollContainerRef.current.scrollTop = 0;
+      }
       setScrolledFromTop(false);
     },
     handleKeyDown,

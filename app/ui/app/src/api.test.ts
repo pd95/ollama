@@ -55,6 +55,53 @@ describe("desktop model settings", () => {
 });
 
 describe("picker capability discovery", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("preserves model size and runtime details from list and show metadata", async () => {
+    const details = {
+      format: "gguf",
+      runner: "ggml",
+      parameter_size: "8B",
+      quantization_level: "Q4_K_M",
+      context_length: 32768,
+    };
+    listModels.mockResolvedValue({
+      models: [
+        { name: "my-alias", digest: "one", size: 4_900_000_000, details },
+      ],
+    });
+    const models = await getModels();
+    expect(models[0].size).toBe(4_900_000_000);
+    expect(models[0].metadata).toMatchObject({
+      format: "gguf",
+      runner: "ggml",
+      parameterSize: "8B",
+      quantization: "Q4_K_M",
+      contextLength: 32768,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              details: { ...details, context_length: undefined },
+              model_info: {
+                "general.architecture": "llama",
+                "llama.context_length": 65536,
+              },
+            }),
+          ),
+        ),
+    );
+    expect((await getModelCapabilities("my-alias")).metadata).toMatchObject({
+      format: "gguf",
+      runner: "ggml",
+      contextLength: 65536,
+    });
+  });
+
   it("preserves exact-tag capability metadata from the model list", async () => {
     listModels.mockResolvedValue({
       models: [

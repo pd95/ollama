@@ -45,6 +45,7 @@ function mockNode(element: any) {
     props: element.props,
     children: [],
     scrollTop: 0,
+    style: { paddingBottom: "" },
     clientHeight: 0,
     getBoundingClientRect: () => ({ top: 0, bottom: 0 }),
     contains: (target: any) => hostNodes.has(target),
@@ -241,13 +242,13 @@ it("opens labeled details, restores focus on Escape, and keeps the panels exclus
   const detailsRef = createRef<HTMLButtonElement>();
   await mount(<ModelPicker detailsButtonRef={detailsRef} />);
   const detailsButton = renderer.root.findByProps({
-    "aria-label": "Capabilities of my-alias",
+    "aria-label": "Model information for my-alias",
   });
   await act(async () => detailsButton.props.onClick());
   expect(
     renderer.root.findByProps({ role: "dialog" }).props["aria-label"],
-  ).toBe("Capabilities of my-alias");
-  expect(content()).toContain("Not advertised");
+  ).toBe("Model information for my-alias");
+  expect(content()).toContain("Not reported");
   const dialogNode = [...hostNodes].find(
     (node) => node.props.role === "dialog",
   );
@@ -287,7 +288,7 @@ it("shows an explicit empty list and closes details on an outside click", async 
   expect(content()).not.toContain("Capabilities unknown");
   await act(async () =>
     renderer.root
-      .findByProps({ "aria-label": "Capabilities of my-alias" })
+      .findByProps({ "aria-label": "Model information for my-alias" })
       .props.onClick(),
   );
   const outside = documentState.addEventListener.mock.calls.find(
@@ -376,9 +377,9 @@ it("reveals whole rows without moving visible rows or including the search heade
       .findByProps({ role: "listbox" })
       .props.onKeyDown(key("ArrowDown")),
   );
-  expect(container.scrollTop).toBe(20);
+  expect(container.scrollTop).toBe(60);
   await act(async () => ref.current!.scrollToSelectedModel());
-  expect(container.scrollTop).toBe(20);
+  expect(container.scrollTop).toBe(60);
 });
 
 it("shows a continuation cue only while earlier rows are hidden", async () => {
@@ -437,4 +438,132 @@ it("keeps the selected checkmark on its model while another row is highlighted",
     true,
     false,
   ]);
+});
+
+it("opens near the end with a complete leading row instead of a detached status", async () => {
+  let resize!: () => void;
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: () => void) {
+        resize = callback;
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  state.models = Array.from({ length: 7 }, (_, index) =>
+    Object.assign(new Model({ model: `model-${index}`, digest: `${index}` }), {
+      capabilities: ["completion"],
+      isCloud: () => false,
+    }),
+  );
+  const ref = createRef<React.ComponentRef<typeof ModelList>>();
+  await mount(
+    <ModelList
+      ref={ref}
+      models={state.models}
+      selectedModel={state.models[6]}
+      onModelSelect={vi.fn()}
+      cloudDisabled={false}
+      isOpen
+    />,
+  );
+  const container = [...hostNodes].find(
+    (node) => node.props.role === "listbox",
+  );
+  const rows = [...hostNodes].filter((node) => node.props.role === "option");
+  container.children = rows;
+  container.clientHeight = 320;
+  container.getBoundingClientRect = () => ({ top: 80, bottom: 400 });
+  let scrollTop = 0;
+  const heights = Array(7).fill(60);
+  Object.defineProperty(container, "scrollTop", {
+    get: () => scrollTop,
+    set: (value) => {
+      const padding = parseFloat(container.style.paddingBottom) || 0;
+      const contentHeight = heights.reduce((sum, height) => sum + height, 0);
+      scrollTop = Math.max(0, Math.min(value, contentHeight + padding - 320));
+    },
+  });
+  rows.forEach((row, index) => {
+    row.getBoundingClientRect = () => ({
+      top:
+        80 +
+        heights.slice(0, index).reduce((sum, height) => sum + height, 0) -
+        container.scrollTop,
+      bottom:
+        80 +
+        heights.slice(0, index + 1).reduce((sum, height) => sum + height, 0) -
+        container.scrollTop,
+      height: heights[index],
+    });
+  });
+  await act(async () => ref.current!.scrollToSelectedModel());
+  expect(container.scrollTop).toBe(120);
+  expect(parseFloat(container.style.paddingBottom)).toBe(20);
+  expect(rows[2].getBoundingClientRect().top).toBe(80);
+  expect(rows[6].getBoundingClientRect().bottom).toBeLessThanOrEqual(400);
+  await act(async () => resize());
+  heights[0] = 100;
+  heights[2] = 80;
+  await act(async () => resize());
+  expect(container.scrollTop).toBe(160);
+  expect(parseFloat(container.style.paddingBottom)).toBe(0);
+  expect(rows[2].getBoundingClientRect().top).toBe(80);
+  expect(rows[6].getBoundingClientRect().bottom).toBeLessThanOrEqual(400);
+  // Wheel scrolling remains continuous, including positions between row starts.
+  container.scrollTop = 110;
+  await act(async () =>
+    renderer.root
+      .findByProps({ role: "listbox" })
+      .props.onScroll({ currentTarget: container }),
+  );
+  expect(container.scrollTop).toBe(110);
+  await act(async () => ref.current!.scrollToTop());
+  expect(container.scrollTop).toBe(0);
+  expect(parseFloat(container.style.paddingBottom) || 0).toBe(0);
+});
+
+it("shows useful model information including its local runtime backend", async () => {
+  Object.assign(state.models[0], {
+    size: 8_100_000_000,
+    metadata: {
+      format: "safetensors",
+      runner: "mlx",
+      parameterSize: "8.1B",
+      quantization: "NVFP4",
+      contextLength: 65536,
+    },
+  });
+  await mount(<ModelPicker />);
+  await act(async () =>
+    renderer.root.findByProps({ title: "Model information" }).props.onClick(),
+  );
+  expect(content()).toContain("MLX");
+  expect(content()).toContain("8.1 GB");
+  expect(content()).toContain("8.1B");
+  expect(content()).toContain("NVFP4");
+  expect(content()).toContain("65,536 tokens");
+  expect(content()).toContain("Local");
+  expect(content()).toContain("Reported");
+});
+
+it("does not present a remote model's metadata as a local backend or file size", async () => {
+  Object.assign(state.models[0], {
+    size: 8_100_000_000,
+    metadata: { format: "gguf" },
+  });
+  vi.mocked(getModelCapabilities).mockResolvedValue({
+    capabilities: ["completion"],
+    remoteHost: "https://example.test",
+  });
+  await mount(<ModelPicker />);
+  await act(async () =>
+    renderer.root.findByProps({ title: "Model information" }).props.onClick(),
+  );
+  expect(content()).toContain("Remote server");
+  expect(content()).not.toContain("llama.cpp");
+  expect(content()).not.toContain("8.1 GB");
+  expect(content()).toContain("Not reported");
 });
