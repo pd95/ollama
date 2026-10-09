@@ -18,6 +18,7 @@ import { getModelUpstreamInfo } from "@/api";
 import { capabilityLabels } from "@/lib/modelCapabilities";
 import {
   ArrowDownTrayIcon,
+  CheckIcon,
   CloudIcon,
   InformationCircleIcon,
 } from "@heroicons/react/24/outline";
@@ -329,6 +330,7 @@ export const ModelList = forwardRef<
   const id = useId();
   const listId = providedListId || `${id}-models`;
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [scrolledFromTop, setScrolledFromTop] = useState(false);
   const [highlightedName, setHighlightedName] = useState<string>();
   const highlightedIndex = Math.max(
     0,
@@ -340,9 +342,15 @@ export const ModelList = forwardRef<
   const scrollToItem = (index: number) => {
     const container = scrollContainerRef.current;
     const item = container?.children[index] as HTMLElement | undefined;
-    if (container && item)
-      container.scrollTop =
-        item.offsetTop - container.clientHeight / 2 + item.clientHeight / 2;
+    if (!container || !item) return;
+    const containerTop = container.getBoundingClientRect().top;
+    const itemBounds = item.getBoundingClientRect();
+    if (itemBounds.top < containerTop)
+      container.scrollTop += itemBounds.top - containerTop;
+    else if (itemBounds.bottom > containerTop + container.clientHeight)
+      container.scrollTop +=
+        itemBounds.bottom - containerTop - container.clientHeight;
+    setScrolledFromTop(container.scrollTop > 0);
   };
 
   useEffect(() => {
@@ -370,38 +378,50 @@ export const ModelList = forwardRef<
     scrollToSelectedModel: () => scrollToItem(highlightedIndex),
     scrollToTop: () => {
       if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
+      setScrolledFromTop(false);
     },
     handleKeyDown,
   }));
 
   return (
-    <div
-      ref={scrollContainerRef}
-      id={listId}
-      role="listbox"
-      aria-label="Models"
-      onKeyDown={handleKeyDown}
-      className="max-h-80 overflow-y-auto overflow-x-hidden"
-    >
-      {models.length === 0 ? (
-        <div className="px-3 py-2 text-neutral-500 dark:text-neutral-400">
-          No models found
-        </div>
-      ) : (
-        models.map((model, index) => (
-          <ModelOption
-            key={`${model.model}-${model.digest || "no-digest"}`}
-            id={`${listId}-option-${index}`}
-            model={model}
-            selected={selectedModel?.model === model.model}
-            highlighted={highlightedIndex === index}
-            cloudDisabled={cloudDisabled}
-            isOpen={isOpen}
-            scrollRoot={scrollContainerRef}
-            onSelect={() => onModelSelect(model)}
-            onHighlight={() => setHighlightedName(model.model)}
-          />
-        ))
+    <div className="relative">
+      <div
+        ref={scrollContainerRef}
+        id={listId}
+        role="listbox"
+        aria-label="Models"
+        onKeyDown={handleKeyDown}
+        onScroll={(event) =>
+          setScrolledFromTop(event.currentTarget.scrollTop > 0)
+        }
+        className="max-h-80 overflow-y-auto overflow-x-hidden"
+      >
+        {models.length === 0 ? (
+          <div className="px-3 py-2 text-neutral-500 dark:text-neutral-400">
+            No models found
+          </div>
+        ) : (
+          models.map((model, index) => (
+            <ModelOption
+              key={`${model.model}-${model.digest || "no-digest"}`}
+              id={`${listId}-option-${index}`}
+              model={model}
+              selected={selectedModel?.model === model.model}
+              highlighted={highlightedIndex === index}
+              cloudDisabled={cloudDisabled}
+              isOpen={isOpen}
+              scrollRoot={scrollContainerRef}
+              onSelect={() => onModelSelect(model)}
+              onHighlight={() => setHighlightedName(model.model)}
+            />
+          ))
+        )}
+      </div>
+      {scrolledFromTop && (
+        <div
+          aria-hidden={true}
+          className="pointer-events-none absolute inset-x-0 top-0 h-2 bg-gradient-to-b from-black/10 to-transparent dark:from-black/30"
+        />
       )}
     </div>
   );
@@ -456,7 +476,7 @@ function ModelOption({
       tabIndex={-1}
       onClick={onSelect}
       onMouseEnter={onHighlight}
-      className={`block w-full px-3 py-2 text-left hover:bg-neutral-100 dark:hover:bg-neutral-700/60 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 cursor-pointer ${highlighted || selected ? "bg-neutral-100 dark:bg-neutral-700/60" : ""}`}
+      className={`block w-full px-3 py-2 text-left hover:bg-neutral-100 dark:hover:bg-neutral-700/60 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 cursor-pointer ${highlighted ? "bg-neutral-100 dark:bg-neutral-700/60" : ""}`}
     >
       <span className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate" title={model.model}>
@@ -478,18 +498,22 @@ function ModelOption({
             role="img"
           />
         )}
+        <span className="h-4 w-4 shrink-0">
+          {selected && <CheckIcon className="h-4 w-4" aria-hidden="true" />}
+        </span>
       </span>
-      <span className="mt-1 flex flex-wrap gap-1 text-[11px] leading-4 text-neutral-600 dark:text-neutral-300">
+      <span className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-[11px] leading-4 text-neutral-600 dark:text-neutral-300">
         {capabilities === undefined ? (
           <span>
             {isLoading ? "Loading capabilities…" : "Capabilities unknown"}
           </span>
         ) : badges.length ? (
-          badges.map(({ capability, label }) => (
+          badges.map(({ capability, label }, index) => (
             <span
               key={capability}
-              className="rounded px-1.5 bg-neutral-100 dark:bg-neutral-700"
+              className="inline-flex items-center gap-2 whitespace-nowrap"
             >
+              {index > 0 && <span aria-hidden="true">·</span>}
               {label}
             </span>
           ))

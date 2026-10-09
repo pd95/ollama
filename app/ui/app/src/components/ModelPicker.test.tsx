@@ -10,6 +10,7 @@ import { Model } from "@/gotypes";
 import { ModelList, ModelPicker } from "./ModelPicker";
 import { getModelCapabilities } from "@/api";
 import { createRef } from "react";
+import { CheckIcon } from "@heroicons/react/24/outline";
 
 const state = vi.hoisted(() => ({ models: [] as any[], setSettings: vi.fn() }));
 vi.mock("@/hooks/useModels", () => ({
@@ -44,6 +45,8 @@ function mockNode(element: any) {
     props: element.props,
     children: [],
     scrollTop: 0,
+    clientHeight: 0,
+    getBoundingClientRect: () => ({ top: 0, bottom: 0 }),
     contains: (target: any) => hostNodes.has(target),
     focus: vi.fn(() => {
       documentState.activeElement = node;
@@ -324,4 +327,114 @@ it("does not label unfamiliar advertised capabilities as an empty list", async (
   );
   expect(content()).toContain("Other capabilities advertised");
   expect(content()).not.toContain("No advertised capabilities");
+});
+
+it("reveals whole rows without moving visible rows or including the search header", async () => {
+  state.models.push(
+    Object.assign(new Model({ model: "second", digest: "two" }), {
+      capabilities: ["completion"],
+      isCloud: () => false,
+    }),
+  );
+  const ref = createRef<React.ComponentRef<typeof ModelList>>();
+  await mount(
+    <ModelList
+      ref={ref}
+      models={state.models}
+      selectedModel={state.models[0]}
+      onModelSelect={vi.fn()}
+      cloudDisabled={false}
+      isOpen
+    />,
+  );
+  const container = [...hostNodes].find(
+    (node) => node.props.role === "listbox",
+  );
+  const rows = [...hostNodes].filter((node) => node.props.role === "option");
+  container.children = rows;
+  container.clientHeight = 120;
+  container.getBoundingClientRect = () => ({ top: 80, bottom: 200 });
+  // The list starts below a search header; offsetTop belongs to that ancestor.
+  rows.forEach((row, index) => {
+    row.offsetTop = 80 + index * 60;
+    row.clientHeight = 60;
+    row.getBoundingClientRect = () => ({
+      top: 80 + index * 60 - container.scrollTop,
+      bottom: 140 + index * 60 - container.scrollTop,
+    });
+  });
+  await act(async () => ref.current!.scrollToSelectedModel());
+  expect(container.scrollTop).toBe(0);
+  container.scrollTop = 30;
+  await act(async () => ref.current!.scrollToSelectedModel());
+  expect(container.scrollTop).toBe(0);
+  // A shorter viewport clips the second row's capability line.
+  container.clientHeight = 100;
+  container.getBoundingClientRect = () => ({ top: 80, bottom: 180 });
+  await act(async () =>
+    renderer.root
+      .findByProps({ role: "listbox" })
+      .props.onKeyDown(key("ArrowDown")),
+  );
+  expect(container.scrollTop).toBe(20);
+  await act(async () => ref.current!.scrollToSelectedModel());
+  expect(container.scrollTop).toBe(20);
+});
+
+it("shows a continuation cue only while earlier rows are hidden", async () => {
+  await mount(
+    <ModelList
+      models={state.models}
+      selectedModel={state.models[0]}
+      onModelSelect={vi.fn()}
+      cloudDisabled={false}
+      isOpen
+    />,
+  );
+  const cue = () =>
+    renderer.root
+      .findAllByType("div")
+      .filter((node) => node.props["aria-hidden"] === true);
+  expect(cue()).toHaveLength(0);
+  await act(async () =>
+    renderer.root.findByProps({ role: "listbox" }).props.onScroll({
+      currentTarget: { scrollTop: 30 },
+    }),
+  );
+  expect(cue()).toHaveLength(1);
+  expect(cue()[0].props["aria-hidden"]).toBe(true);
+  await act(async () =>
+    renderer.root.findByProps({ role: "listbox" }).props.onScroll({
+      currentTarget: { scrollTop: 0 },
+    }),
+  );
+  expect(cue()).toHaveLength(0);
+});
+
+it("keeps the selected checkmark on its model while another row is highlighted", async () => {
+  state.models.push(
+    Object.assign(new Model({ model: "second", digest: "two" }), {
+      capabilities: ["completion"],
+      isCloud: () => false,
+    }),
+  );
+  await mount(
+    <ModelList
+      models={state.models}
+      selectedModel={state.models[0]}
+      onModelSelect={vi.fn()}
+      cloudDisabled={false}
+      isOpen
+    />,
+  );
+  const rows = () => renderer.root.findAllByProps({ role: "option" });
+  expect(rows()[0].findAllByType(CheckIcon)).toHaveLength(1);
+  expect(rows()[1].findAllByType(CheckIcon)).toHaveLength(0);
+  await act(async () => rows()[1].props.onMouseEnter());
+  expect(rows()[0].findAllByType(CheckIcon)).toHaveLength(1);
+  expect(rows()[1].findAllByType(CheckIcon)).toHaveLength(0);
+  expect(rows().map((row) => row.props["aria-selected"])).toEqual([
+    true,
+    false,
+  ]);
 });
