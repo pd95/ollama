@@ -13,6 +13,10 @@ export const Route = createFileRoute("/")({
       throw redirect({ to: "/onboarding" });
     }
 
+    if (settingsData.settings.LastHomeView === "apps") {
+      throw redirect({ to: "/connect" });
+    }
+
     const chatId = homeChatId();
 
     throw redirect({

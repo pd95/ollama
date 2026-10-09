@@ -132,18 +132,25 @@ bool chownWithAuthorization(const char *user) {
     return true;
 }
 
+static const char *verificationError(NSString *message) {
+    appLogDebug(message);
+    return strdup([message UTF8String]);
+}
+
 // nil if bundle is good, error string otherwise
-const char *verifyExtractedBundle(char *path) {
+const char *verifyExtractedBundle(char *path, char *bundleID,
+                                  char *marketingVersion, char *buildVersion,
+                                  char *teamID, bool requirePinnedIdentity) {
     NSString *p = [NSString stringWithFormat:@"%s", path];
 
     appLogDebug([NSString stringWithFormat:@"verifyExtractedBundle: %@", p]);
     SecStaticCodeRef staticCode = NULL;
 
-    OSStatus result = SecStaticCodeCreateWithPath(
-        CFURLCreateFromFileSystemRepresentation(
-            (__bridge CFAllocatorRef)(kCFAllocatorSystemDefault),
-            (const UInt8 *)path, strlen(path), kCFStringEncodingMacRoman),
-        kSecCSDefaultFlags, &staticCode);
+    CFURLRef bundleURL = CFURLCreateFromFileSystemRepresentation(
+        kCFAllocatorDefault, (const UInt8 *)path, strlen(path), true);
+    OSStatus result = SecStaticCodeCreateWithPath(bundleURL,
+                                                   kSecCSDefaultFlags,
+                                                   &staticCode);
 
     if (result != noErr) {
         NSString *failureReason =
@@ -151,16 +158,59 @@ const char *verifyExtractedBundle(char *path) {
         appLogDebug([NSString
             stringWithFormat:@"Failed to get static code for bundle: %@",
                              failureReason]);
-        if (staticCode != NULL)
-            CFRelease(staticCode);
-        return [[NSString
+        if (bundleURL != NULL) CFRelease(bundleURL);
+        if (staticCode != NULL) CFRelease(staticCode);
+        return verificationError([NSString
             stringWithFormat:@"Failed to get static code for bundle:  %@",
-                             failureReason] UTF8String];
+                             failureReason]);
+    }
+
+    SecRequirementRef requirement = NULL;
+    if (requirePinnedIdentity) {
+        NSString *expectedBundleID = [NSString stringWithUTF8String:bundleID];
+        NSString *expectedMarketing = [NSString stringWithUTF8String:marketingVersion];
+        NSString *expectedBuild = [NSString stringWithUTF8String:buildVersion];
+        NSString *expectedTeam = [NSString stringWithUTF8String:teamID];
+        NSBundle *bundle = [NSBundle bundleWithPath:p];
+        NSString *actualBundleID = [bundle objectForInfoDictionaryKey:@"CFBundleIdentifier"];
+        NSString *actualMarketing = [bundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+        NSString *actualBuild = [bundle objectForInfoDictionaryKey:@"CFBundleVersion"];
+        if (bundle == nil || ![actualBundleID isEqualToString:expectedBundleID] ||
+            ![actualMarketing isEqualToString:expectedMarketing] ||
+            ![actualBuild isEqualToString:expectedBuild]) {
+            if (bundleURL != NULL) CFRelease(bundleURL);
+            CFRelease(staticCode);
+            return verificationError([NSString stringWithFormat:
+                @"Bundle identity mismatch (identifier=%@, version=%@, build=%@)",
+                actualBundleID, actualMarketing, actualBuild]);
+        }
+
+        NSString *requirementText = [NSString stringWithFormat:
+            @"anchor apple generic and identifier \"%@\" and "
+             "certificate 1[field.1.2.840.113635.100.6.2.6] exists and "
+             "certificate leaf[field.1.2.840.113635.100.6.1.13] exists and "
+             "certificate leaf[subject.OU] = \"%@\"",
+             expectedBundleID, expectedTeam];
+        result = SecRequirementCreateWithString(
+            (__bridge CFStringRef)requirementText, kSecCSDefaultFlags,
+            &requirement);
+        if (result != noErr) {
+            NSString *failureReason = CFBridgingRelease(
+                SecCopyErrorMessageString(result, NULL));
+            if (bundleURL != NULL) CFRelease(bundleURL);
+            CFRelease(staticCode);
+            return verificationError([NSString stringWithFormat:
+                @"Failed to create pinned signing requirement: %@",
+                failureReason]);
+        }
     }
 
     CFErrorRef validityError = NULL;
     result = SecStaticCodeCheckValidityWithErrors(
-        staticCode, kSecCSCheckAllArchitectures, NULL, &validityError);
+        staticCode,
+        kSecCSCheckAllArchitectures | kSecCSCheckNestedCode |
+            kSecCSStrictValidate,
+        requirement, &validityError);
 
     if (result != noErr) {
         NSString *failureReason =
@@ -171,12 +221,20 @@ const char *verifyExtractedBundle(char *path) {
 
         // TODO - consider extracting additional details from validityError
 
-        if (validityError != NULL)
-            CFRelease(validityError);
-        return [[NSString
+        if (validityError != NULL) CFRelease(validityError);
+        if (requirement != NULL) CFRelease(requirement);
+        if (bundleURL != NULL) CFRelease(bundleURL);
+        CFRelease(staticCode);
+        return verificationError([NSString
             stringWithFormat:@"Signatures did not verify on bundle: %@",
-                             failureReason] UTF8String];
+                             failureReason]);
     }
+
+    if (validityError != NULL) CFRelease(validityError);
+    if (requirement != NULL) CFRelease(requirement);
+    CFRelease(staticCode);
+
+    if (bundleURL != NULL) CFRelease(bundleURL);
     appLogDebug([NSString stringWithFormat:@"bundle passed verification"]);
     return NULL;
 }

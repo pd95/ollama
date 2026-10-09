@@ -55,7 +55,7 @@ func TestLiveAppUpdate(t *testing.T) {
 	UpdateStageDir = filepath.Join(t.TempDir(), "updates")
 	UpdateDownloaded = false
 	verifyCalled := false
-	VerifyDownload = func() error {
+	VerifyDownload = func(_ string) error {
 		verifyCalled = true
 		return verifyDownload()
 	}
@@ -63,7 +63,10 @@ func TestLiveAppUpdate(t *testing.T) {
 	updater := &Updater{Store: &store.Store{DBPath: filepath.Join(t.TempDir(), "db.sqlite")}}
 	defer updater.Store.Close()
 
-	available, updateResp := updater.checkForUpdate(ctx)
+	available, updateResp, err := updater.checkForUpdate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !available {
 		t.Fatalf("expected production update check to offer an update for spoofed version %s", spoofedVersion)
 	}

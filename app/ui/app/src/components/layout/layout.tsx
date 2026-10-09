@@ -2,8 +2,8 @@ import { Link } from "@tanstack/react-router";
 import { ChatIcon } from "@/components/ChatIcon";
 import { isWindowsPlatform } from "@/lib/platform";
 import { useState } from "react";
-
-let sessionSidebarOpen = false;
+import { useEffect } from "react";
+import { useSettings } from "@/hooks/useSettings";
 
 export function SidebarLayout({
   sidebar,
@@ -13,13 +13,28 @@ export function SidebarLayout({
   sidebar: React.ReactNode;
   title?: string;
 }>) {
-  const [sidebarOpen, setSidebarOpen] = useState(sessionSidebarOpen);
+  const { settingsData, setSettings } = useSettings();
+  const [sidebarOpen, setSidebarOpen] = useState<boolean | null>(null);
   const isWindows = isWindowsPlatform();
 
+  useEffect(() => {
+    if (sidebarOpen === null && settingsData) {
+      setSidebarOpen(settingsData.SidebarOpen);
+    }
+  }, [settingsData, sidebarOpen]);
+
   const toggleSidebar = () => {
-    sessionSidebarOpen = !sidebarOpen;
-    setSidebarOpen(sessionSidebarOpen);
+    if (sidebarOpen === null) return;
+    const next = !sidebarOpen;
+    setSidebarOpen(next);
+    setSettings({ SidebarOpen: next }).catch(() => {
+      setSidebarOpen(!next);
+    });
   };
+
+  if (sidebarOpen === null) {
+    return <div className="h-screen w-full dark:bg-neutral-900" />;
+  }
 
   return (
     <div className="flex h-screen w-full overflow-hidden dark:bg-neutral-900">
