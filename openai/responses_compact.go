@@ -505,12 +505,12 @@ func newResponsesCompactionPlan(req rawResponsesRequest, rawItems []json.RawMess
 		return nil, errors.New("compaction input is empty")
 	}
 
-	items := make([]CompactionTranscriptItem, 0, len(rawItems))
-	for i, raw := range rawItems {
-		item, err := unmarshalResponsesInputItem(raw)
-		if err != nil {
-			return nil, fmt.Errorf("input[%d]: %w", i, err)
-		}
+	parsed, err := unmarshalResponsesInputItems(rawItems)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]CompactionTranscriptItem, 0, len(parsed))
+	for i, item := range parsed {
 		message, kind, err := compactionMessage(item)
 		if err != nil {
 			return nil, fmt.Errorf("input[%d]: %w", i, err)
@@ -583,7 +583,8 @@ func compactionMessage(item ResponsesInputItem) (api.Message, string, error) {
 		}
 		return api.Message{Role: "assistant", ToolCalls: []api.ToolCall{call}}, "custom_tool_call", nil
 	case ResponsesCustomToolCallOutput:
-		return api.Message{Role: "tool", Content: value.Output, ToolCallID: value.CallID}, "custom_tool_call_output", nil
+		message, _, err := compactionMessage(ResponsesFunctionCallOutput(value))
+		return message, "custom_tool_call_output", err
 	case ResponsesToolSearchCall:
 		return api.Message{Role: "assistant", ToolCalls: []api.ToolCall{{
 			ID: value.CallID, Function: api.ToolCallFunction{Name: "tool_search", Arguments: value.Arguments},

@@ -277,10 +277,10 @@ type ResponsesCustomToolCall struct {
 
 func (ResponsesCustomToolCall) responsesInputItem() {}
 
-type ResponsesCustomToolCallOutput struct {
-	Type   string `json:"type"`
-	CallID string `json:"call_id"`
-	Output string `json:"output"`
+type ResponsesCustomToolCallOutput ResponsesFunctionCallOutput
+
+func (o *ResponsesCustomToolCallOutput) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, (*ResponsesFunctionCallOutput)(o))
 }
 
 func (ResponsesCustomToolCallOutput) responsesInputItem() {}
@@ -416,6 +416,14 @@ func unmarshalResponsesInputItem(data []byte) (ResponsesInputItem, error) {
 		if call.Input == nil {
 			return nil, errors.New("custom tool call requires input")
 		}
+		// Only the top-level apply_patch bridge generates custom calls. Other
+		// custom history uses upstream's ordinary function representation.
+		if call.Namespace == "" && call.Name == "apply_patch" {
+			return ResponsesCustomToolCall{
+				ID: call.ID, Type: call.Type, CallID: call.CallID,
+				Name: call.Name, Input: *call.Input,
+			}, nil
+		}
 		arguments, err := json.Marshal(map[string]string{"input": *call.Input})
 		if err != nil {
 			return nil, err
@@ -423,19 +431,13 @@ func unmarshalResponsesInputItem(data []byte) (ResponsesInputItem, error) {
 		call.Type = "function_call"
 		call.Arguments = string(arguments)
 		return call.ResponsesFunctionCall, nil
-	case "function_call_output", "custom_tool_call_output":
+	case "function_call_output":
 		var output ResponsesFunctionCallOutput
 		if err := json.Unmarshal(data, &output); err != nil {
 			return nil, err
 		}
 		output.Type = "function_call_output"
 		return output, nil
-	case "custom_tool_call":
-		var call ResponsesCustomToolCall
-		if err := json.Unmarshal(data, &call); err != nil {
-			return nil, err
-		}
-		return call, nil
 	case "custom_tool_call_output":
 		var output ResponsesCustomToolCallOutput
 		if err := json.Unmarshal(data, &output); err != nil {
@@ -514,16 +516,37 @@ func (r *ResponsesInput) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("input must be a string or array: %w", err)
 	}
 
-	r.Items = make([]ResponsesInputItem, 0, len(rawItems))
+	items, err := unmarshalResponsesInputItems(rawItems)
+	if err != nil {
+		return err
+	}
+	r.Items = items
+	return nil
+}
+
+// Normalize generic custom history as call/output pairs while retaining the
+// apply_patch bridge's custom identity and mismatched-pair validation.
+func unmarshalResponsesInputItems(rawItems []json.RawMessage) ([]ResponsesInputItem, error) {
+	items := make([]ResponsesInputItem, 0, len(rawItems))
+	genericCustomCalls := make(map[string]bool)
 	for i, raw := range rawItems {
 		item, err := unmarshalResponsesInputItem(raw)
 		if err != nil {
-			return fmt.Errorf("input[%d]: %w", i, err)
+			return nil, fmt.Errorf("input[%d]: %w", i, err)
 		}
-		r.Items = append(r.Items, item)
+		if call, ok := item.(ResponsesFunctionCall); ok && rawInputItemType(raw) == "custom_tool_call" {
+			genericCustomCalls[call.CallID] = true
+		}
+		items = append(items, item)
 	}
-
-	return nil
+	for i, item := range items {
+		if output, ok := item.(ResponsesCustomToolCallOutput); ok && genericCustomCalls[output.CallID] {
+			normalized := ResponsesFunctionCallOutput(output)
+			normalized.Type = "function_call_output"
+			items[i] = normalized
+		}
+	}
+	return items, nil
 }
 
 type ResponsesReasoning struct {
@@ -759,7 +782,16 @@ func FromResponsesRequest(r ResponsesRequest, thinking ...*model.Thinking) (*api
 				},
 			}, &pendingThinking)
 		case ResponsesCustomToolCallOutput:
-			messages = append(messages, api.Message{Role: "tool", Content: v.Output, ToolCallID: v.CallID})
+			content := v.Output
+			var images []api.ImageData
+			if len(v.OutputItems) > 0 {
+				var err error
+				content, images, err = convertResponsesContent(v.OutputItems)
+				if err != nil {
+					return nil, err
+				}
+			}
+			messages = append(messages, api.Message{Role: "tool", Content: content, Images: images, ToolCallID: v.CallID})
 		case ResponsesToolSearchCall:
 			messages = appendResponseToolCall(messages, api.ToolCall{
 				ID: v.CallID,
