@@ -127,6 +127,48 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("settings apps home view is retained", func(t *testing.T) {
+		if err := s.SetSettings(Settings{LastHomeView: "apps", QuitBehavior: "background"}); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := s.Settings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.LastHomeView != "apps" || loaded.QuitBehavior != "background" {
+			t.Fatalf("settings = home %q, quit %q", loaded.LastHomeView, loaded.QuitBehavior)
+		}
+	})
+
+	t.Run("settings invalid quit behavior falls back to quit", func(t *testing.T) {
+		if err := s.SetSettings(Settings{LastHomeView: "chat", QuitBehavior: "later"}); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := s.Settings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.QuitBehavior != "quit" {
+			t.Fatalf("expected quit behavior, got %q", loaded.QuitBehavior)
+		}
+	})
+
+	t.Run("settings normalizes legacy database values on read", func(t *testing.T) {
+		if err := s.ensureDB(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.conn.Exec(`UPDATE settings SET last_home_view = 'settings', quit_behavior = 'legacy'`); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := s.Settings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.LastHomeView != "chat" || loaded.QuitBehavior != "quit" {
+			t.Fatalf("normalized settings = home %q, quit %q", loaded.LastHomeView, loaded.QuitBehavior)
+		}
+	})
+
 	t.Run("settings integration home view falls back to chat", func(t *testing.T) {
 		if err := s.SetSettings(Settings{LastHomeView: "codex-app"}); err != nil {
 			t.Fatal(err)

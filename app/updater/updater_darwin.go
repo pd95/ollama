@@ -1,18 +1,20 @@
 package updater
 
 // #cgo CFLAGS: -x objective-c
-// #cgo LDFLAGS: -framework Webkit -framework Cocoa -framework LocalAuthentication -framework ServiceManagement
+// #cgo LDFLAGS: -framework Webkit -framework Cocoa -framework LocalAuthentication -framework ServiceManagement -framework Security
 // #include "updater_darwin.h"
 // typedef const char cchar_t;
 import "C"
 
 import (
 	"archive/zip"
+	"debug/macho"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -23,6 +25,11 @@ import (
 )
 
 const updateArchiveRoot = "Ollama.app"
+
+const (
+	maxArchiveEntries       = 100000
+	maxArchiveExpandedBytes = 4 << 30
+)
 
 type bundleEntryScope int
 
@@ -63,6 +70,7 @@ var BundlePath = func() string {
 
 func init() {
 	VerifyDownload = verifyDownload
+	VerifyCandidate = verifyDownloadCandidate
 	Installer = "Ollama-darwin.zip"
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -97,11 +105,51 @@ func init() {
 }
 
 func DoUpgrade(interactive bool) error {
+	return DoUpgradeSource(PrimaryUpdateSource(), interactive)
+}
+
+func DoUpgradeSource(source string, interactive bool) error {
 	// TODO use UpgradeLogFile to record the upgrade details from->to version, etc.
 
-	bundle := getStagedUpdate()
+	bundle := getStagedUpdateForSource(source)
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
+	}
+	// Always verify at the point of use. Ready-state verification is cached for
+	// display, but must not authorize a later installation.
+	candidate, err := readUpdateCandidateMetadata(bundle)
+	if err != nil {
+		removeStagedUpdate(bundle)
+		return fmt.Errorf("staged update metadata failed: %w", err)
+	}
+	if candidateSource(candidate) != source {
+		return fmt.Errorf("staged update source %q does not match requested source %q", candidateSource(candidate), source)
+	}
+	// Hold the archive open from verification through extraction. The staged
+	// pathname is writable by the current user, so reopening it after
+	// verification would allow another process to substitute different bytes.
+	archiveFile, err := os.Open(bundle)
+	if err != nil {
+		removeStagedUpdate(bundle)
+		return fmt.Errorf("unable to open upgrade bundle %s: %w", bundle, err)
+	}
+	defer archiveFile.Close()
+	heldArchivePath := fmt.Sprintf("/dev/fd/%d", archiveFile.Fd())
+	if err := verifyCandidateChecksum(heldArchivePath, candidate); err != nil {
+		removeStagedUpdate(bundle)
+		return fmt.Errorf("staged update checksum failed: %w", err)
+	}
+	if err := verifyDownloadedCandidate(heldArchivePath, candidate); err != nil {
+		removeStagedUpdate(bundle)
+		return fmt.Errorf("staged update verification failed: %w", err)
+	}
+	archiveInfo, err := archiveFile.Stat()
+	if err != nil {
+		return fmt.Errorf("unable to inspect upgrade bundle %s: %w", bundle, err)
+	}
+	r, err := zip.NewReader(archiveFile, archiveInfo.Size())
+	if err != nil {
+		return fmt.Errorf("unable to open upgrade bundle %s: %w", bundle, err)
 	}
 
 	slog.Info("starting upgrade", "app", BundlePath, "update", bundle, "pid", os.Getpid(), "log", UpgradeLogFile)
@@ -122,12 +170,9 @@ func DoUpgrade(interactive bool) error {
 		return fmt.Errorf("unable to create backup dir %s: %w", appBackupDir, err)
 	}
 
-	// Verify bundle loads before starting staging process
-	r, err := zip.OpenReader(bundle)
-	if err != nil {
-		return fmt.Errorf("unable to open upgrade bundle %s: %w", bundle, err)
+	if err := validateBundleArchive(r.File); err != nil {
+		return err
 	}
-	defer r.Close()
 
 	slog.Debug("temporarily staging old version", "staging", appBackup)
 	if err := os.Rename(BundlePath, appBackup); err != nil {
@@ -266,8 +311,11 @@ func DoPostUpgradeCleanup() error {
 	return os.Remove(UpgradeMarkerFile)
 }
 
-func verifyDownload() error {
-	bundle := getStagedUpdate()
+func verifyDownload(bundle string) error {
+	return verifyDownloadCandidate(bundle, UpdateResponse{Source: OfficialUpdateSource})
+}
+
+func verifyDownloadCandidate(bundle string, candidate UpdateResponse) error {
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
 	}
@@ -284,6 +332,9 @@ func verifyDownload() error {
 		return fmt.Errorf("unable to open upgrade bundle %s: %w", bundle, err)
 	}
 	defer r.Close()
+	if err := validateBundleArchive(r.File); err != nil {
+		return err
+	}
 	links := []*zip.File{}
 	for _, f := range r.File {
 		if strings.HasSuffix(f.Name, "/") {
@@ -338,8 +389,99 @@ func verifyDownload() error {
 		}
 	}
 
-	if err := verifyExtractedBundle(filepath.Join(dir, "Ollama.app")); err != nil {
+	extractedBundle := filepath.Join(dir, updateArchiveRoot)
+	if candidate.Source == MLXPreviewSource {
+		if candidate.Architecture != "arm64" {
+			return fmt.Errorf("unsupported MLX preview architecture %q", candidate.Architecture)
+		}
+		if err := verifyBundleArchitecture(extractedBundle, candidate.Architecture); err != nil {
+			return err
+		}
+		if err := verifyExtractedBundleWithPolicy(extractedBundle, ExpectedBundleID, candidate.MarketingVersion, candidate.BuildVersion, ExpectedAppleTeamID, true); err != nil {
+			return fmt.Errorf("signature verification failed: %s", err)
+		}
+		if err := verifyGatekeeperAssessment(extractedBundle); err != nil {
+			return err
+		}
+		return nil
+	}
+	if candidate.Source == OfficialUpdateSource && candidate.MarketingVersion != "" {
+		if candidate.Architecture != "arm64" {
+			return fmt.Errorf("unsupported official Ollama architecture %q", candidate.Architecture)
+		}
+		if err := verifyBundleArchitecture(extractedBundle, candidate.Architecture); err != nil {
+			return err
+		}
+		if err := verifyExtractedBundleWithPolicy(extractedBundle, "com.electron.ollama", candidate.MarketingVersion, candidate.BuildVersion, ExpectedOfficialAppleTeamID, true); err != nil {
+			return fmt.Errorf("official signature verification failed: %s", err)
+		}
+		if err := verifyGatekeeperAssessment(extractedBundle); err != nil {
+			return err
+		}
+		return nil
+	}
+	if err := verifyExtractedBundle(extractedBundle); err != nil {
 		return fmt.Errorf("signature verification failed: %s", err)
+	}
+	return nil
+}
+
+func verifyGatekeeperAssessment(bundle string) error {
+	cmd := exec.Command("/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=2", bundle)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("Gatekeeper assessment failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+func validateBundleArchive(files []*zip.File) error {
+	if len(files) == 0 || len(files) > maxArchiveEntries {
+		return fmt.Errorf("bundle archive contains %d entries; limit is %d", len(files), maxArchiveEntries)
+	}
+	seen := make(map[string]os.FileMode, len(files))
+	folded := make(map[string]string, len(files))
+	var expanded uint64
+	for _, file := range files {
+		if len(file.Name) > 1024 {
+			return fmt.Errorf("bundle path exceeds 1024 bytes: %s", file.Name[:128])
+		}
+		cleanName := filepath.Clean(filepath.FromSlash(file.Name))
+		if _, err := bundleEntryPath(".", file.Name, bundleEntryWithArchiveRoot); err != nil {
+			return err
+		}
+		mode := file.Mode()
+		if mode.IsDir() != strings.HasSuffix(file.Name, "/") {
+			return fmt.Errorf("bundle entry type does not match its path: %s", file.Name)
+		}
+		if mode.Type() != 0 && !mode.IsDir() && mode&os.ModeSymlink == 0 {
+			return fmt.Errorf("bundle contains unsupported entry type: %s", file.Name)
+		}
+		if previous, ok := seen[cleanName]; ok {
+			return fmt.Errorf("bundle contains duplicate or conflicting path %s (%s and %s)", file.Name, previous, mode)
+		}
+		foldedName := strings.ToLower(cleanName)
+		if previous, ok := folded[foldedName]; ok {
+			return fmt.Errorf("bundle contains case-conflicting paths %s and %s", previous, file.Name)
+		}
+		seen[cleanName] = mode
+		folded[foldedName] = file.Name
+		if !mode.IsDir() {
+			expanded += file.UncompressedSize64
+			if expanded > maxArchiveExpandedBytes {
+				return fmt.Errorf("bundle expanded size exceeds %d bytes", maxArchiveExpandedBytes)
+			}
+		}
+	}
+	for name := range seen {
+		for parent := filepath.Dir(name); parent != "." && parent != name; parent = filepath.Dir(parent) {
+			if parentMode, ok := seen[parent]; ok && !parentMode.IsDir() {
+				if parentMode&os.ModeSymlink != 0 {
+					return fmt.Errorf("bundle path %s traverses symlink entry %s", name, parent)
+				}
+				return fmt.Errorf("bundle path %s traverses non-directory entry %s", name, parent)
+			}
+		}
 	}
 	return nil
 }
@@ -376,8 +518,12 @@ func extractBundleFile(f *zip.File, destName, name string) error {
 	}
 	defer destFile.Close()
 
-	if _, err := io.Copy(destFile, src); err != nil {
+	written, err := io.Copy(destFile, io.LimitReader(src, int64(f.UncompressedSize64)+1))
+	if err != nil {
 		return fmt.Errorf("failed to open extract file %s: %w", destName, err)
+	}
+	if written != int64(f.UncompressedSize64) {
+		return fmt.Errorf("bundle file %s expanded to an unexpected size", name)
 	}
 	return nil
 }
@@ -393,6 +539,10 @@ func validBundleLinkTarget(name, link string, scope bundleEntryScope) bool {
 
 // If we detect an upgrade bundle, attempt to upgrade at startup
 func DoUpgradeAtStartup() error {
+	if AutomaticUpdatesDisabled() || !AutomaticInstallAllowed() {
+		return fmt.Errorf("automatic updates disabled by build")
+	}
+
 	bundle := getStagedUpdate()
 	if bundle == "" {
 		return fmt.Errorf("failed to lookup downloads")
@@ -402,29 +552,16 @@ func DoUpgradeAtStartup() error {
 		return fmt.Errorf("unable to upgrade at startup, app in development mode")
 	}
 
-	// [Re]verify before proceeding
-	if err := VerifyDownload(); err != nil {
-		_ = os.Remove(bundle)
-		slog.Warn("verification failure", "bundle", bundle, "error", err)
-		return nil
-	}
 	slog.Info("performing update at startup", "bundle", bundle)
 	return DoUpgrade(false)
 }
 
 func getStagedUpdate() string {
-	files, err := filepath.Glob(filepath.Join(UpdateStageDir, "*", "*.zip"))
-	if err != nil {
-		slog.Debug("failed to lookup downloads", "error", err)
-		return ""
-	}
-	if len(files) == 0 {
-		return ""
-	} else if len(files) > 1 {
-		// Shouldn't happen
-		slog.Warn("multiple update downloads found, using first one", "bundles", files)
-	}
-	return files[0]
+	return getStagedUpdateForSource(PrimaryUpdateSource())
+}
+
+func getStagedUpdateForSource(source string) string {
+	return stagedUpdatePath(source, "zip")
 }
 
 func IsUpdatePending() bool {
@@ -438,14 +575,48 @@ func chownWithAuthorization(user string) bool {
 }
 
 func verifyExtractedBundle(path string) error {
+	return verifyExtractedBundleWithPolicy(path, "", "", "", "", false)
+}
+
+func verifyExtractedBundleWithPolicy(path, bundleID, marketingVersion, buildVersion, teamID string, requirePinnedIdentity bool) error {
 	p := C.CString(path)
 	defer C.free(unsafe.Pointer(p))
-	resp := C.verifyExtractedBundle(p)
+	bid := C.CString(bundleID)
+	defer C.free(unsafe.Pointer(bid))
+	marketing := C.CString(marketingVersion)
+	defer C.free(unsafe.Pointer(marketing))
+	build := C.CString(buildVersion)
+	defer C.free(unsafe.Pointer(build))
+	team := C.CString(teamID)
+	defer C.free(unsafe.Pointer(team))
+	resp := C.verifyExtractedBundle(p, bid, marketing, build, team, C.bool(requirePinnedIdentity))
 	if resp == nil {
 		return nil
 	}
-
+	defer C.free(unsafe.Pointer(resp))
 	return errors.New(C.GoString(resp))
+}
+
+func verifyBundleArchitecture(bundle, architecture string) error {
+	executable := filepath.Join(bundle, "Contents", "MacOS", "Ollama")
+	if fat, err := macho.OpenFat(executable); err == nil {
+		defer fat.Close()
+		for _, arch := range fat.Arches {
+			if architecture == "arm64" && arch.Cpu == macho.CpuArm64 {
+				return nil
+			}
+		}
+		return fmt.Errorf("bundle executable does not contain %s", architecture)
+	}
+	thin, err := macho.Open(executable)
+	if err != nil {
+		return fmt.Errorf("inspect bundle architecture: %w", err)
+	}
+	defer thin.Close()
+	if architecture == "arm64" && thin.Cpu == macho.CpuArm64 {
+		return nil
+	}
+	return fmt.Errorf("bundle executable architecture %s does not match %s", thin.Cpu, architecture)
 }
 
 //export goLogInfo

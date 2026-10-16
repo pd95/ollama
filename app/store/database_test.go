@@ -174,6 +174,31 @@ func TestMigrationV15ToV16LastHomeViewMigratesToChat(t *testing.T) {
 	}
 }
 
+func TestMigrationV19ToV20QuitBehaviorDefaultsToQuit(t *testing.T) {
+	db, err := newDatabase(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.conn.Exec(`
+		ALTER TABLE settings DROP COLUMN quit_behavior;
+		UPDATE settings SET schema_version = 19;
+	`); err != nil {
+		t.Fatalf("seed v19 settings: %v", err)
+	}
+	if err := db.migrate(); err != nil {
+		t.Fatalf("migrate v19 to v20: %v", err)
+	}
+	settings, err := db.getSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.QuitBehavior != "quit" {
+		t.Fatalf("quit behavior = %q, want quit", settings.QuitBehavior)
+	}
+}
+
 func TestOnboardingVersionDefaultsAndMigration(t *testing.T) {
 	t.Run("fresh installs need onboarding", func(t *testing.T) {
 		dbPath := filepath.Join(t.TempDir(), "fresh.db")
