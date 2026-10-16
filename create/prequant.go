@@ -32,9 +32,9 @@ type prequantPattern struct {
 	biasSuffix string // optional bias / zero-point companion ("" if none)
 
 	globalSuffix     string // optional global-scale companion ("" if none)
-	globalReciprocal bool   // store the global scale as its reciprocal
+	globalReciprocal bool   // producer stores the weight global scale inverted
 
-	ignoreSuffixes []string // companions consumed but not written (e.g. activation scales)
+	ignoreSuffixes []string // activation scales unused by weight-only inference
 
 	forceQuantType   string // override the blob's quant_type metadata
 	defaultGroupSize string // set group_size metadata only when the config did not
@@ -196,7 +196,8 @@ func matchPrequant(name string, inv Inventory) (BlobSpec, []string, bool, error)
 
 		if p.globalSuffix != "" {
 			if gSrc := base + p.globalSuffix; inv.Has(gSrc) {
-				global := TensorSpec{Name: outWeight + ".global_scale", Sources: []SourceTensor{inv.Tensors[gSrc]}, Transform: TransformScalarF32}
+				globalSource := inv.Tensors[gSrc]
+				global := TensorSpec{Name: outWeight + ".global_scale", Sources: []SourceTensor{globalSource}, Transform: f32ScaleTransform(globalSource)}
 				if p.globalReciprocal {
 					global.Transform = TransformReciprocalF32
 				}
@@ -205,9 +206,9 @@ func matchPrequant(name string, inv Inventory) (BlobSpec, []string, bool, error)
 			}
 		}
 
-		for _, suf := range p.ignoreSuffixes {
-			if s := base + suf; inv.Has(s) {
-				consumed = append(consumed, s)
+		for _, suffix := range p.ignoreSuffixes {
+			if source := base + suffix; inv.Has(source) {
+				consumed = append(consumed, source)
 			}
 		}
 
@@ -224,6 +225,15 @@ func matchPrequant(name string, inv Inventory) (BlobSpec, []string, bool, error)
 		return BlobSpec{Name: outWeight, Tensors: tensors, Metadata: metadata}, consumed, true, nil
 	}
 	return BlobSpec{}, nil, false, nil
+}
+
+func f32ScaleTransform(t SourceTensor) Transform {
+	for _, dim := range t.Shape {
+		if dim != 1 {
+			return TransformF32
+		}
+	}
+	return TransformScalarF32
 }
 
 // prequantMetadata builds the fused blob's metadata: the source config's quant
