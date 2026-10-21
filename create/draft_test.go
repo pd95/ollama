@@ -1,11 +1,13 @@
 package create
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	st "github.com/ollama/ollama/fs/safetensors"
@@ -125,5 +127,44 @@ func TestCreateDraftLayersRejectsEmptyPrefixes(t *testing.T) {
 	}
 	if _, err := CreateDraftLayers(context.Background(), t.TempDir(), "draft.", "", "", MLXValidationOptions{}, store, func(string) {}); err == nil {
 		t.Error("expected an error for an empty config prefix")
+	}
+}
+
+func TestCreateDraftLayersRejectsUnsafeTokenizerBeforeWriting(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigJSON(t, dir, `{"architectures":["DFlashDraftModel"]}`)
+	createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
+		st.NewTensorDataFromBytes("model.norm.weight", "BF16", []int32{8}, make([]byte, 16)),
+	})
+	data := []byte(`{"model":{"type":"BPE","vocab":{"base":0}},"added_tokens":[{"id":0,"content":"other"}]}`)
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &recordingStore{}
+	_, err := CreateDraftLayers(context.Background(), dir, "draft.", "draft/", "", testPipelineOptions().Validation, store, func(string) {})
+	if err == nil || !strings.Contains(err.Error(), "tokenizer.json") {
+		t.Fatalf("CreateDraftLayers() error = %v, want tokenizer.json rejection", err)
+	}
+	if len(store.names) != 0 {
+		t.Fatalf("invalid draft tokenizer wrote blobs %v", store.names)
+	}
+}
+
+func TestCreateDraftLayersPreservesValidatedSparseTokenizerBytes(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigJSON(t, dir, `{"architectures":["DFlashDraftModel"]}`)
+	createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
+		st.NewTensorDataFromBytes("model.norm.weight", "BF16", []int32{8}, make([]byte, 16)),
+	})
+	data := []byte("{\n \"model\": {\"type\": \"BPE\", \"vocab\": {\"base\": 0}}, \"added_tokens\": [{\"id\": 1000, \"content\": \"draft\"}]\n}\n")
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &recordingStore{}
+	if _, err := CreateDraftLayers(context.Background(), dir, "draft.", "draft/", "", testPipelineOptions().Validation, store, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.blobs["draft/tokenizer.json"]; !bytes.Equal(got, data) {
+		t.Fatalf("imported draft tokenizer bytes differ: got %q, want %q", got, data)
 	}
 }

@@ -1,7 +1,9 @@
 package create
 
 import (
+	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,6 +33,10 @@ func TestKevPipelineFileType(t *testing.T) {
 			createTestSafetensors(t, filepath.Join(dir, "model.safetensors"), []*st.TensorData{
 				st.NewTensorDataFromBytes(tc.tensor, tc.dtype, []int32{8, 8}, make([]byte, 8*8*bytesPerElement)),
 			})
+			tokenizer := []byte("{\n\"model\":{\"type\":\"BPE\",\"vocab\":{\"base\":0}},\"added_tokens\":[{\"id\":1000,\"content\":\"added\"}]\n}\n")
+			if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), tokenizer, 0o600); err != nil {
+				t.Fatal(err)
+			}
 			store := newCaptureStore()
 			var got model.ConfigV2
 			writeManifest := func(_ context.Context, _ string, info ManifestInfo) error {
@@ -52,6 +58,9 @@ func TestKevPipelineFileType(t *testing.T) {
 			}
 			if got.FileType != tc.want {
 				t.Errorf("file type = %q, want %q", got.FileType, tc.want)
+			}
+			if !bytes.Equal(store.blobs["tokenizer.json"], tokenizer) {
+				t.Fatal("Kev import lost validated tokenizer bytes")
 			}
 		})
 	}

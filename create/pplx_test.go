@@ -1,6 +1,7 @@
 package create
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -64,6 +65,10 @@ func TestPplxBareBackboneRejectedBeforeImport(t *testing.T) {
 func TestPplxInventoryAndImport(t *testing.T) {
 	dir := t.TempDir()
 	writePplxSource(t, dir)
+	tokenizer := []byte("{\n\"model\":{\"type\":\"BPE\",\"vocab\":{\"base\":0}},\"added_tokens\":[{\"id\":1000,\"content\":\"added\"}]\n}\n")
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), tokenizer, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "release-manifest.json"), []byte(`{"verified_upstream":"full"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +110,9 @@ func TestPplxInventoryAndImport(t *testing.T) {
 	}
 	if _, ok := store.blobs["release-manifest.json"]; ok {
 		t.Fatal("release metadata was imported as model configuration")
+	}
+	if !bytes.Equal(store.blobs["tokenizer.json"], tokenizer) {
+		t.Fatal("Perplexity import lost validated tokenizer bytes")
 	}
 }
 
