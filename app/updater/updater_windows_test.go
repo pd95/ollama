@@ -26,7 +26,7 @@ func TestVerifyDownloadRejectsUnsignedWindowsInstaller(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := verifyDownload()
+	err := verifyDownload(bundle)
 	if err == nil || !strings.Contains(err.Error(), "signature verification failed") {
 		t.Fatalf("expected signature verification failure, got %v", err)
 	}

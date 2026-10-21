@@ -127,6 +127,7 @@ var errClaudeDesktopAccessUnavailable = errors.New("Ollama couldn't verify the s
 //export StartUI
 func StartUI(path *C.cchar_t) {
 	p := C.GoString(path)
+	slog.Info("opening app UI", "path", p)
 	wv.Run(p)
 	styleWindow(wv.webview.Window())
 	C.setWindowDelegate(wv.webview.Window())
@@ -135,6 +136,19 @@ func StartUI(path *C.cchar_t) {
 //export ShowUI
 func ShowUI() {
 	openUI("/")
+}
+
+//export ShouldKeepRunningOnQuit
+func ShouldKeepRunningOnQuit() C.bool {
+	if appStore == nil {
+		return false
+	}
+	settings, err := appStore.Settings()
+	if err != nil {
+		slog.Warn("failed to load Command-Q preference", "error", err)
+		return false
+	}
+	return C._Bool(settings.QuitBehavior == "background")
 }
 
 //export IsOnboardingActive
@@ -165,14 +179,37 @@ func StopUI() {
 
 //export StartUpdate
 func StartUpdate() {
-	if err := updater.DoUpgrade(true); err != nil {
+	if err := startUpdateSource(updater.PrimaryUpdateSource()); err != nil {
 		slog.Error("upgrade failed", "error", err)
-		return
 	}
-	slog.Debug("launching new version...")
-	// TODO - consider a timer that aborts if this takes too long and we haven't been killed yet...
+}
+
+//export UpdateInstallRequiresConfirmation
+func UpdateInstallRequiresConfirmation() C._Bool {
+	return C._Bool(updater.AutomaticUpdatesDisabled() || updater.CustomUpdateSourceEnabled())
+}
+
+//export IsMLXPreviewUpdateSource
+func IsMLXPreviewUpdateSource() C._Bool {
+	return C._Bool(updater.PrimaryUpdateSource() == updater.MLXPreviewSource)
+}
+
+func RequestUpdateInstall(source string) error {
+	if source == updater.OfficialUpdateSource || updater.AutomaticUpdatesDisabled() || updater.CustomUpdateSourceEnabled() {
+		if C.confirmUpdateInstall(C._Bool(source == updater.OfficialUpdateSource)) == 0 {
+			return updater.ErrInstallCancelled
+		}
+	}
+	return startUpdateSource(source)
+}
+
+func startUpdateSource(source string) error {
+	if err := updater.DoUpgradeSource(source, true); err != nil {
+		return err
+	}
+	slog.Debug("launching new version...", "source", source)
 	LaunchNewApp()
-	// not reached if upgrade works, the new app will kill this process
+	return nil
 }
 
 //export darwinStartHiddenTasks
@@ -1962,6 +1999,11 @@ func LaunchNewApp() {
 func registerLaunchAgent(hasCompletedFirstRun bool) {
 	// Remove any stale Login Item registrations
 	C.unregisterSelfFromLoginItem()
+	if updater.AutomaticUpdatesDisabled() || updater.CustomUpdateSourceEnabled() {
+		slog.Info("automatic launch at login disabled by distribution policy")
+		C.unregisterSelfAsLoginItem()
+		return
+	}
 
 	C.registerSelfAsLoginItem(C._Bool(hasCompletedFirstRun))
 }
