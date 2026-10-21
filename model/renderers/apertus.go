@@ -50,7 +50,9 @@ func (r *Apertus1p5Renderer) LeadingBOS() string {
 	return ""
 }
 
-func (r *Apertus1p5Renderer) Thinking() *model.Thinking { return nil }
+func (r *Apertus1p5Renderer) Thinking() *model.Thinking {
+	return &model.Thinking{Values: []any{false, true}, Default: false}
+}
 
 func (r *Apertus1p5Renderer) Render(messages []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
 	return renderApertus(messages, tools, think, true)

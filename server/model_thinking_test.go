@@ -100,6 +100,8 @@ func TestModelThinking(t *testing.T) {
 		want *model.Thinking
 	}{
 		{"local gemma default on", Model{Config: model.ConfigV2{Renderer: "gemma4", Parser: "gemma4"}}, &model.Thinking{Values: []any{false, true}, Default: true}},
+		{"apertus 1.5 default off", Model{Config: model.ConfigV2{Renderer: "apertus1p5", Parser: "apertus", Capabilities: []string{"completion", "tools", "thinking"}}}, &model.Thinking{Values: []any{false, true}, Default: false}},
+		{"apertus 1.5 without thinking capability", Model{Config: model.ConfigV2{Renderer: "apertus1p5"}}, &model.Thinking{Values: []any{false}, Default: false}},
 		{"local qwen38 default medium", Model{Config: model.ConfigV2{Renderer: "qwen3.8", Parser: "qwen3.5"}}, &model.Thinking{Values: []any{false, "low", "medium", "xhigh"}, Default: "medium"}},
 		{"renderer without thinking capability", Model{Config: model.ConfigV2{Renderer: "gemma4"}}, &model.Thinking{Values: []any{false}, Default: false}},
 		{"unknown renderer", Model{Config: model.ConfigV2{Renderer: "unknown"}}, nil},
@@ -150,6 +152,7 @@ func TestThinkingShowFollowsRendererChanges(t *testing.T) {
 		want                         *model.Thinking
 	}{
 		{"thinking-generic", "thinking-base", "qwen3.8", "qwen3.5", &model.Thinking{Values: []any{false, "low", "medium", "xhigh"}, Default: "medium"}},
+		{"thinking-apertus", "thinking-base", "apertus1p5", "apertus", &model.Thinking{Values: []any{false, true}, Default: false}},
 		{"thinking-inherited", "thinking-generic", "", "", &model.Thinking{Values: []any{false, "low", "medium", "xhigh"}, Default: "medium"}},
 		{"thinking-changed", "thinking-generic", "qwen3-coder", "qwen3-coder", &model.Thinking{Values: []any{false}, Default: false}},
 	} {

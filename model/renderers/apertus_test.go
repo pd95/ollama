@@ -151,6 +151,13 @@ func TestApertusRendererRejectsAmbiguousOrUnsafeSchema(t *testing.T) {
 }
 
 func TestApertus1p5RendererContract(t *testing.T) {
+	think := ResolveThinking(nil, ThinkingForRenderer("apertus1p5"))
+	if think == nil || think.Value != false {
+		t.Fatalf("omitted thinking resolved to %v, want false", think)
+	}
+	if _, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "user", Content: "Weather?"}}, []api.Tool{apertusRendererTool("get_weather")}, think); err != nil {
+		t.Fatalf("default thinking must permit tools: %v", err)
+	}
 	got, err := (&Apertus1p5Renderer{}).Render([]api.Message{{Role: "user", Content: "Hello"}}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
