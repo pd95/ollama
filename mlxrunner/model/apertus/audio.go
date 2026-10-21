@@ -169,35 +169,44 @@ func loadApertureLSTM(tensors map[string]*mlx.Array, path string, layers int, hi
 	return l, nil
 }
 
+// Fixed-shape tracing permits gate slices; weights and states remain inputs.
+var compiledApertusLSTMCell = mlx.Compile("ApertusLSTMCell", func(in ...*mlx.Array) []*mlx.Array {
+	gates := mlx.Add(in[0], mlx.Add(mlx.Matmul(in[1], in[3]), in[4]))
+	hidden := in[1].Dim(1)
+	i := mlx.Sigmoid(gates.Slice(mlx.Slice(), mlx.Slice(0, hidden)))
+	f := mlx.Sigmoid(gates.Slice(mlx.Slice(), mlx.Slice(hidden, 2*hidden)))
+	g := gates.Slice(mlx.Slice(), mlx.Slice(2*hidden, 3*hidden)).Tanh()
+	o := mlx.Sigmoid(gates.Slice(mlx.Slice(), mlx.Slice(3*hidden, 4*hidden)))
+	c := mlx.Add(mlx.Mul(f, in[2]), mlx.Mul(i, g))
+	return []*mlx.Array{mlx.Mul(o, c.Tanh()), c}
+})
+
 func (l *apertureLSTM) forward(input *mlx.Array, materialize func(...*mlx.Array)) (*mlx.Array, error) {
-	residual := input
-	x := input
+	residual, x := input, input
 	for layer := range l.inputWeights {
 		if x == nil || x.Dim(1) == 0 {
 			return nil, fmt.Errorf("Apertus audio LSTM layer %d received an empty sequence", layer)
 		}
+		wi, wh := l.inputWeights[layer].Transpose(1, 0), l.hiddenWeights[layer].Transpose(1, 0)
 		h := mlx.Zeros(mlx.DTypeFloat32, 1, int(l.hidden))
 		c := mlx.Zeros(mlx.DTypeFloat32, 1, int(l.hidden))
 		steps := x.Dim(1)
 		outputs := make([]*mlx.Array, 0, steps)
-		for t := range steps {
-			xt := x.Slice(mlx.Slice(), mlx.Slice(t, t+1), mlx.Slice()).Squeeze(1)
-			gates := mlx.Add(mlx.Add(mlx.Matmul(xt, mlx.Transpose(l.inputWeights[layer], 1, 0)), l.inputBiases[layer]), mlx.Add(mlx.Matmul(h, mlx.Transpose(l.hiddenWeights[layer], 1, 0)), l.hiddenBiases[layer]))
-			i := mlx.Sigmoid(gates.Slice(mlx.Slice(), mlx.Slice(0, int(l.hidden))))
-			f := mlx.Sigmoid(gates.Slice(mlx.Slice(), mlx.Slice(int(l.hidden), int(2*l.hidden))))
-			g := gates.Slice(mlx.Slice(), mlx.Slice(int(2*l.hidden), int(3*l.hidden))).Tanh()
-			o := mlx.Sigmoid(gates.Slice(mlx.Slice(), mlx.Slice(int(3*l.hidden), int(4*l.hidden))))
-			c = mlx.Add(mlx.Mul(f, c), mlx.Mul(i, g))
-			h = mlx.Mul(o, c.Tanh())
-			if materialize != nil {
-				keep := make([]*mlx.Array, 0, len(outputs)+4)
-				keep = append(keep, outputs...)
-				// x is sliced again by the next recurrent step; residual is
-				// reused after every LSTM layer.
-				keep = append(keep, h, c, x, residual)
-				materialize(keep...)
+		for start := 0; start < steps; start += 128 {
+			end := min(start+128, steps)
+			chunk := x.Slice(mlx.Slice(), mlx.Slice(start, end), mlx.Slice())
+			projected := mlx.Add(mlx.Matmul(chunk, wi), l.inputBiases[layer])
+			for j := range end - start {
+				xt := projected.Slice(mlx.Slice(), mlx.Slice(j, j+1), mlx.Slice()).Squeeze(1)
+				state := compiledApertusLSTMCell(xt, h, c, wh, l.hiddenBiases[layer])
+				h, c = state[0], state[1]
+				if materialize != nil {
+					keep := append([]*mlx.Array{}, outputs...)
+					keep = append(keep, h, c, x, residual, projected, wi, wh)
+					materialize(keep...)
+				}
+				outputs = append(outputs, h.ExpandDims(1))
 			}
-			outputs = append(outputs, h.ExpandDims(1))
 		}
 		x = mlx.Concatenate(outputs, 1)
 	}
