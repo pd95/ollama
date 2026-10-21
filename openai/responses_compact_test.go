@@ -71,6 +71,91 @@ func TestCompactionTrimPreservesProtectedState(t *testing.T) {
 	}
 }
 
+func TestCompactionPreservesCustomApplyPatchPair(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"
+	arguments := api.NewToolCallFunctionArguments()
+	arguments.Set("input", patch)
+	payload := OllamaCompactionPayload{
+		Type: OllamaCompactionPayloadType, Version: OllamaCompactionPayloadVersion, Summary: "summary",
+		Retained: []api.Message{
+			{Role: "assistant", ToolCalls: []api.ToolCall{{ID: "call_patch", Function: api.ToolCallFunction{Name: "apply_patch", Arguments: arguments}}}},
+			{Role: "tool", ToolCallID: "call_patch", Content: "Done"},
+		},
+		CustomCallIDs: map[string]bool{"call_patch": true},
+	}
+	items, err := payloadToResponsesItems(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 4 || rawInputItemType(items[2]) != "custom_tool_call" || rawInputItemType(items[3]) != "custom_tool_call_output" {
+		t.Fatalf("compacted custom pair = %s", items)
+	}
+	var call ResponsesCustomToolCall
+	if err := json.Unmarshal(items[2], &call); err != nil || call.CallID != "call_patch" || call.Name != "apply_patch" || call.Input != patch {
+		t.Fatalf("custom call = %#v, %v", call, err)
+	}
+	var output ResponsesCustomToolCallOutput
+	if err := json.Unmarshal(items[3], &output); err != nil || output.CallID != "call_patch" || output.Output != "Done" {
+		t.Fatalf("custom output = %#v, %v", output, err)
+	}
+}
+
+func TestCompactionRoundTripsSelectedCustomApplyPatchPair(t *testing.T) {
+	body := []byte(`{"model":"test","input":[
+		{"type":"custom_tool_call","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** Add File: file.txt\n+new\n*** End Patch\n"},
+		{"type":"custom_tool_call_output","call_id":"call_patch","output":"Done"},
+		{"type":"message","role":"user","content":"continue"}
+	]}`)
+	plan, err := PrepareStandaloneCompaction(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := plan.Complete(compactionResponseBody(t, map[string]any{
+		"summary": "summary", "retain_item_ids": []string{"item_000001"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := decodeResultPayload(t, result)
+	if !payload.CustomCallIDs["call_patch"] || len(payload.Retained) != 2 {
+		t.Fatalf("custom compaction payload = %#v", payload)
+	}
+	items, err := payloadToResponsesItems(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawInputItemType(items[2]) != "custom_tool_call" || rawInputItemType(items[3]) != "custom_tool_call_output" {
+		t.Fatalf("round-tripped custom pair = %s", items)
+	}
+}
+
+func TestCompactionRejectsInvalidCustomApplyPatchIdentity(t *testing.T) {
+	payload := OllamaCompactionPayload{
+		Type: OllamaCompactionPayloadType, Version: OllamaCompactionPayloadVersion, Summary: "summary",
+		Retained: []api.Message{{Role: "assistant", ToolCalls: []api.ToolCall{{
+			ID: "call_patch", Function: api.ToolCallFunction{Name: "apply_patch", Arguments: api.NewToolCallFunctionArguments()},
+		}}}},
+		CustomCallIDs: map[string]bool{"call_patch": true},
+	}
+	if _, err := payloadToResponsesItems(payload); err == nil || !strings.Contains(err.Error(), "valid apply_patch") {
+		t.Fatalf("invalid custom identity error = %v", err)
+	}
+	payload.CustomCallIDs = map[string]bool{"missing": true}
+	if _, err := payloadToResponsesItems(payload); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("missing custom identity error = %v", err)
+	}
+}
+
+func TestCompactionRejectsMismatchedCustomPair(t *testing.T) {
+	body := []byte(`{"model":"test","input":[
+		{"type":"custom_tool_call","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"},
+		{"type":"function_call_output","call_id":"call_patch","output":"Done"}
+	]}`)
+	if _, err := PrepareStandaloneCompaction(body); err == nil || !strings.Contains(err.Error(), "kinds differ") {
+		t.Fatalf("mismatched custom pair error = %v", err)
+	}
+}
+
 func TestCompactionTrimPreservesPriorSummaryAndLatestItem(t *testing.T) {
 	old, err := json.Marshal(OllamaCompactionPayload{
 		Type: OllamaCompactionPayloadType, Version: OllamaCompactionPayloadVersion, Summary: "prior summary",
