@@ -104,6 +104,7 @@ function ChatForm({
   const thinkButtonRef = useRef<HTMLButtonElement>(null);
   const webSearchButtonRef = useRef<HTMLButtonElement>(null);
   const modelPickerRef = useRef<HTMLButtonElement>(null);
+  const modelDetailsRef = useRef<HTMLButtonElement>(null);
   const submitButtonRef = useRef<HTMLButtonElement>(null);
 
   const { mutate: sendMessageMutation } = useSendMessage(chatId);
@@ -359,6 +360,7 @@ function ChatForm({
         thinkButtonRef,
         webSearchButtonRef,
         modelPickerRef,
+        modelDetailsRef,
         submitButtonRef,
       ]
         .map((ref) => ref.current)
@@ -407,6 +409,8 @@ function ChatForm({
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+
       // Handle escape key for canceling
       if (e.key === "Escape") {
         e.preventDefault();
@@ -425,6 +429,7 @@ function ChatForm({
           thinkButtonRef.current,
           webSearchButtonRef.current,
           modelPickerRef.current,
+          modelDetailsRef.current,
           submitButtonRef.current,
         ].filter(
           (element) => element && !(element as HTMLButtonElement).disabled,
@@ -457,6 +462,7 @@ function ChatForm({
 
       if (
         !isInInputField &&
+        !(e.key === " " && target.closest("button")) &&
         e.key.length === 1 &&
         !e.ctrlKey &&
         !e.metaKey &&
@@ -565,6 +571,7 @@ function ChatForm({
         thinkButtonRef.current,
         webSearchButtonRef.current,
         modelPickerRef.current,
+        modelDetailsRef.current,
         submitButtonRef.current,
       ].filter((element) => element && !element.disabled);
 
@@ -933,9 +940,10 @@ function ChatForm({
           )}
 
           {/* Model picker and submit button */}
-          <div className="flex items-center gap-2 relative z-20">
+          <div className="flex min-w-0 items-center gap-2 relative z-20">
             <ModelPicker
               ref={modelPickerRef}
+              detailsButtonRef={modelDetailsRef}
               chatId={chatId}
               onModelSelect={focusChatFormInput}
               onEscape={focusChatFormInput}

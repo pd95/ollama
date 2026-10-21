@@ -5,7 +5,6 @@ import {
   DownloadEvent,
   ErrorEvent,
   InferenceComputeResponse,
-  ModelCapabilitiesResponse,
   Model,
   ChatRequest,
   Settings,
@@ -16,6 +15,17 @@ import { ollamaClient as ollama } from "./lib/ollama-client";
 import { parseThinkingControls, type ThinkingControls } from "./utils/thinking";
 import type { ModelResponse } from "ollama/browser";
 import { API_BASE, OLLAMA_DOT_COM } from "./lib/config";
+import { parseCapabilities } from "./lib/modelCapabilities";
+import {
+  parseModelMetadata,
+  positiveNumber,
+  metadataText,
+  type ModelMetadata,
+} from "./lib/modelDetails";
+import {
+  CapabilityDiscoveryError,
+  withCapabilityDiscovery,
+} from "./lib/capabilityRequests";
 import type {
   ClaudeDesktopStatus,
   CodexDesktopModelsSettingsResult,
@@ -25,6 +35,10 @@ import type {
 declare module "@/gotypes" {
   interface Model {
     isCloud(): boolean;
+    capabilities?: string[];
+    metadata?: ModelMetadata;
+    size?: number;
+    remoteHost?: string;
   }
 }
 
@@ -200,11 +214,23 @@ export async function getModels(query?: string): Promise<Model[]> {
         // Remove the latest tag from the returned model
         const modelName = m.name.replace(/:latest$/, "");
 
-        return new Model({
-          model: modelName,
-          digest: m.digest,
-          modified_at: m.modified_at ? new Date(m.modified_at) : undefined,
-        });
+        return Object.assign(
+          new Model({
+            model: modelName,
+            digest: m.digest,
+            modified_at: m.modified_at ? new Date(m.modified_at) : undefined,
+          }),
+          {
+            capabilities: parseCapabilities(
+              (m as ModelResponse & { capabilities?: unknown }).capabilities,
+            ),
+            metadata: parseModelMetadata(m.details),
+            size: positiveNumber(m.size),
+            remoteHost: metadataText(
+              (m as ModelResponse & { remote_host?: unknown }).remote_host,
+            ),
+          },
+        );
       });
 
     // Filter by query if provided
@@ -212,7 +238,7 @@ export async function getModels(query?: string): Promise<Model[]> {
       const normalizedQuery = query.toLowerCase().trim();
 
       const filteredModels = models.filter((m: Model) => {
-        return m.model.toLowerCase().startsWith(normalizedQuery);
+        return m.model.toLowerCase().includes(normalizedQuery);
       });
 
       let exactMatch = false;
@@ -289,9 +315,7 @@ export async function getClaudeDesktopAvailableModels(
     const seen = new Set<string>();
     return [...localModels, ...cloudModels]
       .filter((model: ModelResponse) => {
-        const base = model.name
-          .replace(/:latest$/, "")
-          .replace(/:cloud$/, "");
+        const base = model.name.replace(/:latest$/, "").replace(/:cloud$/, "");
         if (!base || seen.has(base)) return false;
 
         const families = model.details?.families;
@@ -319,41 +343,38 @@ export async function getClaudeDesktopAvailableModels(
   }
 }
 
-export type ModelCapabilityDetails = ModelCapabilitiesResponse & {
+export type ModelCapabilityDetails = {
+  capabilities?: string[];
+  metadata?: ModelMetadata;
+  remoteHost?: string;
   thinking?: ThinkingControls;
   renderer?: string;
 };
 
 export async function getModelCapabilities(
   modelName: string,
+  signal?: AbortSignal,
 ): Promise<ModelCapabilityDetails> {
-  try {
-    const showResponse = await ollama.show({ model: modelName });
-
-    // The browser SDK may predate these optional backend discovery fields.
-    const discovery = showResponse as typeof showResponse & {
-      thinking?: unknown;
-      renderer?: unknown;
+  return withCapabilityDiscovery(async (requestSignal) => {
+    const response = await fetch(`${API_BASE}/api/show`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: modelName }),
+      signal: requestSignal,
+    });
+    if (!response.ok) throw new CapabilityDiscoveryError(response.status);
+    const discovery = await response.json();
+    return {
+      capabilities: parseCapabilities(discovery?.capabilities),
+      metadata: parseModelMetadata(discovery?.details, discovery?.model_info),
+      remoteHost: metadataText(discovery?.remote_host),
+      thinking: parseThinkingControls(discovery?.thinking),
+      renderer:
+        typeof discovery?.renderer === "string"
+          ? discovery.renderer
+          : undefined,
     };
-    return Object.assign(
-      new ModelCapabilitiesResponse({
-        capabilities: Array.isArray(showResponse.capabilities)
-          ? showResponse.capabilities
-          : [],
-      }),
-      {
-        thinking: parseThinkingControls(discovery.thinking),
-        renderer:
-          typeof discovery.renderer === "string"
-            ? discovery.renderer
-            : undefined,
-      },
-    );
-  } catch (error) {
-    // Model might not be downloaded yet, return empty capabilities
-    console.error(`Failed to get capabilities for ${modelName}:`, error);
-    return new ModelCapabilitiesResponse({ capabilities: [] });
-  }
+  }, signal);
 }
 
 export type ChatEventUnion = ChatEvent | DownloadEvent | ErrorEvent;
@@ -570,6 +591,7 @@ export async function* pullModel(
 
 export interface ModelRecommendation {
   model: string;
+  capabilities?: string[];
   description: string;
   context_length?: number;
   max_output_tokens?: number;
