@@ -67,6 +67,14 @@ I'm a basic program that prints the famous "Hello, world!" message to the consol
 ollama run gemma4 "What's in this image? /Users/jmorgan/Desktop/smile.png"
 ```
 
+Media-capable models accept JPEG, PNG, and WebP images and WAV and MP3 audio.
+Multiple file paths can be included in one prompt in the order they should be
+presented to the model.
+
+```
+ollama run gemma4 "Summarize this recording: ./meeting.mp3"
+```
+
 ### Generate embeddings
 
 ```
