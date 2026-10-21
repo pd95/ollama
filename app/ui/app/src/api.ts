@@ -238,7 +238,7 @@ export async function getModels(query?: string): Promise<Model[]> {
       const normalizedQuery = query.toLowerCase().trim();
 
       const filteredModels = models.filter((m: Model) => {
-        return m.model.toLowerCase().startsWith(normalizedQuery);
+        return m.model.toLowerCase().includes(normalizedQuery);
       });
 
       let exactMatch = false;

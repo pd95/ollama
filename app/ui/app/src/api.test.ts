@@ -144,6 +144,85 @@ describe("picker capability discovery", () => {
   });
 });
 
+describe("picker model search", () => {
+  afterEach(() => {
+    listModels.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  function installedModels() {
+    return [
+      { name: "apertus:latest", digest: "plain" },
+      {
+        name: "pd95/apertus-mlx:latest",
+        digest: "namespaced",
+        capabilities: ["completion", "vision"],
+      },
+      { name: "pd95/apertus-mini-mlx:1.5b", digest: "mini" },
+      { name: "gemma4:12b", digest: "other" },
+    ];
+  }
+
+  it("finds terms anywhere in installed names, including namespaces and tags", async () => {
+    listModels.mockResolvedValue({ models: installedModels() });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementation(
+          async () =>
+            new Response(JSON.stringify({ error: "not in registry" })),
+        ),
+    );
+    const cases: [string, string[]][] = [
+      ["apert", ["apertus", "pd95/apertus-mlx", "pd95/apertus-mini-mlx:1.5b"]],
+      [
+        " APERT ",
+        ["apertus", "pd95/apertus-mlx", "pd95/apertus-mini-mlx:1.5b"],
+      ],
+      ["MINI-MLX", ["pd95/apertus-mini-mlx:1.5b"]],
+      ["1.5b", ["pd95/apertus-mini-mlx:1.5b"]],
+      ["pd95/", ["pd95/apertus-mlx", "pd95/apertus-mini-mlx:1.5b"]],
+    ];
+    for (const [query, expected] of cases) {
+      expect((await getModels(query)).map((model) => model.model)).toEqual(
+        expected,
+      );
+    }
+  });
+
+  it("keeps exact installed matches and their metadata without registry duplicates", async () => {
+    listModels.mockResolvedValue({ models: installedModels() });
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const models = await getModels("pd95/apertus-mlx");
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({
+      model: "pd95/apertus-mlx",
+      digest: "namespaced",
+      capabilities: ["completion", "vision"],
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps substring matches when adding an available registry model", async () => {
+    listModels.mockResolvedValue({ models: installedModels().slice(1) });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ stale: false }))),
+    );
+    const models = await getModels("apertus");
+    expect(models.map((model) => model.model)).toEqual([
+      "pd95/apertus-mlx",
+      "pd95/apertus-mini-mlx:1.5b",
+      "apertus",
+    ]);
+    expect(models[0].digest).toBe("namespaced");
+    expect(models[0].capabilities).toEqual(["completion", "vision"]);
+    expect(models[2].digest).toBeUndefined();
+  });
+});
+
 describe("fetchConnectUrl", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
