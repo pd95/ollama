@@ -12,13 +12,19 @@ import (
 // untrusted; this is what bounds Resample's output length.
 const maxAudioSeconds = 600
 
+// maxAudioBytes bounds compressed input before the native MP3 decoder copies
+// it. At the highest standard MP3 bitrate, 600 seconds is under 24 MiB.
+const maxAudioBytes = 32 << 20
+
 // Decode decodes a supported audio container into mono PCM samples at
 // the container's declared sample rate, downmixing multiple channels by
 // averaging. The supported containers are decided here so all models accept
-// the same formats; WAV is the only one today. Clips longer than
-// maxAudioSeconds are rejected. Models resample to their own rate with
-// Resample.
+// the same formats. Clips longer than maxAudioSeconds are rejected. Models
+// resample to their own rate with Resample.
 func Decode(data []byte) ([]float32, int, error) {
+	if isMP3(data) {
+		return decodeMP3(data, maxAudioBytes, 0)
+	}
 	if len(data) < 12 || string(data[0:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
 		return nil, 0, errors.New("unrecognized audio format")
 	}
@@ -30,6 +36,11 @@ func Decode(data []byte) ([]float32, int, error) {
 		return nil, 0, fmt.Errorf("audio longer than %d seconds", maxAudioSeconds)
 	}
 	return samples, rate, nil
+}
+
+func isMP3(data []byte) bool {
+	return len(data) >= 3 && string(data[:3]) == "ID3" ||
+		len(data) >= 2 && data[0] == 0xff && data[1]&0xe0 == 0xe0
 }
 
 func decodeWAV(data []byte) ([]float32, int, error) {
