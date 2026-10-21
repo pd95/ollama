@@ -75,6 +75,7 @@ func TestApertusMXFP8UsesGeneralQuantizationPolicy(t *testing.T) {
 		{"70B MLP projection", "model.layers.0.mlp.down_proj.weight", "mxfp8", []int32{8192, 28672}},
 		{"embedding remains source precision", "model.embed_tokens.weight", "", []int32{131072, 8192}},
 		{"routing remains source precision", "model.layers.0.mlp.gate.weight", "", []int32{8192, 8192}},
+		{"Apertus 1.5 media remains source precision", "model.audio_tokenizer.encoder.layers.0.weight", "", []int32{8192, 8192}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := transform.quantizationType(tt.tensor, tt.shape, "mxfp8"); got != tt.want {
@@ -106,7 +107,7 @@ func TestApertusElementCount(t *testing.T) {
 	}
 }
 
-func TestApertus1p5TextPlanFiltersMediaTensors(t *testing.T) {
+func TestApertus1p5PlanKeepsEncodeOnlyMediaTensors(t *testing.T) {
 	inv := apertus1p5Inventory()
 	policy, err := newTensorImportTransform(inv)
 	if err != nil {
@@ -123,25 +124,30 @@ func TestApertus1p5TextPlanFiltersMediaTensors(t *testing.T) {
 		for _, tensor := range spec.Tensors {
 			tensorCount++
 			seen[tensor.Name] = tensor
-			if !isApertus1p5TextTensor(tensor.Name) {
-				t.Fatalf("planned media/non-text tensor %q", tensor.Name)
+			if !isApertus1p5RuntimeTensor(tensor.Name) {
+				t.Fatalf("planned unsupported tensor %q", tensor.Name)
 			}
 			if tensor.Name != tensor.Sources[0].Name {
 				t.Fatalf("tensor name %q rewrote source %q", tensor.Name, tensor.Sources[0].Name)
 			}
 		}
 	}
-	if tensorCount != 451 {
-		t.Fatalf("planned tensor count = %d, want 451", tensorCount)
+	if tensorCount != 761 {
+		t.Fatalf("planned tensor count = %d, want 761", tensorCount)
 	}
-	if got := len(inv.Tensors) - tensorCount; got != 473 {
-		t.Fatalf("filtered tensor count = %d, want 473", got)
+	if got := len(inv.Tensors) - tensorCount; got != 163 {
+		t.Fatalf("filtered tensor count = %d, want 163", got)
 	}
 	if seen["model.language_model.embed_tokens.weight"].Quantize != "" {
 		t.Fatalf("embedding quantize = %q, want source precision", seen["model.language_model.embed_tokens.weight"].Quantize)
 	}
 	if seen["lm_head.weight"].Quantize != "nvfp4" {
 		t.Fatalf("lm_head quantize = %q, want nvfp4", seen["lm_head.weight"].Quantize)
+	}
+	for name, tensor := range seen {
+		if isApertus1p5MediaTensor(name) && tensor.Quantize != "" {
+			t.Fatalf("media tensor %q quantize = %q, want source precision", name, tensor.Quantize)
+		}
 	}
 }
 
@@ -175,11 +181,19 @@ func apertus1p5Inventory() Inventory {
 			tensors[name] = SourceTensor{Name: name, Dtype: "BF16", Shape: suffix.shape}
 		}
 	}
-	for i := range 473 {
+	for i := range 247 {
 		name := "model.vision_tokenizer.synthetic." + strconv.Itoa(i) + ".weight"
-		if i%2 == 1 {
-			name = "model.audio_tokenizer.synthetic." + strconv.Itoa(i) + ".weight"
-		}
+		tensors[name] = SourceTensor{Name: name, Dtype: "F32", Shape: []int32{32, 32}}
+	}
+	for i := range 62 {
+		name := "model.audio_tokenizer.encoder.synthetic." + strconv.Itoa(i) + ".weight"
+		tensors[name] = SourceTensor{Name: name, Dtype: "F32", Shape: []int32{32, 32}}
+	}
+	tensors["model.audio_tokenizer.quantizer.codebook.embed"] = SourceTensor{
+		Name: "model.audio_tokenizer.quantizer.codebook.embed", Dtype: "F32", Shape: []int32{4096, 512},
+	}
+	for i := range 163 {
+		name := "model.audio_tokenizer.decoder.synthetic." + strconv.Itoa(i) + ".weight"
 		tensors[name] = SourceTensor{Name: name, Dtype: "F32", Shape: []int32{32, 32}}
 	}
 	return Inventory{
