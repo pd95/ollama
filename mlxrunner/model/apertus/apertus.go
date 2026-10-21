@@ -137,6 +137,7 @@ type XIELU struct {
 	AlphaN float32
 	Beta   float32
 	Eps    float32
+	Params []*mlx.Array
 }
 
 func newModel(root *model.Root) (model.Model, error) {
@@ -969,16 +970,20 @@ func (m *MLP) Forward(x *mlx.Array) *mlx.Array {
 	return m.DownProj.Forward(m.Act.Forward(m.UpProj.Forward(x)))
 }
 
-func (a *XIELU) Forward(x *mlx.Array) *mlx.Array {
+var compiledXIELU = mlx.Compile("ApertusXIELU", func(in ...*mlx.Array) []*mlx.Array {
+	x := in[0]
 	outDType := x.DType()
 	x = x.AsType(mlx.DTypeFloat32)
 	zero, one := mlx.FromValue[float32](0), mlx.FromValue[float32](1)
-	alphaP, alphaN := mlx.FromValue(a.AlphaP), mlx.FromValue(a.AlphaN)
-	beta, eps := mlx.FromValue(a.Beta), mlx.FromValue(a.Eps)
+	alphaP, alphaN, beta, eps := in[1], in[2], in[3], in[4]
 	positive := mlx.Add(mlx.Mul(alphaP, mlx.Mul(x, x)), mlx.Mul(beta, x))
 	expm1 := mlx.Sub(mlx.Exp(mlx.Minimum(x, eps)), one)
 	negative := mlx.Add(mlx.Mul(mlx.Sub(expm1, x), alphaN), mlx.Mul(beta, x))
-	return mlx.Where(x.Greater(zero), positive, negative).AsType(outDType)
+	return []*mlx.Array{mlx.Where(x.Greater(zero), positive, negative).AsType(outDType)}
+}, mlx.Shapeless())
+
+func (a *XIELU) Forward(x *mlx.Array) *mlx.Array {
+	return compiledXIELU(x, a.Params[0], a.Params[1], a.Params[2], a.Params[3])[0]
 }
 
 func newXIELU(alphaPParam, alphaNParam, betaParam, epsParam *mlx.Array) (*XIELU, error) {
@@ -998,7 +1003,9 @@ func newXIELU(alphaPParam, alphaNParam, betaParam, epsParam *mlx.Array) (*XIELU,
 	if err != nil {
 		return nil, fmt.Errorf("eps: %w", err)
 	}
-	return &XIELU{AlphaP: float32(softplus64(float64(alphaP))), AlphaN: beta + float32(softplus64(float64(alphaN))), Beta: beta, Eps: eps}, nil
+	a := &XIELU{AlphaP: float32(softplus64(float64(alphaP))), AlphaN: beta + float32(softplus64(float64(alphaN))), Beta: beta, Eps: eps}
+	a.Params = []*mlx.Array{mlx.FromValue(a.AlphaP), mlx.FromValue(a.AlphaN), mlx.FromValue(a.Beta), mlx.FromValue(a.Eps)}
+	return a, nil
 }
 
 func scalarParam(x *mlx.Array) (float32, error) {
