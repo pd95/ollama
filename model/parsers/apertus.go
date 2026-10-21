@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/model/apertusnames"
 )
 
 const (
@@ -37,7 +38,7 @@ const (
 type ApertusParser struct {
 	state       apertusParserState
 	acc         strings.Builder
-	allowedTool map[string]struct{}
+	allowedTool map[string]string
 	initErr     error
 	callIndex   int
 	pendingBare bool
@@ -52,7 +53,7 @@ func (p *ApertusParser) Init(tools []api.Tool, lastMessage *api.Message, thinkVa
 func (p *ApertusParser) InitWithFormat(tools []api.Tool, lastMessage *api.Message, thinkValue *api.ThinkValue, format json.RawMessage) []api.Tool {
 	p.state = apertusContent
 	p.acc.Reset()
-	p.allowedTool = make(map[string]struct{}, len(tools))
+	p.allowedTool = make(map[string]string, len(tools))
 	p.initErr = nil
 	p.callIndex = 0
 	p.pendingBare = false
@@ -60,15 +61,16 @@ func (p *ApertusParser) InitWithFormat(tools []api.Tool, lastMessage *api.Messag
 	p.format = apertusResponseFormatActive(format)
 	for _, tool := range tools {
 		name := tool.Function.Name
-		if !apertusIdentifier(name) {
-			p.initErr = fmt.Errorf("invalid apertus tool name %q", name)
+		encodedName, err := apertusnames.Encode(name)
+		if err != nil {
+			p.initErr = err
 			continue
 		}
-		if _, exists := p.allowedTool[name]; exists {
+		if _, exists := p.allowedTool[encodedName]; exists {
 			p.initErr = fmt.Errorf("duplicate apertus tool name %q", name)
 			continue
 		}
-		p.allowedTool[name] = struct{}{}
+		p.allowedTool[encodedName] = name
 	}
 	return tools
 }
@@ -309,7 +311,8 @@ func (p *ApertusParser) parseToolCalls(raw string) ([]api.ToolCall, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := p.allowedTool[name]; !ok {
+		originalName, ok := p.allowedTool[name]
+		if !ok {
 			return nil, fmt.Errorf("unknown apertus tool %q", name)
 		}
 		args := api.NewToolCallFunctionArguments()
@@ -324,7 +327,7 @@ func (p *ApertusParser) parseToolCalls(raw string) ([]api.ToolCall, error) {
 				}
 			}
 		}
-		calls = append(calls, api.ToolCall{Function: api.ToolCallFunction{Index: p.callIndex + len(calls), Name: name, Arguments: args}})
+		calls = append(calls, api.ToolCall{Function: api.ToolCallFunction{Index: p.callIndex + len(calls), Name: originalName, Arguments: args}})
 	}
 	p.callIndex += len(calls)
 	return calls, nil
@@ -389,17 +392,4 @@ func (p *ApertusParser) looksLikeToolCallStart(s string) bool {
 		return true
 	}
 	return strings.HasPrefix("[{", s) || strings.HasPrefix("{", s) || strings.HasPrefix(s, "[{") || strings.HasPrefix(s, "{")
-}
-
-func apertusIdentifier(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := range len(s) {
-		c := s[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$' || (i > 0 && c >= '0' && c <= '9')) {
-			return false
-		}
-	}
-	return true
 }
