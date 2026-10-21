@@ -31,13 +31,8 @@ import { ErrorMessage } from "./ErrorMessage";
 import { processFiles } from "@/utils/fileValidation";
 import type { ImageData } from "@/types/webview";
 import { PlusIcon } from "@heroicons/react/24/outline";
-import {
-  resolveThinkingSetting,
-  supportsThinkingLevels,
-  supportsThinkingToggle,
-} from "@/utils/thinking";
-
-export type ThinkingLevel = "low" | "medium" | "high";
+import { useThinking } from "@/hooks/useThinking";
+import type { ThinkingValue } from "@/utils/thinking";
 
 interface FileAttachment {
   filename: string;
@@ -107,7 +102,6 @@ function ChatForm({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const thinkButtonRef = useRef<HTMLButtonElement>(null);
-  const thinkingLevelButtonRef = useRef<HTMLButtonElement>(null);
   const webSearchButtonRef = useRef<HTMLButtonElement>(null);
   const modelPickerRef = useRef<HTMLButtonElement>(null);
   const submitButtonRef = useRef<HTMLButtonElement>(null);
@@ -140,10 +134,10 @@ function ChatForm({
   const handleModelPickerDropdownToggle = (isOpen: boolean) => {
     if (
       isOpen &&
-      thinkingLevelButtonRef.current &&
-      (thinkingLevelButtonRef.current as any).closeDropdown
+      thinkButtonRef.current &&
+      (thinkButtonRef.current as any).closeDropdown
     ) {
-      (thinkingLevelButtonRef.current as any).closeDropdown();
+      (thinkButtonRef.current as any).closeDropdown();
     }
   };
 
@@ -158,28 +152,39 @@ function ChatForm({
   const { cloudDisabled } = useCloudStatus();
 
   const supportsWebSearch = useHasToolsCapability(selectedModel?.model);
-  // Use per-chat thinking level instead of global
-  const thinkLevel: ThinkingLevel =
-    settingsThinkLevel === "none" || !settingsThinkLevel
-      ? "medium"
-      : (settingsThinkLevel as ThinkingLevel);
-  const setThinkingLevel = (newLevel: ThinkingLevel) => {
-    setSettings({ ThinkLevel: newLevel });
+  const thinking = useThinking(
+    selectedModel?.model,
+    thinkEnabled,
+    settingsThinkLevel,
+  );
+  const thinkingEnabled =
+    thinking.value !== undefined && thinking.value !== false;
+  const setThinkingValue = (value: ThinkingValue) => {
+    thinking.setValue(value);
+    const updates = {
+      ...(!thinking.usesMetadata
+        ? typeof value === "boolean"
+          ? { ThinkEnabled: value }
+          : { ThinkLevel: value }
+        : {}),
+      ...(value !== false && thinking.conflictsWithWebSearch
+        ? { WebSearchEnabled: false }
+        : {}),
+    };
+    if (Object.keys(updates).length > 0) setSettings(updates);
   };
 
-  const modelSupportsThinkingLevels = supportsThinkingLevels(
-    selectedModel?.model,
-  );
-  const supportsThinkToggling = supportsThinkingToggle(selectedModel?.model);
-
   useEffect(() => {
-    if (supportsThinkToggling && thinkEnabled && webSearchEnabled) {
+    if (
+      thinking.conflictsWithWebSearch &&
+      thinkingEnabled &&
+      webSearchEnabled
+    ) {
       setSettings({ WebSearchEnabled: false });
     }
   }, [
-    selectedModel?.model,
-    supportsThinkToggling,
-    thinkEnabled,
+    thinking.conflictsWithWebSearch,
+    thinkingEnabled,
     webSearchEnabled,
     setSettings,
   ]);
@@ -351,13 +356,15 @@ function ChatForm({
     (current: HTMLElement, direction: "next" | "prev") => {
       const elements = [
         textareaRef,
-        modelSupportsThinkingLevels ? thinkingLevelButtonRef : thinkButtonRef,
+        thinkButtonRef,
         webSearchButtonRef,
         modelPickerRef,
         submitButtonRef,
       ]
         .map((ref) => ref.current)
-        .filter(Boolean) as HTMLElement[];
+        .filter(
+          (element) => element && !(element as HTMLButtonElement).disabled,
+        ) as HTMLElement[];
       const index = elements.indexOf(current);
       if (index === -1) return;
       const nextIndex =
@@ -415,13 +422,13 @@ function ChatForm({
       if (e.key === "Tab" && e.target !== textareaRef.current) {
         const target = e.target as HTMLElement;
         const focusableElements = [
-          modelSupportsThinkingLevels
-            ? thinkingLevelButtonRef.current
-            : thinkButtonRef.current,
+          thinkButtonRef.current,
           webSearchButtonRef.current,
           modelPickerRef.current,
           submitButtonRef.current,
-        ].filter(Boolean) as HTMLElement[];
+        ].filter(
+          (element) => element && !(element as HTMLButtonElement).disabled,
+        ) as HTMLElement[];
 
         if (focusableElements.includes(target)) {
           e.preventDefault();
@@ -497,11 +504,7 @@ function ChatForm({
 
     const useWebSearch =
       supportsWebSearch && webSearchEnabled && !cloudDisabled;
-    const useThink = resolveThinkingSetting(
-      selectedModel?.model,
-      thinkEnabled,
-      thinkLevel,
-    );
+    const useThink = thinking.value;
 
     if (onSubmit) {
       onSubmit(message.content, {
@@ -559,13 +562,11 @@ function ChatForm({
     if (e.key === "Tab") {
       e.preventDefault();
       const focusableElements = [
-        modelSupportsThinkingLevels
-          ? thinkingLevelButtonRef.current
-          : thinkButtonRef.current,
+        thinkButtonRef.current,
         webSearchButtonRef.current,
         modelPickerRef.current,
         submitButtonRef.current,
-      ].filter(Boolean);
+      ].filter((element) => element && !element.disabled);
 
       if (e.shiftKey) {
         // Shift+Tab: focus last focusable element
@@ -892,43 +893,14 @@ function ChatForm({
                 >
                   <PlusIcon className="w-4.5 h-4.5 stroke-2 text-neutral-500 dark:text-neutral-400" />
                 </button>
-                {/* Thinking Level Button */}
-                {modelSupportsThinkingLevels && (
-                  <>
-                    <ThinkButton
-                      mode="thinkingLevel"
-                      ref={thinkingLevelButtonRef}
-                      isVisible={modelSupportsThinkingLevels}
-                      currentLevel={thinkLevel}
-                      onLevelChange={setThinkingLevel}
-                      onDropdownToggle={handleThinkingLevelDropdownToggle}
-                    />
-                  </>
-                )}
-                {/* Think Button turn on and off */}
-                {supportsThinkToggling && !modelSupportsThinkingLevels && (
-                  <>
-                    <ThinkButton
-                      mode="think"
-                      ref={thinkButtonRef}
-                      isVisible={
-                        supportsThinkToggling && !modelSupportsThinkingLevels
-                      }
-                      isActive={thinkEnabled}
-                      onToggle={() => {
-                        // DeepSeek-v3 specific - thinking and web search are mutually exclusive
-                        if (supportsThinkToggling) {
-                          const enable = !thinkEnabled;
-                          setSettings({
-                            ThinkEnabled: enable,
-                            ...(enable ? { WebSearchEnabled: false } : {}),
-                          });
-                          return;
-                        }
-                        setSettings({ ThinkEnabled: !thinkEnabled });
-                      }}
-                    />
-                  </>
+                {thinking.controls && thinking.value !== undefined && (
+                  <ThinkButton
+                    ref={thinkButtonRef}
+                    values={thinking.controls.values}
+                    value={thinking.value}
+                    onChange={setThinkingValue}
+                    onDropdownToggle={handleThinkingLevelDropdownToggle}
+                  />
                 )}
                 <WebSearchButton
                   ref={webSearchButtonRef}
@@ -939,10 +911,17 @@ function ChatForm({
                       setLoginPromptFeature("webSearch");
                     }
                     const enable = !webSearchEnabled;
-                    if (supportsThinkToggling && enable) {
+                    if (
+                      thinking.conflictsWithWebSearch &&
+                      enable &&
+                      thinking.controls?.values.includes(false)
+                    ) {
+                      thinking.setValue(false);
                       setSettings({
                         WebSearchEnabled: true,
-                        ThinkEnabled: false,
+                        ...(!thinking.usesMetadata
+                          ? { ThinkEnabled: false }
+                          : {}),
                       });
                       return;
                     }

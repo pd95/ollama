@@ -9,7 +9,7 @@ func chatThinkValue(think any) *api.ThinkValue {
 		// explicitly switched off when tools are enabled.
 		return &api.ThinkValue{Value: value}
 	case string:
-		if value != "" && value != "none" {
+		if value != "" {
 			return &api.ThinkValue{Value: value}
 		}
 	}

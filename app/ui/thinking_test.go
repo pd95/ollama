@@ -13,7 +13,9 @@ func TestChatThinkValue(t *testing.T) {
 		{name: "enabled", think: true, wantValue: true},
 		{name: "disabled", think: false, wantValue: false},
 		{name: "level", think: "medium", wantValue: "medium"},
-		{name: "none", think: "none", wantNil: true},
+		{name: "named none level", think: "none", wantValue: "none"},
+		{name: "arbitrary level", think: "xhigh", wantValue: "xhigh"},
+		{name: "empty", think: "", wantNil: true},
 	}
 
 	for _, tt := range tests {

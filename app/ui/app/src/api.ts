@@ -13,6 +13,7 @@ import {
 } from "@/gotypes";
 import { parseJsonlFromResponse } from "./util/jsonl-parsing";
 import { ollamaClient as ollama } from "./lib/ollama-client";
+import { parseThinkingControls, type ThinkingControls } from "./utils/thinking";
 import type { ModelResponse } from "ollama/browser";
 import { API_BASE, OLLAMA_DOT_COM } from "./lib/config";
 import type {
@@ -318,17 +319,36 @@ export async function getClaudeDesktopAvailableModels(
   }
 }
 
+export type ModelCapabilityDetails = ModelCapabilitiesResponse & {
+  thinking?: ThinkingControls;
+  renderer?: string;
+};
+
 export async function getModelCapabilities(
   modelName: string,
-): Promise<ModelCapabilitiesResponse> {
+): Promise<ModelCapabilityDetails> {
   try {
     const showResponse = await ollama.show({ model: modelName });
 
-    return new ModelCapabilitiesResponse({
-      capabilities: Array.isArray(showResponse.capabilities)
-        ? showResponse.capabilities
-        : [],
-    });
+    // The browser SDK may predate these optional backend discovery fields.
+    const discovery = showResponse as typeof showResponse & {
+      thinking?: unknown;
+      renderer?: unknown;
+    };
+    return Object.assign(
+      new ModelCapabilitiesResponse({
+        capabilities: Array.isArray(showResponse.capabilities)
+          ? showResponse.capabilities
+          : [],
+      }),
+      {
+        thinking: parseThinkingControls(discovery.thinking),
+        renderer:
+          typeof discovery.renderer === "string"
+            ? discovery.renderer
+            : undefined,
+      },
+    );
   } catch (error) {
     // Model might not be downloaded yet, return empty capabilities
     console.error(`Failed to get capabilities for ${modelName}:`, error);
