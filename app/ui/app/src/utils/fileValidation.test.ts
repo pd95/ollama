@@ -21,6 +21,12 @@ describe("fileValidation", () => {
       return new File([blob], name, { type });
     };
 
+    it("accepts WAV and MP3 audio and keeps unsupported extensions rejected", () => {
+      expect(validateFile(createMockFile("speech.wav", 1024, "audio/wav")).valid).toBe(true);
+      expect(validateFile(createMockFile("speech.mp3", 1024, "audio/mpeg")).valid).toBe(true);
+      expect(validateFile(createMockFile("speech.flac", 1024, "audio/flac")).valid).toBe(false);
+    });
+
     it("should accept WebP images when vision capability is enabled", () => {
       const file = createMockFile("test.webp", 1024, "image/webp");
       const result = validateFile(file, {
