@@ -122,8 +122,11 @@ func (t *Array) Clone() *Array {
 // valid reports whether t still refers to an array: false once its scope
 // freed it.
 func (t *Array) valid() bool {
-	return t.ctx.ctx != nil
+	return t != nil && t.ctx.ctx != nil
 }
+
+// Valid reports whether the array still owns a live MLX value.
+func (t *Array) Valid() bool { return t.valid() }
 
 func (t *Array) free() {
 	mlxCheck(C.mlx_array_free(t.ctx))
