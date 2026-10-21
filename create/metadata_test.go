@@ -103,6 +103,20 @@ func TestInferSafetensorsConfigFamilies(t *testing.T) {
 		wantCaps        []string
 	}{
 		{
+			name:         "apertus architecture",
+			config:       `{"architectures":["ApertusForCausalLM"]}`,
+			wantParser:   "apertus",
+			wantRenderer: "apertus",
+			wantCaps:     []string{"completion", "tools"},
+		},
+		{
+			name:         "apertus model type",
+			config:       `{"model_type":"apertus"}`,
+			wantParser:   "apertus",
+			wantRenderer: "apertus",
+			wantCaps:     []string{"completion", "tools"},
+		},
+		{
 			name:         "qwen3",
 			config:       `{"architectures":["Qwen3ForCausalLM"]}`,
 			wantParser:   "qwen3",
@@ -304,6 +318,24 @@ func TestInferSafetensorsConfigGPTOSSFamily(t *testing.T) {
 	}
 }
 
+func TestInferSafetensorsConfigApertusFamily(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"architectures":["ApertusForCausalLM"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	config := inferConfigForTest(t, dir, "", "")
+	if config.ModelFamily != "apertus" || !slices.Equal(config.ModelFamilies, []string{"apertus"}) {
+		t.Fatalf("model family/families = %q/%v, want apertus/[apertus]", config.ModelFamily, config.ModelFamilies)
+	}
+	if config.Parser != "apertus" || config.Renderer != "apertus" {
+		t.Fatalf("parser/renderer = %q/%q, want apertus/apertus", config.Parser, config.Renderer)
+	}
+	if want := []string{"completion", "tools"}; !slices.Equal(config.Capabilities, want) {
+		t.Fatalf("capabilities = %v, want %v", config.Capabilities, want)
+	}
+}
+
 func TestInferSafetensorsCapabilitiesFromParser(t *testing.T) {
 	for _, tt := range []struct {
 		parser string
@@ -349,5 +381,26 @@ func TestStrandsDecisionMetadata(t *testing.T) {
 	}
 	if got.Parser != "" || got.Renderer != "strands" || len(got.Capabilities) != 1 || got.Capabilities[0] != "decision" {
 		t.Fatalf("unexpected Strands metadata: %+v", got)
+	}
+}
+
+func TestApertusImportPreservesDecisionMetadata(t *testing.T) {
+	for _, tt := range []struct {
+		architecture string
+		renderer     string
+	}{
+		{"ClefForDecision", "clef"},
+		{"KevForDecision", "kev"},
+	} {
+		t.Run(tt.architecture, func(t *testing.T) {
+			cfg := sourceModelConfig{Architectures: []string{tt.architecture}, ModelType: "qwen3_5"}
+			got, err := inferSafetensorsConfig(t.TempDir(), cfg, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Parser != "" || got.Renderer != tt.renderer || !slices.Equal(got.Capabilities, []string{"decision"}) {
+				t.Fatalf("unexpected decision metadata after Apertus import: %+v", got)
+			}
+		})
 	}
 }
