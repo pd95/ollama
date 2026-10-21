@@ -441,6 +441,7 @@ var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
 	"Qwen3NextMoeForConditionalGeneration":  newQwen35ImportTransform,
 	"Qwen4ExpForConditionalGeneration":      newQwen4ExpImportTransform,
 	"GptOssForCausalLM":                     newGPTOSSImportTransform,
+	"ApertusForCausalLM":                    newApertusImportTransform,
 	"Gemma4ForCausalLM":                     newGemma4ImportTransform,
 	"Gemma4ForConditionalGeneration":        newGemma4ImportTransform,
 	"Gemma4UnifiedForCausalLM":              newGemma4ImportTransform,
