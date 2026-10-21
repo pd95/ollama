@@ -378,7 +378,11 @@ func (cfg sourceModelConfig) QuantMetadata() map[string]string {
 		}
 	}
 
-	quantType := sourceQuantType(q.Mode, q.Bits)
+	mode := q.Mode
+	if mode == "" {
+		mode = q.QuantMethod
+	}
+	quantType := sourceQuantType(mode, q.Bits)
 	if quantType == "" {
 		return nil
 	}
@@ -436,6 +440,7 @@ var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
 	"Qwen3NextMoeForCausalLM":               newQwen35ImportTransform,
 	"Qwen3NextMoeForConditionalGeneration":  newQwen35ImportTransform,
 	"Qwen4ExpForConditionalGeneration":      newQwen4ExpImportTransform,
+	"GptOssForCausalLM":                     newGPTOSSImportTransform,
 	"Gemma4ForCausalLM":                     newGemma4ImportTransform,
 	"Gemma4ForConditionalGeneration":        newGemma4ImportTransform,
 	"Gemma4UnifiedForCausalLM":              newGemma4ImportTransform,

@@ -12,6 +12,9 @@ import (
 	_ "github.com/ollama/ollama/mlxrunner/model/laguna"
 	_ "github.com/ollama/ollama/mlxrunner/model/laya"
 	_ "github.com/ollama/ollama/mlxrunner/model/llama"
+
+	_ "github.com/ollama/ollama/mlxrunner/model/gptoss"
+
 	_ "github.com/ollama/ollama/mlxrunner/model/nemotron_h"
 	_ "github.com/ollama/ollama/mlxrunner/model/pplxdecider"
 	_ "github.com/ollama/ollama/mlxrunner/model/qwen3"
