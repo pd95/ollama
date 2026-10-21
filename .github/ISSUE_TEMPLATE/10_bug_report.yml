@@ -1,68 +1,78 @@
 name: Bug report
-labels: [bug]
-description: Something isn't working right.
+description: Report a problem with the Ollama MLX preview.
+labels:
+  - bug
 body:
-  - type: textarea
-    id: description
+  - type: markdown
     attributes:
-      label: What is the issue?
-      description: What happened? What did you expect to happen?
-    validations:
-      required: true
-  - type: textarea
-    id: logs
-    attributes:
-      label: Relevant log output
-      description: Please copy and paste any relevant log output. See [Troubleshooting Guide](https://github.com/ollama/ollama/blob/main/docs/troubleshooting.mdx#how-to-troubleshoot-issues) for details.
-      render: shell
-    validations:
-      required: false
-  - type: dropdown
-    id: os
-    attributes:
-      label: OS
-      description: Which operating system are you using?
-      multiple: true
-      options:
-        - Linux
-        - macOS
-        - Windows
-        - Docker
-        - WSL2
-    validations:
-      required: false
-  - type: dropdown
-    id: gpu
-    attributes:
-      label: GPU
-      description: Which GPU are you using?
-      multiple: true
-      options:
-        - Nvidia
-        - AMD
-        - Intel
-        - Apple
-        - Other
-    validations:
-      required: false
-  - type: dropdown
-    id: cpu
-    attributes:
-      label: CPU
-      description: Which CPU are you using?
-      multiple: true
-      options:
-        - Intel
-        - AMD
-        - Apple
-        - Other
-    validations:
-      required: false
+      value: |-
+        This tracker is for the custom Ollama MLX preview in pd95/ollama.
+        Bug reports, suggestions, questions, and feedback are welcome.
+        This is an experimental project maintained in spare time; responses and fixes are not guaranteed.
+        Submitting an issue does not mean it has been accepted for implementation or a release.
+        Please search existing issues first and remove private information from any material you share.
   - type: input
     id: version
     attributes:
-      label: Ollama version
-      description: What version of Ollama are you using? (`ollama --version`)
-      placeholder: e.g., 0.1.32
+      label: Preview version
+      description: Include the full ollama --version output and the app About version if using the desktop
+        app. For a source build, include the commit.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS version, hardware/chip, RAM, and whether you use desktop chat, CLI, API,
+        or another client.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened, and what did you expect?
+      description: Describe the observed problem and the expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the command/request or UI steps, prompt, relevant settings, and whether it
+        happens in a fresh conversation. If reproduction is unsafe or unavailable, explain instead of
+        repeating it.
+    validations:
+      required: true
+  - type: textarea
+    id: model
+    attributes:
+      label: Model details (if applicable)
+      description: Include the exact model tag, size/quantization, and whether it was downloaded or locally
+        imported. Include its manifest digest or ollama show details if available.
+    validations:
+      required: false
+  - type: textarea
+    id: media
+    attributes:
+      label: Image/audio details (if applicable)
+      description: Include format, image dimensions or audio duration, attachment count, and relevant
+        conversation history. Attach a small non-sensitive sample if possible.
+    validations:
+      required: false
+  - type: textarea
+    id: resources
+    attributes:
+      label: Performance or memory details (if applicable)
+      description: State which metric/process was measured, approximate peak, available RAM, pressure/swap,
+        and whether unloading recovered memory. Do not repeat a workload that freezes the machine merely
+        to collect these details.
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, screenshots, or additional context
+      description: Share relevant excerpts and the time of the failure. Remove tokens, private prompts,
+        personal paths, and other sensitive data before posting.
     validations:
       required: false
