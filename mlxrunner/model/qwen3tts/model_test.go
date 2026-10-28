@@ -127,3 +127,16 @@ func TestCustomVoiceVariants(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRepetitionWindow(t *testing.T) {
+	// MLX-Audio limits repetition penalties to the most recent 64 semantic codes.
+	previous := append([]int32{0}, make([]int32, 64)...)
+	for i := 1; i < len(previous); i++ {
+		previous[i] = 2
+	}
+	gen := generation{Temperature: .9, TopK: 1, TopP: 1, Repetition: 2}
+	token, err := sampleValues([]float32{3, 2, 0}, rand.New(rand.NewPCG(1, 2)), gen, previous, -1)
+	if err != nil || token != 0 {
+		t.Fatalf("old token outside the window was penalized: %d %v", token, err)
+	}
+}

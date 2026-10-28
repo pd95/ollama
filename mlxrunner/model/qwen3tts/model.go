@@ -320,6 +320,7 @@ func sampleLast(logits *mlx.Array, rng *rand.Rand, gen generation, previous []in
 }
 
 func sampleValues(values []float32, rng *rand.Rand, gen generation, previous []int32, eos int) (int32, error) {
+	previous = previous[max(0, len(previous)-64):]
 	repeated := make(map[int32]bool, len(previous))
 	for _, id := range previous {
 		repeated[id] = true
