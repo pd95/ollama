@@ -412,6 +412,24 @@ func RSqrt(a *Array) *Array {
 	return out
 }
 
+// SumAxes reduces several dimensions in the same MLX operation.
+func SumAxes(a *Array, axes []int, keepDims bool) *Array {
+	values := make([]C.int, len(axes))
+	for i, axis := range axes {
+		values[i] = C.int(axis)
+	}
+	out := New("SUM_AXES")
+	mlxCheck(C.mlx_sum_axes(&out.ctx, a.ctx, unsafe.SliceData(values), C.size_t(len(values)), C.bool(keepDims), DefaultStream().ctx))
+	return out
+}
+
+// Variance returns population variance along one dimension.
+func Variance(a *Array, axis int, keepDims bool) *Array {
+	out := New("VARIANCE")
+	mlxCheck(C.mlx_var_axis(&out.ctx, a.ctx, C.int(axis), C.bool(keepDims), 0, DefaultStream().ctx))
+	return out
+}
+
 func Mean(a *Array, axis int, keepDims bool) *Array {
 	out := New("MEAN_AXIS")
 	mlxCheck(C.mlx_mean_axis(&out.ctx, a.ctx, C.int(axis), C.bool(keepDims), DefaultStream().ctx))
@@ -578,6 +596,38 @@ func Sin(a *Array) *Array {
 func Cos(a *Array) *Array {
 	out := New("COS")
 	mlxCheck(C.mlx_cos(&out.ctx, a.ctx, DefaultStream().ctx))
+	return out
+}
+
+// RFFT computes a real-input FFT with backward normalization (no forward scaling).
+func RFFT(a *Array, n, axis int) *Array {
+	out := New("RFFT")
+	mlxCheck(C.mlx_fft_rfft(&out.ctx, a.ctx, C.int(n), C.int(axis), C.MLX_FFT_NORM_BACKWARD, DefaultStream().ctx))
+	return out
+}
+
+// IRFFT inverts RFFT, including the 1/n inverse scaling.
+func IRFFT(a *Array, n, axis int) *Array {
+	out := New("IRFFT")
+	mlxCheck(C.mlx_fft_irfft(&out.ctx, a.ctx, C.int(n), C.int(axis), C.MLX_FFT_NORM_BACKWARD, DefaultStream().ctx))
+	return out
+}
+
+func Real(a *Array) *Array {
+	out := New("REAL")
+	mlxCheck(C.mlx_real(&out.ctx, a.ctx, DefaultStream().ctx))
+	return out
+}
+
+func Imag(a *Array) *Array {
+	out := New("IMAG")
+	mlxCheck(C.mlx_imag(&out.ctx, a.ctx, DefaultStream().ctx))
+	return out
+}
+
+func Atan2(y, x *Array) *Array {
+	out := New("ATAN2")
+	mlxCheck(C.mlx_arctan2(&out.ctx, y.ctx, x.ctx, DefaultStream().ctx))
 	return out
 }
 
