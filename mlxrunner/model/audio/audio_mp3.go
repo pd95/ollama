@@ -26,10 +26,18 @@ func decodeMP3(data []byte, maxInputBytes, maxSamples int) ([]float32, int, erro
 }
 
 func decodeMP3Context(ctx context.Context, data []byte, maxInputBytes, maxSamples int) ([]float32, int, error) {
+	return decodeMP3ContextDuration(ctx, data, maxInputBytes, maxSamples, maxAudioSeconds)
+}
+
+func decodeMP3Duration(data []byte, maxInputBytes, maxSeconds int) ([]float32, int, error) {
+	return decodeMP3ContextDuration(context.Background(), data, maxInputBytes, 0, maxSeconds)
+}
+
+func decodeMP3ContextDuration(ctx context.Context, data []byte, maxInputBytes, maxSamples, maxSeconds int) ([]float32, int, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
-	if maxInputBytes <= 0 || maxSamples < 0 {
+	if maxInputBytes <= 0 || maxSamples < 0 || maxSeconds <= 0 {
 		return nil, 0, errors.New("invalid MP3 decode limits")
 	}
 	if len(data) == 0 {
@@ -54,8 +62,12 @@ func decodeMP3Context(ctx context.Context, data []byte, maxInputBytes, maxSample
 		return nil, 0, fmt.Errorf("unsupported MP3 sample rate %d", uint32(sourceRate))
 	}
 	rate := int(sourceRate)
-	if maxSamples == 0 {
-		maxSamples = maxAudioSeconds * rate
+	durationSamples := math.MaxInt
+	if maxSeconds <= math.MaxInt/rate {
+		durationSamples = maxSeconds * rate
+	}
+	if maxSamples == 0 || maxSamples > durationSamples {
+		maxSamples = durationSamples
 	}
 
 	const chunkFrames = 4096

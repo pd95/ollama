@@ -127,6 +127,10 @@ func Execute(args []string) error {
 	})
 
 	mux.HandleFunc("POST /v1/completions", func(w http.ResponseWriter, r *http.Request) {
+		if runner.Tokenizer == nil {
+			http.Error(w, "this model does not support text generation", http.StatusBadRequest)
+			return
+		}
 		request := Request{Responses: make(chan CompletionResponse)}
 
 		if err := json.NewDecoder(r.Body).Decode(&request.CompletionRequest); err != nil {
@@ -198,6 +202,10 @@ func Execute(args []string) error {
 	})
 
 	mux.HandleFunc("POST /v1/tokenize", func(w http.ResponseWriter, r *http.Request) {
+		if runner.Tokenizer == nil {
+			http.Error(w, "this model does not support text tokenization", http.StatusBadRequest)
+			return
+		}
 		var b bytes.Buffer
 		if _, err := io.Copy(&b, r.Body); err != nil {
 			slog.Error("Failed to read request body", "error", err)
@@ -215,6 +223,10 @@ func Execute(args []string) error {
 	})
 
 	mux.HandleFunc("POST /v1/detokenize", func(w http.ResponseWriter, r *http.Request) {
+		if runner.Tokenizer == nil {
+			http.Error(w, "this model does not support text tokenization", http.StatusBadRequest)
+			return
+		}
 		var tokens []int32
 		if err := json.NewDecoder(r.Body).Decode(&tokens); err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -227,6 +239,7 @@ func Execute(args []string) error {
 	})
 
 	mux.HandleFunc("POST /v1/embeddings", runner.handleEmbed)
+	mux.HandleFunc("POST /v1/audio/speech", runner.speechHandler)
 
 	for source, target := range map[string]string{
 		"GET /health":      "/v1/status",
@@ -270,8 +283,11 @@ func (w *statusRecorder) Status() string {
 	return strconv.Itoa(w.code) + " " + http.StatusText(w.code)
 }
 
-func (w *statusRecorder) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+// Unwrap lets net/http's ResponseController reach deadlines and other controls.
+func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *statusRecorder) FlushError() error {
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
+
+func (w *statusRecorder) Flush() { _ = w.FlushError() }

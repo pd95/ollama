@@ -341,6 +341,67 @@ func TestPlanPrequantizedModelOptNVFP4(t *testing.T) {
 	}
 }
 
+func TestPlanPrequantizedModelOptExpertBank(t *testing.T) {
+	inv := newInventory(sourceModelConfig{Architectures: []string{"FlintForCausalLM"}}, map[string]string{
+		"model.layers.2.mlp.experts.0.gate_proj.weight":         "U32",
+		"model.layers.2.mlp.experts.0.gate_proj.weight_scale":   "U8",
+		"model.layers.2.mlp.experts.0.gate_proj.weight_scale_2": "F32",
+		"model.layers.2.mlp.experts.1.gate_proj.weight":         "U32",
+		"model.layers.2.mlp.experts.1.gate_proj.weight_scale":   "U8",
+		"model.layers.2.mlp.experts.1.gate_proj.weight_scale_2": "F32",
+	})
+	for name, tensor := range inv.Tensors {
+		if slices.Contains([]string{"model.layers.2.mlp.experts.0.gate_proj.weight_scale_2", "model.layers.2.mlp.experts.1.gate_proj.weight_scale_2"}, name) {
+			tensor.Shape = []int32{1}
+		}
+		inv.Tensors[name] = tensor
+	}
+
+	specs, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("got blobs %v, want one expert bank", specNames(specs))
+	}
+	name := "model.layers.2.mlp.experts.gate_proj.weight"
+	bank := specs[0]
+	if bank.Name != "model.layers.2.mlp.experts" || bank.Metadata["quant_type"] != "nvfp4" {
+		t.Fatalf("expert bank = %+v", bank)
+	}
+	for _, tc := range []struct {
+		name  string
+		shape []int32
+	}{
+		{name, []int32{2, 128, 128}},
+		{name + ".scale", []int32{2, 128, 128}},
+		{name + ".global_scale", []int32{2}},
+	} {
+		tensor, ok := inputByOutput(bank, tc.name)
+		if !ok || tensor.Transform != TransformStackExperts || !slices.Equal(tensor.OutShape, tc.shape) || len(tensor.Sources) != 2 {
+			t.Errorf("%s = %+v, want stacked %v", tc.name, tensor, tc.shape)
+		}
+	}
+}
+
+func TestPlanPrequantizedModelOptExpertBankRejectsIncompleteScale(t *testing.T) {
+	inv := newInventory(sourceModelConfig{Architectures: []string{"FlintForCausalLM"}}, map[string]string{
+		"model.layers.2.mlp.experts.0.gate_proj.weight":         "U32",
+		"model.layers.2.mlp.experts.0.gate_proj.weight_scale":   "U8",
+		"model.layers.2.mlp.experts.0.gate_proj.weight_scale_2": "F32",
+		"model.layers.2.mlp.experts.1.gate_proj.weight":         "U32",
+		"model.layers.2.mlp.experts.1.gate_proj.weight_scale":   "U8",
+	})
+	global := inv.Tensors["model.layers.2.mlp.experts.0.gate_proj.weight_scale_2"]
+	global.Shape = []int32{1}
+	inv.Tensors[global.Name] = global
+
+	_, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{})
+	if err == nil || !strings.Contains(err.Error(), "model.layers.2.mlp.experts") {
+		t.Fatalf("Plan() error = %v, want named incomplete expert bank", err)
+	}
+}
+
 func TestPlanPrequantizedModelOptMixedPrecision(t *testing.T) {
 	inv := newInventory(sourceModelConfig{}, map[string]string{
 		"fp4.weight":         "U8",
@@ -540,5 +601,61 @@ func TestPlanPrequantizedRetainsKVCacheScales(t *testing.T) {
 		if !ok || len(spec.Tensors) != 1 || sourceName(spec.Tensors[0]) != name {
 			t.Errorf("%s = %+v ok=%v, want unchanged standalone tensor", name, spec, ok)
 		}
+	}
+}
+
+func TestPlanPrequantizedFlintEmbeddingBits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "int8 embedding", raw: `{"mlx_export":{"embedding_bits":8}}`, want: "int8"},
+		{name: "int4 embedding", raw: `{"mlx_export":{"embedding_bits":4}}`, want: "int4"},
+		{name: "missing bit width", raw: `{"mlx_export":{}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := newInventory(sourceModelConfig{
+				Architectures: []string{"FlintForCausalLM"},
+				Quantization:  sourceQuantization{Bits: 4, Mode: "affine", GroupSize: 64},
+			}, map[string]string{
+				"model.embed_tokens.weight":              "U32",
+				"model.embed_tokens.scales":              "BF16",
+				"model.embed_tokens.biases":              "BF16",
+				"model.layers.0.self_attn.q_proj.weight": "U32",
+				"model.layers.0.self_attn.q_proj.scales": "BF16",
+				"model.layers.0.self_attn.q_proj.biases": "BF16",
+			})
+			// Use valid affine shapes so the test also exercises layout validation.
+			for name, tensor := range mlxAffineTensors(4, "model.layers.0.self_attn.q_proj") {
+				inv.Tensors[name] = tensor
+			}
+			bits := 4
+			if tc.want == "int8" {
+				bits = 8
+			}
+			for name, tensor := range mlxAffineTensors(bits, "model.embed_tokens") {
+				inv.Tensors[name] = tensor
+			}
+			inv.RawConfig = []byte(tc.raw)
+			specs, err := Plan(inv, Classification{Kind: SourcePrequantized}, defaultQuantPolicy{})
+			if tc.want == "" {
+				if err == nil || !strings.Contains(err.Error(), "mlx_export.embedding_bits") {
+					t.Fatalf("Plan() error = %v, want missing embedding bit width", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			embedding, ok := specByName(specs, "model.embed_tokens.weight")
+			if !ok || embedding.Metadata["quant_type"] != tc.want {
+				t.Errorf("embedding quant_type = %q, want %q", embedding.Metadata["quant_type"], tc.want)
+			}
+			projection, ok := specByName(specs, "model.layers.0.self_attn.q_proj.weight")
+			if !ok || projection.Metadata["quant_type"] != "int4" {
+				t.Errorf("projection quant_type = %q, want int4", projection.Metadata["quant_type"])
+			}
+		})
 	}
 }

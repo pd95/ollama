@@ -92,3 +92,15 @@ func TestDecodeMP3LimitsAndErrors(t *testing.T) {
 		t.Fatalf("invalid options error = %v", err)
 	}
 }
+
+// Caller-selected transcription limits must apply to MP3 as well as WAV.
+func TestDecodeLimitMP3(t *testing.T) {
+	data := bytes.Repeat(testMP3(t), 100)
+	samples, rate, err := DecodeLimit(data, maxAudioSeconds+1)
+	if err != nil || rate <= 0 || len(samples) <= rate {
+		t.Fatalf("raised MP3 cap: %d samples at %d Hz, %v", len(samples), rate, err)
+	}
+	if _, _, err := DecodeLimit(data, 1); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("MP3 duration cap: %v", err)
+	}
+}
