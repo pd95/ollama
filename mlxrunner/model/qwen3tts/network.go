@@ -342,12 +342,10 @@ func (n *network) prepare(ids []int32, language, speaker string) (*mlx.Array, *m
 	if !ok {
 		return nil, nil, fmt.Errorf("unknown Qwen3-TTS voice %q", speaker)
 	}
-	language = languageName(language)
-	if language == "auto" || language == "chinese" {
-		var dialect string
-		if json.Unmarshal(n.cfg.Talker.Dialects[speaker], &dialect) == nil && dialect != "" {
-			language = dialect
-		}
+	var err error
+	language, err = speakerLanguage(n.cfg.Talker, language, speaker)
+	if err != nil {
+		return nil, nil, err
 	}
 	c := n.cfg.Talker
 	prefix := []int32{c.NoThink, c.ThinkBOS, c.ThinkEOS}
@@ -376,4 +374,20 @@ func languageName(language string) string {
 		language = alias
 	}
 	return language
+}
+
+func speakerLanguage(c talkerConfig, language, speaker string) (string, error) {
+	language = languageName(language)
+	if language == "auto" || language == "chinese" {
+		var dialect string
+		if json.Unmarshal(c.Dialects[speaker], &dialect) == nil && dialect != "" {
+			language = dialect
+		}
+	}
+	if language != "auto" {
+		if _, ok := c.Languages[language]; !ok {
+			return "", fmt.Errorf("unsupported Qwen3-TTS language or dialect %q for voice %q", language, speaker)
+		}
+	}
+	return language, nil
 }

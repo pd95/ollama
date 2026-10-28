@@ -82,23 +82,52 @@ func prepareQwen3TTSInventory(inv Inventory) (Inventory, error) {
 }
 
 type qwen3TTSImportTransform struct {
-	voices []string
+	voices         []string
+	languages      []string
+	voiceLanguages map[string][]string
 }
 
 func newQwen3TTSImportTransform(raw json.RawMessage) (quantizePolicy, error) {
 	var cfg struct {
 		Talker struct {
-			Speakers map[string]json.RawMessage `json:"spk_id"`
+			Speakers  map[string]json.RawMessage `json:"spk_id"`
+			Languages map[string]int32           `json:"codec_language_id"`
+			Dialects  map[string]json.RawMessage `json:"spk_is_dialect"`
 		} `json:"talker_config"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
 	}
-	return qwen3TTSImportTransform{voices: slices.Sorted(maps.Keys(cfg.Talker.Speakers))}, nil
+	codes := map[string]string{"chinese": "zh", "english": "en", "german": "de", "french": "fr", "russian": "ru", "portuguese": "pt", "spanish": "es", "italian": "it", "korean": "ko", "japanese": "ja"}
+	t := qwen3TTSImportTransform{voices: slices.Sorted(maps.Keys(cfg.Talker.Speakers))}
+	for name := range cfg.Talker.Languages {
+		if code := codes[name]; code != "" {
+			t.languages = append(t.languages, code)
+		}
+	}
+	slices.Sort(t.languages)
+	if len(t.voices) > 0 && len(t.languages) > 0 {
+		t.voiceLanguages = map[string][]string{}
+		for _, voice := range t.voices {
+			languages := slices.Clone(t.languages)
+			var dialect string
+			if json.Unmarshal(cfg.Talker.Dialects[voice], &dialect) == nil && dialect != "" {
+				if _, ok := cfg.Talker.Languages[dialect]; !ok {
+					// These snapshots name two Chinese dialects without supplying
+					// their codec IDs. Do not advertise that pairing as supported.
+					languages = slices.DeleteFunc(languages, func(s string) bool { return s == "zh" })
+				}
+			}
+			t.voiceLanguages[voice] = languages
+		}
+	}
+	return t, nil
 }
 
 func (t qwen3TTSImportTransform) augmentConfig(cfg *model.ConfigV2) error {
 	cfg.Voices = t.voices
+	cfg.Languages = t.languages
+	cfg.VoiceLanguages = t.voiceLanguages
 	return nil
 }
 

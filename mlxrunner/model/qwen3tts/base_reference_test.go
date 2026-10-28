@@ -12,6 +12,16 @@ import (
 
 func TestBaseReference(t *testing.T) {
 	source, reference := os.Getenv("OLLAMA_QWEN3_TTS_SOURCE"), os.Getenv("OLLAMA_SPEECH_REFERENCE_DIR")
+	testBaseReference(t, source, reference)
+}
+
+func TestBaseReferenceOfficial(t *testing.T) {
+	source, reference := os.Getenv("OLLAMA_QWEN3_TTS_OFFICIAL_SOURCE"), os.Getenv("OLLAMA_SPEECH_REFERENCE_DIR")
+	testBaseReference(t, source, reference)
+}
+
+func testBaseReference(t *testing.T, source, reference string) {
+	t.Helper()
 	if source == "" || reference == "" {
 		t.Skip("set pinned Base source and references")
 	}

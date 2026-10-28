@@ -88,11 +88,18 @@ func loadSpeaker(cfg speakerConfig, tensors map[string]*mlx.Array) (*speakerEnco
 		return nil, err
 	}
 	w := &weights{tensors: tensors}
+	var derived []*mlx.Array
 	conv := func(name string, input, output, kernel, dilation int) *convolution {
 		p := "speaker_encoder." + name
 		a, b := w.get(p+".weight"), w.get(p+".bias")
 		if a == nil || b == nil {
 			return nil
+		}
+		// Original PyTorch checkpoints retain OIK. The MLX conversion uses
+		// OKI; the fixed architecture's channel/kernel sizes distinguish them.
+		if slices.Equal(a.Dims(), []int{output, input, kernel}) {
+			a = mlx.Contiguous(mlx.Transpose(a, 0, 2, 1), false)
+			derived = append(derived, a)
 		}
 		if !slices.Equal(a.Dims(), []int{output, kernel, input}) || !slices.Equal(b.Dims(), []int{output}) {
 			w.err = fmt.Errorf("Qwen3-TTS speaker convolution %s has incompatible shape", p)
@@ -125,7 +132,7 @@ func loadSpeaker(cfg speakerConfig, tensors map[string]*mlx.Array) (*speakerEnco
 		window[i] = float32(.5 * (1 - math.Cos(2*math.Pi*float64(i)/1023)))
 	}
 	s.window = mlx.FromValues(window, 1024)
-	s.derived = []*mlx.Array{s.melBank, s.window}
+	s.derived = append(derived, s.melBank, s.window)
 	return s, nil
 }
 

@@ -49,6 +49,22 @@ func TestSpeechOptions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The original snapshots name dialect voices without their codec IDs.
+	// Reject that pairing before inference; explicit English remains valid.
+	cfg.Talker.Speakers["eric"] = 2875
+	if cfg.Talker.Dialects == nil {
+		cfg.Talker.Dialects = map[string]json.RawMessage{}
+	}
+	cfg.Talker.Dialects["eric"] = json.RawMessage(`"sichuan_dialect"`)
+	delete(cfg.Talker.Languages, "sichuan_dialect")
+	for _, language := range []string{"auto", "zh"} {
+		if err := m.ValidateSpeechRequest(llm.SpeechRequest{Input: "Hello", Voice: "eric", Language: language}); err == nil {
+			t.Fatal("accepted missing dialect codec ID")
+		}
+	}
+	if err := m.ValidateSpeechRequest(llm.SpeechRequest{Input: "Hello", Voice: "eric", Language: "en"}); err != nil {
+		t.Fatal(err)
+	}
 	for _, req := range []llm.SpeechRequest{{Input: "Hello", Voice: "missing"}, {Input: "Hello", Language: "missing"}, {Input: "Hello", Instructions: "whisper"}, {Input: "Hello", ReferenceText: "example"}, {Input: "Hello", ReferenceAudio: &llm.ReferenceAudio{Format: "wav"}}} {
 		if err := m.ValidateSpeechRequest(req); err == nil {
 			t.Fatal("accepted unknown option")

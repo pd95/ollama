@@ -12,7 +12,33 @@ import (
 
 	st "github.com/ollama/ollama/fs/safetensors"
 	"github.com/ollama/ollama/mlxrunner/tokenizer"
+	"github.com/ollama/ollama/types/model"
 )
+
+func TestQwen3TTSLanguageAndVoiceMetadata(t *testing.T) {
+	policy, err := newQwen3TTSImportTransform(json.RawMessage(`{"talker_config":{"spk_id":{"ryan":1,"eric":2},"codec_language_id":{"english":2050,"chinese":2055,"german":2053},"spk_is_dialect":{"ryan":false,"eric":"sichuan_dialect"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &model.ConfigV2{}
+	if err := policy.(qwen3TTSImportTransform).augmentConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.Languages, []string{"de", "en", "zh"}) || !slices.Equal(cfg.VoiceLanguages["ryan"], cfg.Languages) || !slices.Equal(cfg.VoiceLanguages["eric"], []string{"de", "en"}) {
+		t.Fatalf("incorrect associations: %+v", cfg)
+	}
+	policy, err = newQwen3TTSImportTransform(json.RawMessage(`{"tts_model_type":"base","talker_config":{"codec_language_id":{"english":2050,"german":2053}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg = &model.ConfigV2{}
+	if err := policy.(qwen3TTSImportTransform).augmentConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Voices) != 0 || cfg.VoiceLanguages != nil || !slices.Equal(cfg.Languages, []string{"de", "en"}) {
+		t.Fatalf("Base acquired presets: %+v", cfg)
+	}
+}
 
 func writeQwen3TTSSource(t *testing.T, dir string) {
 	t.Helper()

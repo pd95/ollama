@@ -159,6 +159,14 @@ func (m *Model) ValidateSpeechRequest(req llm.SpeechRequest) error {
 			return speechError("unsupported Qwen3-TTS language %q", req.Language)
 		}
 	}
+	if m.cfg.Type == "custom_voice" {
+		if voice == "" {
+			voice = "ryan"
+		}
+		if _, err := speakerLanguage(m.cfg.Talker, req.Language, voice); err != nil {
+			return speechError("%s", err)
+		}
+	}
 	return nil
 }
 
