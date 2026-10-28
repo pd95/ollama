@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/ollama/ollama/fs/safetensors"
 	voxtralconfig "github.com/ollama/ollama/mlxrunner/model/voxtraltts/config"
@@ -32,11 +33,14 @@ func normalizeVoxtralTTSConfig(raw []byte) ([]byte, error) {
 
 func voxtralVoiceFiles(dir string) ([]string, error) {
 	var files []string
-	for _, name := range voxtralEnglishGermanVoices {
+	for _, name := range voxtralconfig.VoiceNames() {
 		path := "voice_embedding/" + name + ".safetensors"
 		info, err := os.Stat(filepath.Join(dir, path))
+		if os.IsNotExist(err) && !officialVoxtralLayout(dir) && !slices.Contains(voxtralEnglishGermanVoices, name) {
+			continue
+		}
 		if err != nil || !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("Voxtral TTS requires %s", path)
+			return nil, fmt.Errorf("Voxtral TTS requires %s (official .pt voices need the bounded import preparation step)", path)
 		}
 		files = append(files, path)
 	}
@@ -46,6 +50,13 @@ func voxtralVoiceFiles(dir string) ([]string, error) {
 func prepareVoxtralTTSInventory(inv Inventory) (Inventory, *validatedTokenizerSource, error) {
 	if inv.Config.Architecture() != voxtralTTSArchitecture {
 		return inv, nil, nil
+	}
+	if officialVoxtralLayout(inv.Dir) {
+		var err error
+		inv, err = prepareOfficialVoxtralTensors(inv)
+		if err != nil {
+			return Inventory{}, nil, err
+		}
 	}
 	cfg, err := voxtralconfig.Parse(inv.RawConfig)
 	if err != nil {
@@ -87,8 +98,8 @@ func prepareVoxtralTTSInventory(inv Inventory) (Inventory, *validatedTokenizerSo
 	}
 	inv.Tensors = maps.Clone(inv.Tensors)
 	voices := map[string]int{}
-	for i, file := range files {
-		name := voxtralEnglishGermanVoices[i]
+	for _, file := range files {
+		name := strings.TrimSuffix(filepath.Base(file), ".safetensors")
 		count := metadata.Audio.Voices[name]
 		if count < 1 || count > 512 {
 			return Inventory{}, nil, fmt.Errorf("Voxtral TTS voice %s has invalid prompt length", name)
@@ -145,6 +156,18 @@ func newVoxtralTTSImportTransform(raw json.RawMessage) (quantizePolicy, error) {
 
 func (p voxtralTTSImportTransform) augmentConfig(cfg *model.ConfigV2) error {
 	cfg.Voices = p.voices
+	cfg.VoiceLanguages = map[string][]string{}
+	for _, voice := range p.voices {
+		language := voxtralconfig.VoiceLanguage(voice)
+		if language == "" {
+			return fmt.Errorf("unknown Voxtral TTS preset %q", voice)
+		}
+		cfg.VoiceLanguages[voice] = []string{language}
+		if !slices.Contains(cfg.Languages, language) {
+			cfg.Languages = append(cfg.Languages, language)
+		}
+	}
+	slices.Sort(cfg.Languages)
 	return nil
 }
 func (voxtralTTSImportTransform) quantizationType(string, []int32, string) string { return "" }

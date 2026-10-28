@@ -16,6 +16,7 @@ import (
 	"github.com/ollama/ollama/mlxrunner/batch"
 	"github.com/ollama/ollama/mlxrunner/cache"
 	"github.com/ollama/ollama/mlxrunner/model"
+	voxtralconfig "github.com/ollama/ollama/mlxrunner/model/voxtraltts/config"
 	"github.com/ollama/ollama/mlxrunner/tokenizer"
 )
 
@@ -95,35 +96,15 @@ func badRequest(format string, args ...any) error {
 }
 
 func voiceLanguage(voice string) string {
-	if strings.HasPrefix(voice, "de_") {
-		return "de"
-	}
-	return "en"
+	return voxtralconfig.VoiceLanguage(voice)
 }
 
 func resolveVoice(req llm.SpeechRequest) (string, string, error) {
-	language := strings.ToLower(strings.ReplaceAll(req.Language, "_", "-"))
-	switch language {
-	case "", "auto":
-		language = ""
-	case "en", "english", "en-us", "en-gb":
-		language = "en"
-	case "de", "german", "de-de":
-		language = "de"
-	default:
-		return "", "", badRequest("Voxtral TTS currently supports English and German")
+	voice, language, err := voxtralconfig.ResolveVoice(req.Voice, req.Language)
+	if err != nil {
+		return "", "", badRequest("%s", err)
 	}
-	voice := strings.ToLower(req.Voice)
-	if voice == "" {
-		voice = "casual_male"
-		if language == "de" {
-			voice = "de_male"
-		}
-	}
-	if language != "" && voiceLanguage(voice) != language {
-		return "", "", badRequest("Voxtral TTS language must match its preset voice")
-	}
-	return voice, voiceLanguage(voice), nil
+	return voice, language, nil
 }
 
 func (m *Model) ValidateSpeechRequest(req llm.SpeechRequest) error {
@@ -139,14 +120,14 @@ func (m *Model) ValidateSpeechRequest(req llm.SpeechRequest) error {
 	if req.Speed != nil && *req.Speed != 1 {
 		return badRequest("Voxtral TTS supports only speed 1")
 	}
-	voice, _, err := resolveVoice(req)
+	voice, language, err := resolveVoice(req)
 	if err != nil {
 		return err
 	}
 	if _, ok := m.cfg.Voices[voice]; !ok {
 		return badRequest("unknown Voxtral TTS voice %q", req.Voice)
 	}
-	if _, err := normalizeText(req.Input); err != nil {
+	if _, err := normalizeTextForLanguage(req.Input, language); err != nil {
 		return badRequest("%s", err)
 	}
 	return nil
@@ -159,7 +140,7 @@ func textChunks(text string) []string {
 		end := min(160, len(runes))
 		split := 0
 		for i := range end {
-			if strings.ContainsRune(".!?", runes[i]) && (i+1 == len(runes) || unicode.IsSpace(runes[i+1])) {
+			if strings.ContainsRune(".!?؟।॥", runes[i]) && (i+1 == len(runes) || unicode.IsSpace(runes[i+1])) {
 				split = i + 1
 				break
 			}
@@ -189,8 +170,8 @@ func (m *Model) Speak(ctx context.Context, req llm.SpeechRequest, emit func([]fl
 	if err := m.ValidateSpeechRequest(req); err != nil {
 		return err
 	}
-	voice, _, _ := resolveVoice(req)
-	text, _ := normalizeText(req.Input)
+	voice, language, _ := resolveVoice(req)
+	text, _ := normalizeTextForLanguage(req.Input, language)
 	seed := rand.Uint64()
 	if req.Seed != nil {
 		seed = *req.Seed
@@ -215,7 +196,7 @@ func (m *Model) prompt(text, voice string) []int32 {
 }
 
 func (m *Model) speak(ctx context.Context, text, voice string, rng *rand.Rand, emit func([]float32) error) error {
-	text, err := normalizeText(text)
+	text, err := normalizeTextForLanguage(text, voiceLanguage(voice))
 	if err != nil {
 		return err
 	}

@@ -1559,10 +1559,19 @@ func showInfo(resp *api.ShowResponse, verbose bool, w io.Writer) error {
 		})
 	}
 
+	if len(resp.Languages) > 0 {
+		tableRender("Languages", func() [][]string {
+			return [][]string{{"", strings.Join(resp.Languages, ", ")}}
+		})
+	}
 	if len(resp.Voices) > 0 {
 		tableRender("Voices", func() (rows [][]string) {
 			for _, voice := range resp.Voices {
-				rows = append(rows, []string{"", voice})
+				row := []string{"", voice}
+				if len(resp.VoiceLanguages) > 0 {
+					row = append(row, strings.Join(resp.VoiceLanguages[voice], ", "))
+				}
+				rows = append(rows, row)
 			}
 			return
 		})

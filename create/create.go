@@ -58,7 +58,12 @@ func IsSafetensorsModelDir(dir string) bool {
 			return false
 		}
 		if _, err := os.Stat(filepath.Join(dir, "rl_agent_config.json")); err != nil {
-			return false
+			if !officialVoxtralLayout(dir) {
+				return false
+			}
+			if _, _, err := readOfficialVoxtralConfig(dir); err != nil {
+				return false
+			}
 		}
 	}
 
@@ -389,6 +394,9 @@ func readSourceModelConfig(modelDir string) (sourceModelConfig, json.RawMessage,
 	configPath := filepath.Join(modelDir, "config.json")
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
+		if officialVoxtralLayout(modelDir) {
+			return readOfficialVoxtralConfig(modelDir)
+		}
 		return readLayaConfig(modelDir)
 	}
 	if err != nil {

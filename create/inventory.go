@@ -128,7 +128,7 @@ func SafetensorsWeightFiles(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(filepath.Join(dir, "config.json")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "config.json")); err == nil || officialVoxtralLayout(dir) {
 		cfg, _, err := readSourceModelConfig(dir)
 		if err != nil {
 			return nil, err
@@ -373,6 +373,24 @@ func inventoryShardFiles(dir string, index map[string]string) ([]string, error) 
 			files[file] = struct{}{}
 		}
 		return sortedKeys(files), nil
+	}
+
+	if officialVoxtralLayout(dir) {
+		if _, _, err := readOfficialVoxtralConfig(dir); err != nil {
+			return nil, err
+		}
+		others, err := filepath.Glob(filepath.Join(dir, "model*.safetensors"))
+		if err != nil {
+			return nil, err
+		}
+		if len(others) > 0 {
+			return nil, fmt.Errorf("ambiguous official Voxtral consolidated/model weights")
+		}
+		info, err := os.Stat(filepath.Join(dir, "consolidated.safetensors"))
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("official Voxtral requires consolidated.safetensors")
+		}
+		return []string{"consolidated.safetensors"}, nil
 	}
 
 	if _, err := os.Stat(filepath.Join(dir, "config.json")); err == nil {

@@ -62,18 +62,37 @@ var (
 // normalizeText mirrors the pinned MLX-Audio demonstration preprocessing before
 // Tekken encoding. It intentionally leaves ordinary small numbers for the LM.
 func normalizeText(text string) (string, error) {
-	text = markdownRules[0].pattern.ReplaceAllString(text, markdownRules[0].replacement)
+	return normalizeTextForLanguage(text, "en")
+}
+
+// Other languages retain written numbers and symbols for the checkpoint to
+// pronounce. English-only expansions and placeholder words must not leak into
+// conditioning text for a non-English preset.
+func normalizeTextForLanguage(text, language string) (string, error) {
+	english := language == "en"
+	replacement := markdownRules[0].replacement
+	if !english {
+		replacement = " "
+	}
+	text = markdownRules[0].pattern.ReplaceAllString(text, replacement)
 	text = html.UnescapeString(text)
 	text = markdownRules[1].pattern.ReplaceAllString(text, markdownRules[1].replacement)
 	text = imageLink.ReplaceAllStringFunc(text, func(match string) string {
 		alt := strings.TrimSpace(imageLink.FindStringSubmatch(match)[1])
 		if alt == "" {
-			return "image"
+			if english {
+				return "image"
+			}
+			return " "
 		}
 		return alt
 	})
 	for _, rule := range markdownRules[2:] {
-		text = rule.pattern.ReplaceAllString(text, rule.replacement)
+		replacement := rule.replacement
+		if !english && replacement == "link" {
+			replacement = " "
+		}
+		text = rule.pattern.ReplaceAllString(text, replacement)
 	}
 	text = strings.Map(func(r rune) rune {
 		if r == 0x200b || (r >= 0x200e && r <= 0x200f) || (r >= 0x2028 && r <= 0x2029) || (r >= 0x2060 && r <= 0x2064) || r == 0xad || r == 0x180e || r == 0xfeff || (r >= 0xfff9 && r <= 0xfffb) {
@@ -84,17 +103,19 @@ func normalizeText(text string) (string, error) {
 		}
 		return r
 	}, text)
-	text = normalizeNumbers(text)
-	text = parenthetical.ReplaceAllStringFunc(text, func(match string) string {
-		inner := strings.TrimSpace(parenthetical.FindStringSubmatch(match)[1])
-		if inner == "" || numericParenthetical.MatchString(inner) {
-			return match
-		}
-		for _, rule := range parentheticalRules {
-			inner = rule.pattern.ReplaceAllString(inner, rule.replacement)
-		}
-		return "—" + strings.Join(strings.Fields(inner), " ") + "—"
-	})
+	if english {
+		text = normalizeNumbers(text)
+		text = parenthetical.ReplaceAllStringFunc(text, func(match string) string {
+			inner := strings.TrimSpace(parenthetical.FindStringSubmatch(match)[1])
+			if inner == "" || numericParenthetical.MatchString(inner) {
+				return match
+			}
+			for _, rule := range parentheticalRules {
+				inner = rule.pattern.ReplaceAllString(inner, rule.replacement)
+			}
+			return "—" + strings.Join(strings.Fields(inner), " ") + "—"
+		})
+	}
 	text = strings.NewReplacer("‐", "-", "‑", "-").Replace(text)
 	text = dots.ReplaceAllString(text, "...")
 	text = punctuationRuns.ReplaceAllStringFunc(text, func(s string) string { return s[:1] })
@@ -117,7 +138,7 @@ func normalizeText(text string) (string, error) {
 		return "", fmt.Errorf("speech input is empty after normalization")
 	}
 	end := []rune(text)
-	if !strings.ContainsRune(".!?…؟。！？", end[len(end)-1]) {
+	if !strings.ContainsRune(".!?…؟。！？।॥", end[len(end)-1]) {
 		text += "."
 	}
 	return text, nil

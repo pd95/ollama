@@ -50,3 +50,24 @@ func TestTextChunks(t *testing.T) {
 		t.Fatal("text omitted or duplicated")
 	}
 }
+
+func TestNonEnglishNormalization(t *testing.T) {
+	for language, input := range map[string]string{
+		"fr": "Le prix est €12.50 (50%).", "de": "Der Preis ist €12.50 (50%).",
+		"hi": "यह १२ रुपये है।", "ar": "هل السعر ١٢؟",
+	} {
+		got, err := normalizeTextForLanguage(input, language)
+		if err != nil || got != input {
+			t.Fatalf("%s: %q %v", language, got, err)
+		}
+	}
+	got, err := normalizeTextForLanguage("**Bonjour** ! ```code``` https://example.com", "fr")
+	if err != nil || got != "**Bonjour** !" {
+		t.Fatalf("unexpected non-English placeholders: %q %v", got, err)
+	}
+	for _, input := range []string{"नमस्ते। फिर मिलेंगे।", "مرحبا؟ نعم!"} {
+		if chunks := textChunks(input); len(chunks) != 2 {
+			t.Fatalf("Unicode sentence boundaries: %v", chunks)
+		}
+	}
+}

@@ -4,10 +4,47 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	st "github.com/ollama/ollama/fs/safetensors"
+	"github.com/ollama/ollama/types/model"
 )
+
+func TestVoxtralImportedLanguageMetadata(t *testing.T) {
+	cfg := &model.ConfigV2{}
+	if err := (voxtralTTSImportTransform{voices: []string{"casual_male", "fr_female", "hi_male"}}).augmentConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.Languages, []string{"en", "fr", "hi"}) || !slices.Equal(cfg.VoiceLanguages["fr_female"], []string{"fr"}) {
+		t.Fatalf("metadata: %+v", cfg)
+	}
+}
+
+func TestVoxtralVoiceDiscoveryRetainsAllPresentPresets(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "voice_embedding"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range voxtralEnglishGermanVoices {
+		if err := os.WriteFile(filepath.Join(dir, "voice_embedding", name+".safetensors"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "voice_embedding", "fr_female.safetensors"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files, err := voxtralVoiceFiles(dir)
+	if err != nil || len(files) != 8 || !slices.Contains(files, "voice_embedding/fr_female.safetensors") {
+		t.Fatalf("voice discovery: %v %v", files, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "params.json"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := voxtralVoiceFiles(dir); err == nil {
+		t.Fatal("incomplete official voice set accepted")
+	}
+}
 
 func TestVoxtralTTSMissingAssetsBeforeWrites(t *testing.T) {
 	for _, broken := range []string{"missing", "invalid"} {

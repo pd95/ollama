@@ -1,7 +1,9 @@
 package voxtraltts
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,6 +11,58 @@ import (
 
 	"github.com/ollama/ollama/mlxrunner/tokenizer"
 )
+
+// Expected IDs come directly from mistral-common, independently of MLX-Audio.
+func TestOfficialTokenizerAndSpeechFraming(t *testing.T) {
+	path := os.Getenv("OLLAMA_VOXTRAL_TTS_OFFICIAL_TEKKEN")
+	if path == "" {
+		t.Skip("set OLLAMA_VOXTRAL_TTS_OFFICIAL_TEKKEN to pinned provider tekken.json")
+	}
+	var fixture struct {
+		Hash   string         `json:"tekken_sha256"`
+		Frames map[string]int `json:"voice_frames"`
+		Cases  []struct {
+			Text string
+			IDs  []int32
+		} `json:"cases"`
+		Speech []struct {
+			Voice, Text string
+			IDs         []int32
+		} `json:"speech_cases"`
+	}
+	raw, err := os.ReadFile("testdata/official-tokenizer.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(raw)) != fixture.Hash {
+		t.Fatal("wrong official tokenizer identity")
+	}
+	tok, err := tokenizer.LoadTekkenFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range fixture.Cases {
+		if got := tok.Encode(item.Text, false); !slices.Equal(got, item.IDs) {
+			t.Fatalf("official text token IDs differ: %q", item.Text)
+		}
+	}
+	m := &Model{tok: tok, cfg: &config{Voices: fixture.Frames}}
+	if len(fixture.Cases) != 9 || len(fixture.Speech) != 20 {
+		t.Fatal("incomplete official catalog fixture")
+	}
+	for _, item := range fixture.Speech {
+		if got := m.prompt(item.Text, item.Voice); !slices.Equal(got, item.IDs) {
+			t.Fatalf("official speech framing differs: %s", item.Voice)
+		}
+	}
+}
 
 func TestReferenceTokenizer(t *testing.T) {
 	source, reference := os.Getenv("OLLAMA_VOXTRAL_TTS_SOURCE"), os.Getenv("OLLAMA_SPEECH_REFERENCE_DIR")

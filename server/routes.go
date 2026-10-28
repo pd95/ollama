@@ -1956,7 +1956,14 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		resp.Thinking = m.Thinking()
 	}
 	if slices.Contains(resp.Capabilities, model.CapabilitySpeech) {
-		resp.Voices = append(speechVoices(mf), m.Config.Voices...)
+		resp.Voices = speechVoices(mf)
+		for _, voice := range m.Config.Voices {
+			if !slices.Contains(resp.Voices, voice) {
+				resp.Voices = append(resp.Voices, voice)
+			}
+		}
+		resp.Languages = m.Config.Languages
+		resp.VoiceLanguages = m.Config.VoiceLanguages
 	}
 
 	if summaries, err := manifestSummariesForShow(name, mf.SelectedDigest()); err != nil {
