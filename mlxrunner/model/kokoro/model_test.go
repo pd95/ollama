@@ -25,6 +25,8 @@ func TestSpeechOptions(t *testing.T) {
 		{Input: "Hello", Language: "de"},
 		{Input: "Hello", Voice: "bf_emma", Language: "en-US"},
 		{Input: "Hello", Instructions: "whisper"},
+		{Input: "Hello", ReferenceText: "example"},
+		{Input: "Hello", ReferenceAudio: &llm.ReferenceAudio{Format: "wav"}},
 		{Input: ""},
 		{Input: strings.Repeat("a", 4097)},
 	} {

@@ -43,12 +43,13 @@ type talkerConfig struct {
 }
 
 type config struct {
-	Type    string       `json:"tts_model_type"`
-	Size    string       `json:"tts_model_size"`
-	Talker  talkerConfig `json:"talker_config"`
-	TextBOS int32        `json:"tts_bos_token_id"`
-	TextEOS int32        `json:"tts_eos_token_id"`
-	TextPad int32        `json:"tts_pad_token_id"`
+	Type    string        `json:"tts_model_type"`
+	Size    string        `json:"tts_model_size"`
+	Talker  talkerConfig  `json:"talker_config"`
+	TextBOS int32         `json:"tts_bos_token_id"`
+	TextEOS int32         `json:"tts_eos_token_id"`
+	TextPad int32         `json:"tts_pad_token_id"`
+	Speaker speakerConfig `json:"speaker_encoder_config"`
 	Quant   struct {
 		Group int    `json:"group_size"`
 		Bits  int    `json:"bits"`
@@ -57,20 +58,28 @@ type config struct {
 }
 
 func parseConfig(raw []byte) (*config, error) {
-	var cfg config
+	cfg := config{Speaker: defaultSpeakerConfig()}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
 	}
-	if cfg.Type != "custom_voice" || (cfg.Size != "0b6" && cfg.Size != "1b7") {
-		return nil, fmt.Errorf("Qwen3-TTS requires 0.6B or 1.7B CustomVoice, got %s %s", cfg.Size, cfg.Type)
+	if (cfg.Type != "custom_voice" && cfg.Type != "base") || (cfg.Size != "0b6" && cfg.Size != "1b7") {
+		return nil, fmt.Errorf("Qwen3-TTS requires 0.6B or 1.7B CustomVoice or Base, got %s %s", cfg.Size, cfg.Type)
 	}
 	for _, s := range []stackConfig{cfg.Talker.stackConfig, cfg.Talker.Predictor} {
 		if s.Hidden <= 0 || s.Layers <= 0 || s.Heads <= 0 || s.KVHeads <= 0 || s.Head <= 0 || s.Head%2 != 0 || s.Heads%s.KVHeads != 0 || s.Eps <= 0 || s.Rope <= 0 {
 			return nil, fmt.Errorf("invalid Qwen3-TTS transformer configuration")
 		}
 	}
-	if cfg.Talker.Groups != 16 || cfg.Talker.Vocab != 3072 || cfg.Talker.TextHidden <= 0 || cfg.Talker.TextVocab <= int(cfg.TextEOS) || len(cfg.Talker.Speakers) == 0 {
+	if cfg.Talker.Groups != 16 || cfg.Talker.Vocab != 3072 || cfg.Talker.TextHidden <= 0 || cfg.Talker.TextVocab <= int(cfg.TextEOS) || (cfg.Type == "custom_voice" && len(cfg.Talker.Speakers) == 0) {
 		return nil, fmt.Errorf("unsupported Qwen3-TTS conditioning layout")
+	}
+	if cfg.Type == "base" {
+		if cfg.Quant.Bits != 0 || len(cfg.Talker.Speakers) != 0 {
+			return nil, fmt.Errorf("Qwen3-TTS Base requires floating-point weights and reference audio without preset voices")
+		}
+		if err := cfg.Speaker.validate(cfg.Talker.Hidden); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.Quant.Bits != 0 && ((cfg.Quant.Bits != 8 && cfg.Quant.Bits != 4) || cfg.Quant.Group != 64 || cfg.Quant.Mode != "affine") {
 		return nil, fmt.Errorf("Qwen3-TTS currently requires affine 4/8-bit weights or floating-point weights")

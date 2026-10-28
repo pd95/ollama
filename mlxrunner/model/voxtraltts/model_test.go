@@ -25,7 +25,7 @@ func TestSpeechOptions(t *testing.T) {
 		}
 	}
 	speed := .75
-	for _, req := range []llm.SpeechRequest{{Input: "Hello", Language: "fr"}, {Input: "Hello", Voice: "missing"}, {Input: "Hello", Instructions: "whisper"}, {Input: "Hello", Speed: &speed}, {Input: "Hello", Voice: "de_male", Language: "en"}, {Input: ""}} {
+	for _, req := range []llm.SpeechRequest{{Input: "Hello", ReferenceAudio: &llm.ReferenceAudio{Format: "wav"}}, {Input: "Hello", ReferenceText: "example"}, {Input: "Hello", Language: "fr"}, {Input: "Hello", Voice: "missing"}, {Input: "Hello", Instructions: "whisper"}, {Input: "Hello", Speed: &speed}, {Input: "Hello", Voice: "de_male", Language: "en"}, {Input: ""}} {
 		if err := m.ValidateSpeechRequest(req); err == nil {
 			t.Fatalf("accepted %+v", req)
 		}

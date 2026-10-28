@@ -24,7 +24,7 @@ func (r *Runner) speechHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	var input llm.SpeechRequest
-	if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, llm.MaxSpeechRequestBytes)).Decode(&input); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -34,8 +34,8 @@ func (r *Runner) speechHandler(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-	} else if input.Language != "" || input.Seed != nil || input.Instructions != "" || (input.Speed != nil && *input.Speed != 1) {
-		http.Error(w, "language, seed, instructions and speed changes are not supported by this speech model", http.StatusBadRequest)
+	} else if input.ReferenceAudio != nil || input.ReferenceText != "" || input.Language != "" || input.Seed != nil || input.Instructions != "" || (input.Speed != nil && *input.Speed != 1) {
+		http.Error(w, "reference audio, reference text, language, seed, instructions and speed changes are not supported by this speech model", http.StatusBadRequest)
 		return
 	}
 

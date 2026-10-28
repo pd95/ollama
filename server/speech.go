@@ -28,17 +28,19 @@ const speechSampleRate = 24000
 // audio as the model generates it.
 func (s *Server) SpeechHandler(c *gin.Context) {
 	var req struct {
-		Model          string   `json:"model"`
-		Input          string   `json:"input"`
-		Voice          string   `json:"voice"`
-		ResponseFormat string   `json:"response_format"`
-		Speed          *float64 `json:"speed"`
-		Language       string   `json:"language"`
-		Seed           *uint64  `json:"seed"`
-		Instructions   string   `json:"instructions"`
-		StreamFormat   string   `json:"stream_format"`
+		Model          string              `json:"model"`
+		Input          string              `json:"input"`
+		Voice          string              `json:"voice"`
+		ResponseFormat string              `json:"response_format"`
+		Speed          *float64            `json:"speed"`
+		Language       string              `json:"language"`
+		Seed           *uint64             `json:"seed"`
+		Instructions   string              `json:"instructions"`
+		StreamFormat   string              `json:"stream_format"`
+		ReferenceAudio *llm.ReferenceAudio `json:"reference_audio"`
+		ReferenceText  string              `json:"reference_text"`
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, llm.MaxSpeechRequestBytes)
 	if err := c.ShouldBindJSON(&req); err != nil {
 		openAIError(c, http.StatusBadRequest, err.Error())
 		return
@@ -68,6 +70,25 @@ func (s *Server) SpeechHandler(c *gin.Context) {
 		return
 	}
 
+	if utf8.RuneCountInString(req.ReferenceText) > 4096 {
+		openAIError(c, http.StatusBadRequest, "reference_text must be at most 4096 characters")
+		return
+	}
+	if req.ReferenceAudio == nil && req.ReferenceText != "" {
+		openAIError(c, http.StatusBadRequest, "reference_text requires reference_audio")
+		return
+	}
+	if ref := req.ReferenceAudio; ref != nil {
+		if req.Voice != "" || ref.Format != "wav" {
+			openAIError(c, http.StatusBadRequest, "reference_audio requires format wav and cannot be combined with voice")
+			return
+		}
+		if err := audio.ValidateReferenceWAV(ref.Data); err != nil {
+			openAIError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	r, _, _, err := s.scheduleRunner(c.Request.Context(), req.Model, "", []model.Capability{model.CapabilitySpeech}, nil, nil, nil)
 	speaker, ok := r.(llm.Speaker)
 	switch {
@@ -80,7 +101,7 @@ func (s *Server) SpeechHandler(c *gin.Context) {
 		return
 	}
 
-	streamSpeech(c, speaker, llm.SpeechRequest{Input: req.Input, Voice: req.Voice, Language: req.Language, Seed: req.Seed, Instructions: req.Instructions, Speed: req.Speed}, format)
+	streamSpeech(c, speaker, llm.SpeechRequest{Input: req.Input, Voice: req.Voice, Language: req.Language, Seed: req.Seed, Instructions: req.Instructions, Speed: req.Speed, ReferenceAudio: req.ReferenceAudio, ReferenceText: req.ReferenceText}, format)
 }
 
 func streamSpeech(c *gin.Context, speaker llm.Speaker, req llm.SpeechRequest, format string) {

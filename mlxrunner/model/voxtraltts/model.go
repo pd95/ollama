@@ -127,6 +127,9 @@ func resolveVoice(req llm.SpeechRequest) (string, string, error) {
 }
 
 func (m *Model) ValidateSpeechRequest(req llm.SpeechRequest) error {
+	if req.ReferenceAudio != nil || req.ReferenceText != "" {
+		return badRequest("Voxtral TTS does not support reference audio")
+	}
 	if strings.TrimSpace(req.Input) == "" || utf8.RuneCountInString(req.Input) > 4096 {
 		return badRequest("Voxtral TTS requires 1–4096 characters")
 	}

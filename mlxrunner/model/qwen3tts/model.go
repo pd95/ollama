@@ -17,6 +17,7 @@ import (
 	"github.com/ollama/ollama/mlxrunner/batch"
 	"github.com/ollama/ollama/mlxrunner/cache"
 	"github.com/ollama/ollama/mlxrunner/model"
+	"github.com/ollama/ollama/mlxrunner/model/audio"
 	"github.com/ollama/ollama/mlxrunner/tokenizer"
 )
 
@@ -29,7 +30,7 @@ type generation struct {
 	Repetition  float64 `json:"repetition_penalty"`
 }
 
-// Model is a speech-only Qwen3-TTS CustomVoice model. Arrays makes all source
+// Model is a speech-only Qwen3-TTS CustomVoice or Base model. Arrays makes all source
 // and derived weights visible to the runner's weight lifetime collector.
 type Model struct {
 	Arrays      []*mlx.Array
@@ -38,6 +39,8 @@ type Model struct {
 	quant       map[string]*model.TensorQuantInfo
 	tok         *tokenizer.Tokenizer
 	network     *network
+	speaker     *speakerEncoder
+	encoder     *speechEncoder
 	decoder     *decoder
 	generation  generation
 }
@@ -91,6 +94,18 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 		return err
 	}
 	m.Arrays = append(m.Arrays, m.decoder.derived...)
+	if m.cfg.Type == "base" {
+		m.speaker, err = loadSpeaker(m.cfg.Speaker, tensors)
+		if err != nil {
+			return err
+		}
+		m.encoder, err = loadEncoder(m.codecConfig, codec)
+		if err != nil {
+			return err
+		}
+		m.Arrays = append(m.Arrays, m.speaker.derived...)
+		m.Arrays = append(m.Arrays, m.encoder.derived...)
+	}
 	return nil
 }
 
@@ -107,6 +122,22 @@ func speechError(format string, args ...any) error {
 }
 
 func (m *Model) ValidateSpeechRequest(req llm.SpeechRequest) error {
+	if strings.TrimSpace(req.Input) == "" || utf8.RuneCountInString(req.Input) > 4096 {
+		return speechError("Qwen3-TTS requires 1–4096 characters")
+	}
+	if m.cfg.Type == "base" {
+		if req.ReferenceAudio == nil || strings.TrimSpace(req.ReferenceText) == "" || utf8.RuneCountInString(req.ReferenceText) > 4096 {
+			return speechError("Qwen3-TTS Base requires reference_audio and a transcript of 1–4096 characters")
+		}
+		if req.Voice != "" || req.Instructions != "" || req.ReferenceAudio.Format != "wav" {
+			return speechError("Qwen3-TTS Base requires reference WAV without preset voice or style instructions")
+		}
+		if err := audio.ValidateReferenceWAV(req.ReferenceAudio.Data); err != nil {
+			return speechError("%s", err)
+		}
+	} else if req.ReferenceAudio != nil || req.ReferenceText != "" {
+		return speechError("Qwen3-TTS CustomVoice does not support reference audio")
+	}
 	if req.Speed != nil && *req.Speed != 1 {
 		return speechError("Qwen3-TTS supports only speed 1")
 	}
@@ -139,11 +170,8 @@ func (m *Model) Speak(ctx context.Context, req llm.SpeechRequest, emit func([]fl
 		return err
 	}
 	voice := req.Voice
-	if voice == "" {
+	if voice == "" && m.cfg.Type == "custom_voice" {
 		voice = "Ryan"
-	}
-	if _, ok := m.cfg.Talker.Speakers[strings.ToLower(voice)]; !ok {
-		return speechError("unknown Qwen3-TTS voice %q", voice)
 	}
 	chunks := textChunks(req.Input, 160)
 	if len(chunks) == 0 {
@@ -154,8 +182,18 @@ func (m *Model) Speak(ctx context.Context, req llm.SpeechRequest, emit func([]fl
 		seed = *req.Seed
 	}
 	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
+	held := mlx.NewScope()
+	defer held.Close()
+	var profile *cloneProfile
+	if m.cfg.Type == "base" {
+		var err error
+		profile, err = m.referenceProfile(ctx, req, held)
+		if err != nil {
+			return err
+		}
+	}
 	for _, chunk := range chunks {
-		if err := m.speak(ctx, chunk, req.Language, voice, req.Instructions, rng, emit); err != nil {
+		if err := m.speak(ctx, chunk, req.Language, voice, req.Instructions, profile, rng, emit); err != nil {
 			return err
 		}
 	}
@@ -185,7 +223,7 @@ func textChunks(text string, limit int) []string {
 	return chunks
 }
 
-func (m *Model) speak(ctx context.Context, text, language, voice, instructions string, rng *rand.Rand, emit func([]float32) error) error {
+func (m *Model) speak(ctx context.Context, text, language, voice, instructions string, profile *cloneProfile, rng *rand.Rand, emit func([]float32) error) error {
 	n := m.network
 	ids := m.tok.Encode("<|im_start|>assistant\n"+text+"<|im_end|>\n<|im_start|>assistant\n", false)
 	held := mlx.NewScope()
@@ -193,7 +231,11 @@ func (m *Model) speak(ctx context.Context, text, language, voice, instructions s
 	var input, pad *mlx.Array
 	var err error
 	mlx.Scoped(func() {
-		input, pad, err = n.prepare(ids, language, voice)
+		if profile != nil {
+			input, pad, err = n.prepareICL(ids, language, profile)
+		} else {
+			input, pad, err = n.prepare(ids, language, voice)
+		}
 		if err == nil && instructions != "" {
 			instructIDs := m.tok.Encode("<|im_start|>user\n"+instructions+"<|im_end|>\n", false)
 			input = mlx.Concatenate([]*mlx.Array{n.project(instructIDs), input}, 1)
@@ -206,6 +248,10 @@ func (m *Model) speak(ctx context.Context, text, language, voice, instructions s
 	if err != nil {
 		return speechError("%s", err)
 	}
+	gen := m.generation
+	if profile != nil {
+		gen.Repetition = max(gen.Repetition, 1.5)
+	}
 	state := newState(len(n.talker.body.layers))
 	defer state.close()
 	var codes, semantic []int32
@@ -216,7 +262,14 @@ func (m *Model) speak(ctx context.Context, text, language, voice, instructions s
 		}
 		var samples []float32
 		mlx.Scoped(func() {
-			wav := m.decoder.decode(mlx.FromValues(codes, 1, len(codes)/16, 16))
+			allCodes := codes
+			cut := 0
+			if profile != nil {
+				allCodes = append(append([]int32(nil), profile.codes...), codes...)
+				cut = len(profile.codes) / 16 * 1920
+			}
+			wav := m.decoder.decode(mlx.FromValues(allCodes, 1, len(allCodes)/16, 16))
+			wav = wav.Slice(mlx.Slice(), mlx.Slice(cut, wav.Dim(1)))
 			samples = mlx.Contiguous(wav, false).Floats()
 		})
 		if emitted > len(samples) {
@@ -237,7 +290,7 @@ func (m *Model) speak(ctx context.Context, text, language, voice, instructions s
 		var eos bool
 		mlx.Scoped(func() {
 			logits, hidden := n.talker.forward(input, state)
-			first, e := sampleLast(logits, rng, m.generation, semantic, int(n.cfg.Talker.EOS))
+			first, e := sampleLast(logits, rng, gen, semantic, int(n.cfg.Talker.EOS))
 			if e != nil {
 				err = e
 				return
@@ -246,7 +299,7 @@ func (m *Model) speak(ctx context.Context, text, language, voice, instructions s
 				eos = true
 				return
 			}
-			tokens, e = n.predict(ctx, first, timeSlice(hidden, hidden.Dim(1)-1, hidden.Dim(1)), rng, m.generation)
+			tokens, e = n.predict(ctx, first, timeSlice(hidden, hidden.Dim(1)-1, hidden.Dim(1)), rng, gen)
 			if e != nil {
 				err = e
 				return

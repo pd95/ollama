@@ -1,16 +1,55 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ollama/ollama/llm"
+	"github.com/ollama/ollama/mlxrunner/model/audio"
 )
+
+func TestSpeechReferenceTransport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reference.wav")
+	wav := audio.EncodeWAV([]float32{.25, -.5, 0}, 24000)
+	if err := os.WriteFile(path, wav, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reference, err := readSpeechReference(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.SpeechRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+		}
+		if req.ReferenceAudio == nil || req.ReferenceAudio.Format != "wav" || !bytes.Equal(req.ReferenceAudio.Data, wav) || req.ReferenceText != "A reference." || req.Voice != "" {
+			t.Errorf("reference bytes/transcript lost: %+v", req)
+		}
+		w.Write(make([]byte, 46))
+	}))
+	defer server.Close()
+	t.Setenv("OLLAMA_HOST", server.URL)
+	if _, err := synthesize(t.Context(), "base", "", "Hello", speechOptions{ReferenceAudio: reference, ReferenceText: "A reference."}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not WAV"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSpeechReference(path); err == nil {
+		t.Fatal("invalid reference admitted")
+	}
+}
 
 func TestSpeechCut(t *testing.T) {
 	long := strings.Repeat("This sentence is long enough to say. ", 3)

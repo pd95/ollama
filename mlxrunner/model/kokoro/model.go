@@ -99,6 +99,9 @@ func badRequest(format string, args ...any) error {
 }
 
 func (m *Model) ValidateSpeechRequest(req llm.SpeechRequest) error {
+	if req.ReferenceAudio != nil || req.ReferenceText != "" {
+		return badRequest("Kokoro does not support reference audio")
+	}
 	if req.Instructions != "" {
 		return badRequest("Kokoro does not support instructions")
 	}

@@ -19,14 +19,39 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ollama/ollama/envconfig"
+	"github.com/ollama/ollama/llm"
+	"github.com/ollama/ollama/mlxrunner/model/audio"
 	"github.com/ollama/ollama/readline"
 )
 
 type speechOptions struct {
-	Instructions string
-	Language     string
-	Seed         *uint64
-	Speed        *float64
+	Instructions   string
+	Language       string
+	Seed           *uint64
+	Speed          *float64
+	ReferenceAudio *llm.ReferenceAudio
+	ReferenceText  string
+}
+
+// readSpeechReference bounds the client-side file read and sends bytes rather
+// than a filename that might identify an unrelated file on the server.
+func readSpeechReference(path string) (*llm.ReferenceAudio, error) {
+	if path == "" {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, llm.MaxSpeechRequestBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if err := audio.ValidateReferenceWAV(data); err != nil {
+		return nil, err
+	}
+	return &llm.ReferenceAudio{Format: "wav", Data: data}, nil
 }
 
 // runSpeech reads text aloud: piped input as it arrives followed by any
@@ -245,6 +270,12 @@ func lastSentenceEnd(s string) int {
 func synthesize(ctx context.Context, model, voice, text string, options ...speechOptions) ([]byte, error) {
 	values := map[string]any{"model": model, "voice": voice, "input": text, "response_format": "wav"}
 	if len(options) > 0 {
+		if options[0].ReferenceAudio != nil {
+			values["reference_audio"] = options[0].ReferenceAudio
+		}
+		if options[0].ReferenceText != "" {
+			values["reference_text"] = options[0].ReferenceText
+		}
 		if options[0].Speed != nil {
 			values["speed"] = *options[0].Speed
 		}

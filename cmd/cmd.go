@@ -982,7 +982,7 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("ask") {
 		return fmt.Errorf("%s is not a decision model, so it can't answer --ask questions", name)
 	}
-	for _, flag := range []string{"voice", "language", "seed", "instructions", "speed"} {
+	for _, flag := range []string{"voice", "language", "seed", "instructions", "speed", "reference-audio", "reference-text"} {
 		if cmd.Flags().Changed(flag) && !speech {
 			return fmt.Errorf("%s is not a speech model, so it can't use --%s", name, flag)
 		}
@@ -1044,7 +1044,25 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 			}
 			seed = &value
 		}
-		return runSpeech(cmd.Context(), name, voice, opts.Prompt, input, interactive, speechOptions{Language: language, Seed: seed, Instructions: instructions, Speed: speed})
+		referencePath, err := cmd.Flags().GetString("reference-audio")
+		if err != nil {
+			return err
+		}
+		referenceText, err := cmd.Flags().GetString("reference-text")
+		if err != nil {
+			return err
+		}
+		if referencePath != "" && voice != "" {
+			return errors.New("--reference-audio cannot be combined with --voice")
+		}
+		if referenceText != "" && referencePath == "" {
+			return errors.New("--reference-text requires --reference-audio")
+		}
+		reference, err := readSpeechReference(referencePath)
+		if err != nil {
+			return err
+		}
+		return runSpeech(cmd.Context(), name, voice, opts.Prompt, input, interactive, speechOptions{Language: language, Seed: seed, Instructions: instructions, Speed: speed, ReferenceAudio: reference, ReferenceText: referenceText})
 	}
 
 	if slices.Contains(info.Capabilities, model.CapabilityImage) {
@@ -2660,6 +2678,8 @@ func NewCLI() *cobra.Command {
 	runCmd.Flags().Bool("hidethinking", false, "Hide thinking output (if provided)")
 	runCmd.Flags().Bool("truncate", false, "For embedding models: truncate inputs exceeding context length (default: true). Set --truncate=false to error instead")
 	runCmd.Flags().Int("dimensions", 0, "Truncate output embeddings to specified dimension (embedding models only)")
+	runCmd.Flags().String("reference-audio", "", "Reference mono PCM16 WAV for voice cloning (supported speech models only)")
+	runCmd.Flags().String("reference-text", "", "Transcript of reference speech (voice cloning only)")
 	runCmd.Flags().Float64("speed", 1, "Speech speed (supported speech models only)")
 	runCmd.Flags().String("voice", "", "Voice to speak with (speech models only)")
 	runCmd.Flags().String("instructions", "", "Speech style instructions (supported speech models only)")

@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ollama/ollama/llm"
+	"github.com/ollama/ollama/mlxrunner/model/audio"
 )
 
 func TestTextChunks(t *testing.T) {
@@ -40,15 +41,15 @@ func TestSpeechOptions(t *testing.T) {
 	}
 	m := &Model{cfg: cfg}
 	speed := .75
-	if err := m.ValidateSpeechRequest(llm.SpeechRequest{Speed: &speed}); err == nil {
+	if err := m.ValidateSpeechRequest(llm.SpeechRequest{Input: "Hello", Speed: &speed}); err == nil {
 		t.Fatal("Qwen accepted a speed change")
 	}
-	for _, req := range []llm.SpeechRequest{{}, {Voice: "Ryan", Language: "en"}, {Voice: "ryan", Language: "German"}} {
+	for _, req := range []llm.SpeechRequest{{Input: "Hello"}, {Input: "Hello", Voice: "Ryan", Language: "en"}, {Input: "Hello", Voice: "ryan", Language: "German"}} {
 		if err := m.ValidateSpeechRequest(req); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, req := range []llm.SpeechRequest{{Voice: "missing"}, {Language: "missing"}, {Instructions: "whisper"}} {
+	for _, req := range []llm.SpeechRequest{{Input: "Hello", Voice: "missing"}, {Input: "Hello", Language: "missing"}, {Input: "Hello", Instructions: "whisper"}, {Input: "Hello", ReferenceText: "example"}, {Input: "Hello", ReferenceAudio: &llm.ReferenceAudio{Format: "wav"}}} {
 		if err := m.ValidateSpeechRequest(req); err == nil {
 			t.Fatal("accepted unknown option")
 		}
@@ -57,6 +58,56 @@ func TestSpeechOptions(t *testing.T) {
 	cancel()
 	if err := m.Speak(ctx, llm.SpeechRequest{Input: "Hello"}, func([]float32) error { t.Fatal("emitted after cancellation"); return nil }); err != context.Canceled {
 		t.Fatalf("cancellation: %v", err)
+	}
+}
+
+func TestBaseOptions(t *testing.T) {
+	raw, err := os.ReadFile("testdata/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]any
+	if err := json.Unmarshal(raw, &values); err != nil {
+		t.Fatal(err)
+	}
+	values["tts_model_type"] = "base"
+	delete(values, "quantization")
+	values["talker_config"].(map[string]any)["spk_id"] = map[string]any{}
+	base, err := json.Marshal(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parseConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Model{cfg: cfg}
+	ref := &llm.ReferenceAudio{Format: "wav", Data: audio.EncodeWAV(make([]float32, 24000), 24000)}
+	valid := llm.SpeechRequest{Input: "Hello", Language: "en", ReferenceAudio: ref, ReferenceText: "A reference."}
+	if err := m.ValidateSpeechRequest(valid); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(*llm.SpeechRequest){
+		func(r *llm.SpeechRequest) { r.ReferenceAudio = nil },
+		func(r *llm.SpeechRequest) { r.ReferenceText = " " },
+		func(r *llm.SpeechRequest) { r.ReferenceText = strings.Repeat("é", 4097) },
+		func(r *llm.SpeechRequest) { r.Voice = "Ryan" },
+		func(r *llm.SpeechRequest) { r.Instructions = "Speak cheerfully." },
+		func(r *llm.SpeechRequest) { r.ReferenceAudio = &llm.ReferenceAudio{Format: "mp3", Data: ref.Data} },
+		func(r *llm.SpeechRequest) {
+			r.ReferenceAudio = &llm.ReferenceAudio{Format: "wav", Data: []byte("invalid")}
+		},
+	} {
+		request := valid
+		change(&request)
+		if err := m.ValidateSpeechRequest(request); err == nil {
+			t.Fatal("invalid Base option accepted")
+		}
+	}
+	values["tts_model_type"] = "voice_design"
+	unsupported, _ := json.Marshal(values)
+	if _, err := parseConfig(unsupported); err == nil {
+		t.Fatal("VoiceDesign was admitted")
 	}
 }
 
@@ -127,7 +178,7 @@ func TestCustomVoiceVariants(t *testing.T) {
 		t.Fatal("1.7B requires the predictor projection")
 	}
 	m := &Model{cfg: parsed}
-	if err := m.ValidateSpeechRequest(llm.SpeechRequest{Instructions: "Speak cheerfully."}); err != nil {
+	if err := m.ValidateSpeechRequest(llm.SpeechRequest{Input: "Hello", Instructions: "Speak cheerfully."}); err != nil {
 		t.Fatal(err)
 	}
 }

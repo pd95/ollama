@@ -8,6 +8,13 @@ import (
 	"unsafe"
 )
 
+// Linspace constructs num evenly spaced values, including both endpoints.
+func Linspace(start, stop float64, num int, dtype DType) *Array {
+	out := New("LINSPACE")
+	mlxCheck(C.mlx_linspace(&out.ctx, C.double(start), C.double(stop), C.int(num), C.mlx_dtype(dtype), DefaultStream().ctx))
+	return out
+}
+
 // Nvfp4MaxProduct is the product of the maximum E4M3 and E2M1 values. Every
 // globalScale below is in MLX's representation: a checkpoint's multiplier m
 // (ModelOpt's weight_scale_2) is held as m*Nvfp4MaxProduct, so Nvfp4MaxProduct
