@@ -15,6 +15,19 @@ func Linspace(start, stop float64, num int, dtype DType) *Array {
 	return out
 }
 
+// Round rounds to the nearest integer with ties to even.
+func Round(a *Array) *Array {
+	out := New("ROUND")
+	mlxCheck(C.mlx_round(&out.ctx, a.ctx, 0, DefaultStream().ctx))
+	return out
+}
+
+func Log10(a *Array) *Array {
+	out := New("LOG10")
+	mlxCheck(C.mlx_log10(&out.ctx, a.ctx, DefaultStream().ctx))
+	return out
+}
+
 // Nvfp4MaxProduct is the product of the maximum E4M3 and E2M1 values. Every
 // globalScale below is in MLX's representation: a checkpoint's multiplier m
 // (ModelOpt's weight_scale_2) is held as m*Nvfp4MaxProduct, so Nvfp4MaxProduct

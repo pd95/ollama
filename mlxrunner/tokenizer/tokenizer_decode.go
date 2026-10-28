@@ -17,6 +17,8 @@ func (t *Tokenizer) Decode(ids []int32) string {
 		token := t.vocab.Values[id]
 
 		switch t.typ {
+		case TokenizerUnicodeBPE:
+			sb.WriteString(token)
 		case TokenizerSentencePiece:
 			// SentencePiece style: replace ▁ with space, decode byte tokens
 			token = strings.ReplaceAll(token, "▁", " ")

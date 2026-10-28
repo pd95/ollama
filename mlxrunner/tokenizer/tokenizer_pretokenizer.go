@@ -13,13 +13,14 @@ import (
 const defaultBPEPattern = `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`
 
 type pretokenizer struct {
-	re              *regexp.Regexp
-	whitespaceGroup int
-	rightDigits     bool
-	behavior        string
-	invert          bool
-	prefixSpace     bool
-	byteLevel       bool
+	re                *regexp.Regexp
+	whitespaceGroup   int
+	rightDigits       bool
+	behavior          string
+	invert            bool
+	prefixSpace       bool
+	byteLevel         bool
+	unicodeWhitespace bool
 }
 
 func loadPretokenizers(data json.RawMessage) ([]pretokenizer, error) {
@@ -68,6 +69,8 @@ func loadPretokenizers(data json.RawMessage) ([]pretokenizer, error) {
 			}
 			pt.prefixSpace = raw.AddPrefixSpace
 			pt.byteLevel = true
+		case "Whitespace":
+			pt.unicodeWhitespace = true
 		default:
 			return nil, fmt.Errorf("unsupported pretokenizer %q", raw.Type)
 		}
@@ -77,6 +80,9 @@ func loadPretokenizers(data json.RawMessage) ([]pretokenizer, error) {
 		all = append(all, pt)
 	}
 	for i, pt := range all {
+		if pt.unicodeWhitespace && len(all) != 1 {
+			return nil, fmt.Errorf("Whitespace must be the only pretokenizer")
+		}
 		// Byte mapping happens in encodeChunkInto, after the splitting pipeline.
 		if pt.byteLevel {
 			if i != len(all)-1 {
@@ -253,6 +259,28 @@ func (p pretokenizer) matches(text string) iter.Seq2[int, int] {
 func (p pretokenizer) split(text string) []string {
 	if text == "" {
 		return nil
+	}
+	if p.unicodeWhitespace {
+		// HF Whitespace uses Unicode \w+|[^\w\s]+, retaining runs of
+		// punctuation and discarding Unicode whitespace.
+		var result []string
+		start, previousWord := -1, false
+		for offset, r := range text {
+			space := unicode.IsSpace(r)
+			word := unicode.IsLetter(r) || unicode.IsMark(r) || unicode.Is(unicode.Nl, r) || unicode.Is(unicode.Nd, r) || unicode.Is(unicode.Pc, r) || unicode.Is(unicode.Other_Alphabetic, r) || r == 0x200c || r == 0x200d
+			if start >= 0 && (space || word != previousWord) {
+				result = append(result, text[start:offset])
+				start = -1
+			}
+			if !space && start < 0 {
+				start = offset
+			}
+			previousWord = word
+		}
+		if start >= 0 {
+			result = append(result, text[start:])
+		}
+		return result
 	}
 	if p.prefixSpace && !strings.HasPrefix(text, " ") {
 		text = " " + text

@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/ollama/ollama/mlx"
+	"github.com/ollama/ollama/mlxrunner/nn"
 )
 
 type speakerConfig struct {
@@ -129,19 +130,7 @@ func loadSpeaker(cfg speakerConfig, tensors map[string]*mlx.Array) (*speakerEnco
 }
 
 // Match the float32 Slaney construction used by the reference DSP module.
-func speakerMelBank() *mlx.Array {
-	const logStep = 0.06875177742094912 // log(6.4)/27
-	maxMel := 15 + math.Log(12)/logStep
-	mels := mlx.Linspace(0, maxMel, 130, mlx.DTypeFloat32)
-	hz := mlx.Where(mlx.FromValue(float32(15)).LessEqual(mels), mlx.Mul(mlx.FromValue(float32(1000)), mlx.Exp(mlx.Mul(mlx.FromValue(float32(logStep)), mlx.Sub(mels, mlx.FromValue(float32(15)))))), mlx.Mul(mlx.FromValue(float32(200.0/3)), mels))
-	diff := mlx.Sub(hz.Slice(mlx.Slice(1, 130)), hz.Slice(mlx.Slice(0, 129)))
-	slopes := mlx.Sub(mlx.ExpandDims(hz, 0), mlx.ExpandDims(mlx.Linspace(0, 12000, 513, mlx.DTypeFloat32), 1))
-	down := mlx.Div(mlx.Neg(slopes.Slice(mlx.Slice(), mlx.Slice(0, 128))), diff.Slice(mlx.Slice(0, 128)))
-	up := mlx.Div(slopes.Slice(mlx.Slice(), mlx.Slice(2, 130)), diff.Slice(mlx.Slice(1, 129)))
-	bank := mlx.Maximum(mlx.FromValue(float32(0)), mlx.Minimum(down, up))
-	norm := mlx.Div(mlx.FromValue(float32(2)), mlx.Sub(hz.Slice(mlx.Slice(2, 130)), hz.Slice(mlx.Slice(0, 128))))
-	return mlx.Transpose(mlx.Mul(bank, mlx.ExpandDims(norm, 0)), 1, 0)
-}
+func speakerMelBank() *mlx.Array { return nn.SlaneyMelFilters(24000, 1024, 128, 12000) }
 
 func (s *speakerEncoder) mels(audio *mlx.Array) *mlx.Array {
 	length := audio.Size()

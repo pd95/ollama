@@ -167,6 +167,12 @@ func (t *Tokenizer) encodeBPEMerge(encoded string, ids []int32) []int32 {
 }
 
 func (t *Tokenizer) appendByteFallback(ids []int32, token string) []int32 {
+	if t.typ == TokenizerUnicodeBPE {
+		if t.unknownToken >= 0 {
+			return append(ids, t.unknownToken)
+		}
+		return ids
+	}
 	if t.typ == TokenizerBPE {
 		for _, r := range token {
 			if b, ok := decodeByteLevelRune(r); ok {
