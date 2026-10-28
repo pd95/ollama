@@ -270,6 +270,7 @@ export default function Chat({ chatId }: { chatId: string }) {
             )}
             <ChatForm
               hasMessages={messages.length > 0}
+              messages={messages}
               onSubmit={handleChatFormSubmit}
               chatId={chatId}
               autoFocus={true}

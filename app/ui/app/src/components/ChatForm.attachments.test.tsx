@@ -7,6 +7,8 @@ import { ImageThumbnail } from "./ImageThumbnail";
 const state = vi.hoisted(() => ({
   model: "gptoss-mlx:20b",
   metadata: { capabilities: ["completion"] } as any,
+  messages: [] as any[],
+  editingMessage: null as any,
 }));
 vi.mock("@/hooks/useSelectedModel", () => ({
   useSelectedModel: () => ({
@@ -53,6 +55,8 @@ function Form() {
     <QueryClientProvider client={client}>
       <ChatForm
         hasMessages={false}
+        messages={state.messages}
+        editingMessage={state.editingMessage}
         onSubmit={submit}
         onFilesReceived={(callback) => {
           receive = callback;
@@ -69,6 +73,8 @@ beforeEach(() => {
   client = new QueryClient();
   state.model = "gptoss-mlx:20b";
   state.metadata = { capabilities: ["completion"] };
+  state.messages = [];
+  state.editingMessage = null;
   submit.mockReset();
   nativePicker.mockReset();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -105,23 +111,19 @@ async function render() {
 }
 async function enterHello() {
   await act(async () =>
-    renderer.root
-      .findByType("textarea")
-      .props.onChange({
-        target: { value: "Hello", style: {}, scrollHeight: 24 },
-      }),
+    renderer.root.findByType("textarea").props.onChange({
+      target: { value: "Hello", style: {}, scrollHeight: 24 },
+    }),
   );
 }
 async function send() {
   await act(async () =>
-    renderer.root
-      .findByType("textarea")
-      .props.onKeyDown({
-        key: "Enter",
-        preventDefault: vi.fn(),
-        shiftKey: false,
-        nativeEvent: { isComposing: false },
-      }),
+    renderer.root.findByType("textarea").props.onKeyDown({
+      key: "Enter",
+      preventDefault: vi.fn(),
+      shiftKey: false,
+      nativeEvent: { isComposing: false },
+    }),
   );
 }
 async function dismissMediaErrors() {
@@ -254,5 +256,82 @@ it("filters the browser file input and rejects unsupported media from its change
   expect(submit).toHaveBeenCalledWith(
     "Hello",
     expect.objectContaining({ attachments: [files[2]] }),
+  );
+});
+
+it.each(["speech.mp3", "photo.png"])(
+  "blocks sending a Markdown follow-up when history contains unsupported %s",
+  async (filename) => {
+    state.messages = [
+      { role: "user", attachments: [{ filename }] },
+      { role: "assistant", content: "" },
+    ];
+    await render();
+    await act(async () =>
+      receive(
+        [{ filename: "notes.md", data: new Uint8Array([35, 32, 65]) }],
+        [],
+      ),
+    );
+    await enterHello();
+    await send();
+    expect(submit).not.toHaveBeenCalled();
+    expect(
+      renderer.root.findByProps({ role: "alert" }).children.join(""),
+    ).toContain(filename);
+    state.metadata = { capabilities: ["vision", "audio"] };
+    await act(async () => renderer.update(<Form />));
+    await send();
+    expect(submit).toHaveBeenCalledWith(
+      "Hello",
+      expect.objectContaining({
+        attachments: [
+          { filename: "notes.md", data: new Uint8Array([35, 32, 65]) },
+        ],
+      }),
+    );
+  },
+);
+
+it("allows Markdown in a new chat and a text-only history", async () => {
+  state.messages = [
+    { role: "user", attachments: [{ filename: "earlier.md" }] },
+  ];
+  await render();
+  const markdown = { filename: "notes.md", data: new Uint8Array([35, 32, 65]) };
+  await act(async () => receive([markdown], []));
+  await enterHello();
+  await send();
+  expect(submit).toHaveBeenCalledWith(
+    "Hello",
+    expect.objectContaining({ attachments: [markdown] }),
+  );
+});
+
+it("lets editing remove incompatible media and truncates later history", async () => {
+  state.messages = [
+    {
+      role: "user",
+      content: "Remove this audio",
+      attachments: [{ filename: "speech.mp3" }],
+    },
+    { role: "user", attachments: [{ filename: "later.png" }] },
+  ];
+  await render();
+  state.editingMessage = {
+    content: "Hello",
+    index: 0,
+    originalMessage: state.messages[0],
+  };
+  await act(async () => renderer.update(<Form />));
+  await act(async () =>
+    renderer.root
+      .findByProps({ "aria-label": "Remove speech.mp3" })
+      .props.onClick(),
+  );
+  await send();
+  expect(submit).toHaveBeenCalledWith(
+    "Hello",
+    expect.objectContaining({ attachments: [] }),
   );
 });

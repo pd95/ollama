@@ -21,6 +21,7 @@ import (
 	"github.com/ollama/ollama/app/ui/responses"
 	"github.com/ollama/ollama/app/updater"
 	"github.com/ollama/ollama/cmd/launch"
+	"github.com/ollama/ollama/types/model"
 )
 
 func TestBuildChatRequestPreservesAudioAttachmentsAsMedia(t *testing.T) {
@@ -51,6 +52,100 @@ func TestBuildChatRequestPreservesAudioAttachmentsAsMedia(t *testing.T) {
 	}
 	if !strings.Contains(message.Content, "keep this text attachment") {
 		t.Fatalf("text attachment missing from content: %q", message.Content)
+	}
+}
+
+func TestBuildChatRequestMarkdownIsText(t *testing.T) {
+	for _, filename := range []string{"notes.md", "NOTES.MD", "notes.txt"} {
+		t.Run(filename, func(t *testing.T) {
+			chat := &store.Chat{Messages: []store.Message{{
+				Role: "user", Content: "Read the attached document.",
+				Attachments: []store.File{{Filename: filename, Data: []byte("# Notes\nThe code is cobalt.")}},
+			}}}
+			req, err := (&Server{}).buildChatRequest(chat, "pd95/gptoss-mlx:20b", false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(req.Messages) != 1 || len(req.Messages[0].Images) != 0 {
+				t.Fatalf("document request contains media: %+v", req.Messages)
+			}
+			want := "Read the attached document.\n--- File: " + filename + " ---\n# Notes\nThe code is cobalt.\n--- End of " + filename + " ---"
+			if req.Messages[0].Content != want {
+				t.Fatalf("document content = %q, want %q", req.Messages[0].Content, want)
+			}
+		})
+	}
+}
+
+func TestChatValidatesHistoryBeforeInference(t *testing.T) {
+	for _, tc := range []struct {
+		name, filename string
+		capabilities   []model.Capability
+		allowed        bool
+	}{
+		{name: "markdown only", allowed: true},
+		{name: "audio history", filename: "speech.MP3"},
+		{name: "image history", filename: "photo.PNG"},
+		{name: "audio allowed", filename: "speech.wav", capabilities: []model.Capability{model.CapabilityAudio}, allowed: true},
+		{name: "image allowed", filename: "photo.webp", capabilities: []model.Capability{model.CapabilityVision}, allowed: true},
+		{name: "vision cannot read audio", filename: "speech.mp3", capabilities: []model.Capability{model.CapabilityVision}},
+		{name: "audio cannot read image", filename: "photo.jpg", capabilities: []model.Capability{model.CapabilityAudio}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests []api.ChatRequest
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/show":
+					json.NewEncoder(w).Encode(api.ShowResponse{Capabilities: tc.capabilities})
+				case "/api/chat":
+					var req api.ChatRequest
+					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+						t.Error(err)
+					}
+					requests = append(requests, req)
+					json.NewEncoder(w).Encode(api.ChatResponse{Message: api.Message{Role: "assistant", Content: "cobalt"}, Done: true})
+				default:
+					t.Errorf("unexpected inference endpoint: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer backend.Close()
+			t.Setenv("OLLAMA_HOST", backend.URL)
+			db := &store.Store{DBPath: filepath.Join(t.TempDir(), "db.sqlite")}
+			defer db.Close()
+			chat := store.NewChat("00000000-0000-0000-0000-000000000001")
+			if tc.filename != "" {
+				chat.Messages = append(chat.Messages, store.NewMessage("user", "Earlier media", &store.MessageOptions{
+					Attachments: []store.File{{Filename: tc.filename, Data: []byte{1, 2, 3}}},
+				}))
+			}
+			if err := db.SetChat(*chat); err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/chat/"+chat.ID, strings.NewReader(`{"model":"test","prompt":"Read the document","attachments":[{"filename":"notes.md","data":"IyBOb3Rlc1xuVGhlIGNvZGUgaXMgY29iYWx0Lg=="}]}`))
+			r.SetPathValue("id", chat.ID)
+			w := httptest.NewRecorder()
+			if err := (&Server{Store: db}).chat(w, r); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.allowed {
+				if len(requests) != 0 || !strings.Contains(w.Body.String(), tc.filename) || !strings.Contains(w.Body.String(), "start a new chat") {
+					t.Fatalf("unsupported history reached inference or missing recovery advice: requests=%d body=%s", len(requests), w.Body.String())
+				}
+				return
+			}
+			if len(requests) != 1 {
+				t.Fatalf("inference request count = %d, want 1; body=%s", len(requests), w.Body.String())
+			}
+			last := requests[0].Messages[len(requests[0].Messages)-1]
+			if len(last.Images) != 0 || !strings.Contains(last.Content, "The code is cobalt.") {
+				t.Fatalf("Markdown was not transported as text: %+v", last)
+			}
+			if tc.filename != "" && (len(requests[0].Messages[0].Images) != 1 || !bytes.Equal(requests[0].Messages[0].Images[0], []byte{1, 2, 3})) {
+				t.Fatal("supported history media was not preserved")
+			}
+		})
 	}
 }
 

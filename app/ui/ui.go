@@ -913,6 +913,11 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 	think := slices.Contains(details.Capabilities, model.CapabilityThinking)
+	if err := validateChatMedia(chat, details.Capabilities); err != nil {
+		json.NewEncoder(w).Encode(s.getError(err))
+		flusher.Flush()
+		return nil
+	}
 
 	var thinkValue any
 
@@ -1853,6 +1858,30 @@ func isMediaAttachment(filename string) bool {
 	ext := strings.ToLower(filename)
 	return strings.HasSuffix(ext, ".png") || strings.HasSuffix(ext, ".jpg") || strings.HasSuffix(ext, ".jpeg") || strings.HasSuffix(ext, ".webp") ||
 		strings.HasSuffix(ext, ".wav") || strings.HasSuffix(ext, ".mp3")
+}
+
+// Validate the whole retained history, including attachments from failed sends
+// and from before a model switch. Documents are converted to text separately.
+func validateChatMedia(chat *store.Chat, capabilities []model.Capability) error {
+	for _, message := range chat.Messages {
+		if message.Role != "user" {
+			continue
+		}
+		for _, file := range message.Attachments {
+			if !isMediaAttachment(file.Filename) {
+				continue
+			}
+			capability, kind := model.CapabilityVision, "image"
+			name := strings.ToLower(file.Filename)
+			if strings.HasSuffix(name, ".mp3") || strings.HasSuffix(name, ".wav") {
+				capability, kind = model.CapabilityAudio, "audio"
+			}
+			if !slices.Contains(capabilities, capability) {
+				return fmt.Errorf("chat attachment %q requires %s input support. Edit its message to remove it, choose a compatible model, or start a new chat", file.Filename, kind)
+			}
+		}
+	}
+	return nil
 }
 
 // ptr is a convenience function for &literal

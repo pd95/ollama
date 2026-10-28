@@ -56,6 +56,7 @@ interface MessageInput {
 
 interface ChatFormProps {
   hasMessages: boolean;
+  messages?: Message[];
   onSubmit?: (
     message: string,
     options: {
@@ -87,6 +88,7 @@ interface ChatFormProps {
 
 function ChatForm({
   hasMessages,
+  messages = [],
   onSubmit,
   autoFocus = false,
   chatId = "new",
@@ -131,6 +133,16 @@ function ChatForm({
   const hasUnsupportedAttachments = message.attachments.some((attachment) =>
     attachmentCapabilityError(attachment.filename, attachmentCapabilities),
   );
+  // Editing replaces this message and discards all later history.
+  const retainedHistory = editingMessage
+    ? messages.slice(0, editingMessage.index)
+    : messages;
+  const incompatibleHistoryFile = retainedHistory
+    .filter((item) => item.role === "user")
+    .flatMap((item) => item.attachments ?? [])
+    .find((file) =>
+      attachmentCapabilityError(file.filename, attachmentCapabilities),
+    );
   const { isAuthenticated, isLoading: isLoadingUser } = useUser();
   const [loginPromptFeature, setLoginPromptFeature] = useState<
     "webSearch" | "turbo" | null
@@ -523,6 +535,7 @@ function ChatForm({
       isStreaming ||
       isDownloading ||
       hasUnsupportedAttachments ||
+      incompatibleHistoryFile ||
       message.fileErrors.length > 0
     )
       return;
@@ -778,6 +791,16 @@ function ChatForm({
 
       {/* File upload error message */}
       {fileUploadError && <ErrorMessage error={fileUploadError} />}
+      {incompatibleHistoryFile && (
+        <p
+          role="alert"
+          className="mx-auto mb-3 max-w-[768px] px-5 text-sm text-red-600 dark:text-red-400"
+        >
+          Earlier attachment “{incompatibleHistoryFile.filename}” is
+          incompatible with this model. Edit its message to remove it, choose a
+          compatible model, or start a new chat.
+        </p>
+      )}
       <div
         className={`relative mx-auto flex bg-neutral-100 w-full max-w-[768px] flex-col items-center rounded-3xl pb-2 pt-4 dark:bg-neutral-800 dark:border-neutral-700 min-h-[88px] transition-opacity duration-200 ${isDisabled ? "opacity-50" : "opacity-100"}`}
       >
@@ -1008,6 +1031,7 @@ function ChatForm({
                 (!message.content.trim() ||
                   shouldShowLoginBanner ||
                   hasUnsupportedAttachments ||
+                  !!incompatibleHistoryFile ||
                   (cloudDisabled && selectedModel?.isCloud()) ||
                   message.fileErrors.length > 0)
               }
