@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/llm"
@@ -106,6 +107,12 @@ func speechError(format string, args ...any) error {
 }
 
 func (m *Model) ValidateSpeechRequest(req llm.SpeechRequest) error {
+	if req.Instructions != "" && m.cfg.Size != "1b7" {
+		return speechError("instructions require Qwen3-TTS 1.7B CustomVoice")
+	}
+	if utf8.RuneCountInString(req.Instructions) > 1024 {
+		return speechError("instructions must be at most 1024 characters")
+	}
 	voice := strings.ToLower(req.Voice)
 	if voice != "" {
 		if _, ok := m.cfg.Talker.Speakers[voice]; !ok {
@@ -145,7 +152,7 @@ func (m *Model) Speak(ctx context.Context, req llm.SpeechRequest, emit func([]fl
 	}
 	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
 	for _, chunk := range chunks {
-		if err := m.speak(ctx, chunk, req.Language, voice, rng, emit); err != nil {
+		if err := m.speak(ctx, chunk, req.Language, voice, req.Instructions, rng, emit); err != nil {
 			return err
 		}
 	}
@@ -175,7 +182,7 @@ func textChunks(text string, limit int) []string {
 	return chunks
 }
 
-func (m *Model) speak(ctx context.Context, text, language, voice string, rng *rand.Rand, emit func([]float32) error) error {
+func (m *Model) speak(ctx context.Context, text, language, voice, instructions string, rng *rand.Rand, emit func([]float32) error) error {
 	n := m.network
 	ids := m.tok.Encode("<|im_start|>assistant\n"+text+"<|im_end|>\n<|im_start|>assistant\n", false)
 	held := mlx.NewScope()
@@ -184,6 +191,10 @@ func (m *Model) speak(ctx context.Context, text, language, voice string, rng *ra
 	var err error
 	mlx.Scoped(func() {
 		input, pad, err = n.prepare(ids, language, voice)
+		if err == nil && instructions != "" {
+			instructIDs := m.tok.Encode("<|im_start|>user\n"+instructions+"<|im_end|>\n", false)
+			input = mlx.Concatenate([]*mlx.Array{n.project(instructIDs), input}, 1)
+		}
 		if err == nil {
 			mlx.Eval(input, pad)
 			held.Attach(input, pad)

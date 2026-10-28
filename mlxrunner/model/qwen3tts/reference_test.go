@@ -12,7 +12,6 @@ import (
 
 	"github.com/ollama/ollama/mlx"
 	"github.com/ollama/ollama/mlx/mlxtest"
-	"github.com/ollama/ollama/mlxrunner/nn"
 )
 
 func TestConfig(t *testing.T) {
@@ -110,8 +109,6 @@ func TestReference(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		q := network.talker.body.layers[0].q.(*nn.QuantizedLinear)
-		t.Logf("query %d bits group %d mode %s scales %v", q.Bits, q.GroupSize, q.Mode, q.Scales.DType())
 		codecRaw, err := os.ReadFile(filepath.Join(source, "speech_tokenizer/config.json"))
 		if err != nil {
 			t.Fatal(err)
@@ -180,6 +177,9 @@ func TestReference(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if want["instruction_ids"] != nil {
+				prepared = mlx.Concatenate([]*mlx.Array{network.project(want["instruction_ids"].Ints()), prepared}, 1)
+			}
 			compare(t, language+" input", prepared, want["input_embeds"], 1e-4, 1e-3)
 			compare(t, language+" pad", padding, want["tts_pad_embed"], 1e-4, 1e-3)
 			state := newState(len(network.talker.body.layers))
@@ -195,6 +195,9 @@ func TestReference(t *testing.T) {
 						x = mlx.Concatenate([]*mlx.Array{timeSlice(hidden, hidden.Dim(1)-1, hidden.Dim(1)), network.codec.Forward(mlx.FromValues(known[:1], 1, 1))}, 1)
 					} else {
 						x = network.codeEmb[i-1].Forward(mlx.FromValues(known[i:i+1], 1, 1))
+					}
+					if network.small != nil {
+						x = network.small.Forward(x)
 					}
 					out := network.codeHead[i].Forward(network.predictor.forward(x, pred))
 					compare(t, fmt.Sprintf("%s predictor %d", language, i), out, want[fmt.Sprintf("predictor_logits_%d", i)], 0, 0)

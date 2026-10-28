@@ -2,6 +2,7 @@ package qwen3tts
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -43,7 +44,7 @@ func TestSpeechOptions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, req := range []llm.SpeechRequest{{Voice: "missing"}, {Language: "missing"}} {
+	for _, req := range []llm.SpeechRequest{{Voice: "missing"}, {Language: "missing"}, {Instructions: "whisper"}} {
 		if err := m.ValidateSpeechRequest(req); err == nil {
 			t.Fatal("accepted unknown option")
 		}
@@ -90,5 +91,39 @@ func TestSampling(t *testing.T) {
 		if one != two {
 			t.Fatal("seed is not deterministic")
 		}
+	}
+}
+
+func TestCustomVoiceVariants(t *testing.T) {
+	raw, err := os.ReadFile("testdata/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	quant := cfg["quantization"].(map[string]any)
+	quant["bits"] = 4
+	four, _ := json.Marshal(cfg)
+	if _, err := parseConfig(four); err != nil {
+		t.Fatalf("supplied 0.6B 4-bit: %v", err)
+	}
+	cfg["tts_model_size"] = "1b7"
+	delete(cfg, "quantization")
+	talker := cfg["talker_config"].(map[string]any)
+	talker["hidden_size"] = 2048
+	talker["intermediate_size"] = 6144
+	large, _ := json.Marshal(cfg)
+	parsed, err := parseConfig(large)
+	if err != nil {
+		t.Fatalf("supplied 1.7B bf16: %v", err)
+	}
+	if parsed.Talker.Predictor.Hidden == parsed.Talker.Hidden {
+		t.Fatal("1.7B requires the predictor projection")
+	}
+	m := &Model{cfg: parsed}
+	if err := m.ValidateSpeechRequest(llm.SpeechRequest{Instructions: "Speak cheerfully."}); err != nil {
+		t.Fatal(err)
 	}
 }

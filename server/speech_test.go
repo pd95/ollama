@@ -35,7 +35,7 @@ func TestSpeechValidation(t *testing.T) {
 		`{"model":"test","input":"hello","speed":0}`,
 		`{"model":"test","input":"hello","speed":2}`,
 		`{"model":"test","input":"hello","stream_format":"sse"}`,
-		`{"model":"test","input":"hello","instructions":"whisper"}`,
+		`{"model":"test","input":"hello","instructions":"` + strings.Repeat("é", 1025) + `"}`,
 		`{"model":"test","input":"` + strings.Repeat("é", 4097) + `"}`,
 	} {
 		t.Run(body[:min(len(body), 90)], func(t *testing.T) {

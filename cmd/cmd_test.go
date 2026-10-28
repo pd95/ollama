@@ -601,7 +601,7 @@ func TestRunPipedOutputIsPlain(t *testing.T) {
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(t.Context())
-	for _, f := range []string{"keepalive", "format", "think", "voice", "language"} {
+	for _, f := range []string{"keepalive", "format", "think", "voice", "language", "instructions"} {
 		cmd.Flags().String(f, "", "")
 	}
 	for _, f := range []string{"verbose", "insecure", "nowordwrap", "hidethinking"} {
@@ -659,7 +659,7 @@ func TestRunChatSpeechModelVoice(t *testing.T) {
 
 			cmd := &cobra.Command{}
 			cmd.SetContext(t.Context())
-			for _, f := range []string{"keepalive", "format", "think", "voice", "language"} {
+			for _, f := range []string{"keepalive", "format", "think", "voice", "language", "instructions"} {
 				cmd.Flags().String(f, "", "")
 			}
 			for _, f := range []string{"verbose", "insecure", "nowordwrap", "hidethinking"} {

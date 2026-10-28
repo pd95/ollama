@@ -23,8 +23,9 @@ import (
 )
 
 type speechOptions struct {
-	Language string
-	Seed     *uint64
+	Instructions string
+	Language     string
+	Seed         *uint64
 }
 
 // runSpeech reads text aloud: piped input as it arrives followed by any
@@ -243,6 +244,9 @@ func lastSentenceEnd(s string) int {
 func synthesize(ctx context.Context, model, voice, text string, options ...speechOptions) ([]byte, error) {
 	values := map[string]any{"model": model, "voice": voice, "input": text, "response_format": "wav"}
 	if len(options) > 0 {
+		if options[0].Instructions != "" {
+			values["instructions"] = options[0].Instructions
+		}
 		if options[0].Language != "" {
 			values["language"] = options[0].Language
 		}

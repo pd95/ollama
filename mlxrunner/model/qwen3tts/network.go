@@ -61,8 +61,8 @@ func parseConfig(raw []byte) (*config, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
 	}
-	if cfg.Type != "custom_voice" || cfg.Size != "0b6" {
-		return nil, fmt.Errorf("Qwen3-TTS currently requires 0.6B CustomVoice, got %s %s", cfg.Size, cfg.Type)
+	if cfg.Type != "custom_voice" || (cfg.Size != "0b6" && cfg.Size != "1b7") {
+		return nil, fmt.Errorf("Qwen3-TTS requires 0.6B or 1.7B CustomVoice, got %s %s", cfg.Size, cfg.Type)
 	}
 	for _, s := range []stackConfig{cfg.Talker.stackConfig, cfg.Talker.Predictor} {
 		if s.Hidden <= 0 || s.Layers <= 0 || s.Heads <= 0 || s.KVHeads <= 0 || s.Head <= 0 || s.Head%2 != 0 || s.Heads%s.KVHeads != 0 || s.Eps <= 0 || s.Rope <= 0 {
@@ -72,8 +72,8 @@ func parseConfig(raw []byte) (*config, error) {
 	if cfg.Talker.Groups != 16 || cfg.Talker.Vocab != 3072 || cfg.Talker.TextHidden <= 0 || cfg.Talker.TextVocab <= int(cfg.TextEOS) || len(cfg.Talker.Speakers) == 0 {
 		return nil, fmt.Errorf("unsupported Qwen3-TTS conditioning layout")
 	}
-	if cfg.Quant.Bits != 0 && (cfg.Quant.Bits != 8 || cfg.Quant.Group != 64 || cfg.Quant.Mode != "affine") {
-		return nil, fmt.Errorf("Qwen3-TTS currently requires affine 8-bit weights or floating-point weights")
+	if cfg.Quant.Bits != 0 && ((cfg.Quant.Bits != 8 && cfg.Quant.Bits != 4) || cfg.Quant.Group != 64 || cfg.Quant.Mode != "affine") {
+		return nil, fmt.Errorf("Qwen3-TTS currently requires affine 4/8-bit weights or floating-point weights")
 	}
 	return &cfg, nil
 }

@@ -4,10 +4,11 @@ import "context"
 
 // SpeechRequest asks a speech model to read Input aloud.
 type SpeechRequest struct {
-	Input    string  `json:"input"`
-	Voice    string  `json:"voice,omitempty"`
-	Language string  `json:"language,omitempty"`
-	Seed     *uint64 `json:"seed,omitempty"`
+	Input        string  `json:"input"`
+	Voice        string  `json:"voice,omitempty"`
+	Instructions string  `json:"instructions,omitempty"`
+	Language     string  `json:"language,omitempty"`
+	Seed         *uint64 `json:"seed,omitempty"`
 }
 
 // Speaker is implemented by runners that serve speech models. Speech streams
