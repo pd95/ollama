@@ -23,6 +23,7 @@ var ErrInvalidTokenizer = errors.New("invalid tokenizer")
 
 type validatedTokenizerSource struct {
 	data      []byte
+	tekken    []byte
 	generated bool
 }
 
@@ -88,6 +89,10 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if err != nil {
 		return err
 	}
+	inv, voxtralTokenizer, err := prepareVoxtralTTSInventory(inv)
+	if err != nil {
+		return err
+	}
 	if opts.Renderer == "clef" {
 		inv, err = prepareClefInventory(inv)
 		if err != nil {
@@ -129,6 +134,13 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if err != nil {
 		return err
 	}
+	if voxtralTokenizer != nil {
+		if validatedTokenizer == nil {
+			validatedTokenizer = voxtralTokenizer
+		} else {
+			validatedTokenizer.tekken = voxtralTokenizer.tekken
+		}
+	}
 	if validatedTokenizer == nil && inv.Config.Architecture() == qwen3TTSArchitecture {
 		validatedTokenizer, err = qwen3TTSTokenizer(modelDir)
 		if err != nil {
@@ -144,8 +156,8 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if isPhononArchitecture(inv.Config.Architecture()) && opts.Quantize != "" {
 		return fmt.Errorf("Phonon currently requires unquantized weights")
 	}
-	if inv.Config.Architecture() == kokoroArchitecture && opts.Quantize != "" {
-		return fmt.Errorf("Kokoro currently requires source precision; import the supplied prequantized checkpoint instead")
+	if (inv.Config.Architecture() == kokoroArchitecture || inv.Config.Architecture() == voxtralTTSArchitecture) && opts.Quantize != "" {
+		return fmt.Errorf("speech model requires source precision; import the supplied prequantized checkpoint instead")
 	}
 	class, err := Classify(inv, opts.Quantize)
 	if err != nil {
@@ -242,7 +254,7 @@ func importConfigBlobs(ctx context.Context, modelDir, namePrefix string, configO
 	}
 	var layers []LayerInfo
 	var configLayer LayerInfo
-	seenTokenizer := false
+	seenTokenizer, seenTekken := false, false
 	for _, name := range names {
 		if err := checkContext(ctx); err != nil {
 			return nil, LayerInfo{}, err
@@ -258,6 +270,9 @@ func importConfigBlobs(ctx context.Context, modelDir, namePrefix string, configO
 			}
 			seenTokenizer = true
 			f = io.NopCloser(bytes.NewReader(validatedTokenizer.data))
+		} else if name == "tekken.json" && validatedTokenizer != nil && validatedTokenizer.tekken != nil {
+			seenTekken = true
+			f = io.NopCloser(bytes.NewReader(validatedTokenizer.tekken))
 		} else if name == "config.json" && configOverride != nil {
 			f = io.NopCloser(bytes.NewReader(configOverride))
 		} else {
@@ -279,7 +294,10 @@ func importConfigBlobs(ctx context.Context, modelDir, namePrefix string, configO
 		}
 		layers = append(layers, layer)
 	}
-	if validatedTokenizer != nil && !seenTokenizer {
+	if validatedTokenizer != nil && validatedTokenizer.tekken != nil && !seenTekken {
+		return nil, LayerInfo{}, fmt.Errorf("Voxtral tekken.json disappeared after preflight")
+	}
+	if validatedTokenizer != nil && validatedTokenizer.data != nil && !seenTokenizer {
 		return nil, LayerInfo{}, fmt.Errorf("%w: tokenizer.json disappeared after preflight", ErrInvalidTokenizer)
 	}
 	return layers, configLayer, nil

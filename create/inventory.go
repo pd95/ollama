@@ -140,6 +140,13 @@ func SafetensorsWeightFiles(dir string) ([]string, error) {
 			}
 			files = append(files, voices...)
 		}
+		if cfg.Architecture() == voxtralTTSArchitecture {
+			voices, err := voxtralVoiceFiles(dir)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, voices...)
+		}
 		if cfg.Architecture() == gradiumPhononArchitecture {
 			files, err = appendWeightSidecar(dir, files, "default-voice.safetensors", "Phonon")
 			if err != nil {

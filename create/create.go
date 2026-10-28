@@ -400,6 +400,16 @@ func readSourceModelConfig(modelDir string) (sourceModelConfig, json.RawMessage,
 		return sourceModelConfig{}, nil, fmt.Errorf("parse %s: %w", configPath, err)
 	}
 
+	if cfg.Architecture() == "voxtral_tts" || cfg.Architecture() == voxtralTTSArchitecture {
+		normalized, err := normalizeVoxtralTTSConfig(data)
+		if err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+		data = normalized
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+	}
 	if cfg.Architecture() == "" || cfg.Architecture() == "kokoro" || cfg.Architecture() == kokoroArchitecture {
 		normalized, recognized, err := normalizeKokoroConfig(data)
 		if err != nil {
@@ -528,6 +538,7 @@ type tensorImportTransformFactory func(rawConfig json.RawMessage) (quantizePolic
 
 var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
 	qwen3TTSArchitecture:                    newQwen3TTSImportTransform,
+	voxtralTTSArchitecture:                  newVoxtralTTSImportTransform,
 	kokoroArchitecture:                      newKokoroImportTransform,
 	"Qwen3_5Model":                          newPplxImportTransform,
 	"KevForDecision":                        newQwen35DecisionImportTransform,
