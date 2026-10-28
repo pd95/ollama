@@ -25,7 +25,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useSelectedModel } from "@/hooks/useSelectedModel";
-import { useHasVisionCapability } from "@/hooks/useModelCapabilities";
+import { useModelCapabilities } from "@/hooks/useModelCapabilities";
 import { Message } from "@/gotypes";
 
 export default function Chat({ chatId }: { chatId: string }) {
@@ -34,7 +34,13 @@ export default function Chat({ chatId }: { chatId: string }) {
   const chatQuery = useChat(chatId === "new" ? "" : chatId);
   const chatErrorQuery = useChatError(chatId === "new" ? "" : chatId);
   const { selectedModel } = useSelectedModel(chatId);
-  const hasVisionCapability = useHasVisionCapability(selectedModel?.model);
+  const { data: modelCapabilities } = useModelCapabilities(
+    selectedModel?.model,
+  );
+  const hasVisionCapability =
+    modelCapabilities?.capabilities?.includes("vision") ?? false;
+  const hasAudioCapability =
+    modelCapabilities?.capabilities?.includes("audio") ?? false;
   const shouldShowStaleDisplay = useShouldShowStaleDisplay(selectedModel);
   const dismissStaleModel = useDismissStaleModel();
   const { isHealthy } = useHealth();
@@ -197,6 +203,7 @@ export default function Chat({ chatId }: { chatId: string }) {
       onFilesAdded={handleFilesProcessed}
       selectedModel={selectedModel}
       hasVisionCapability={hasVisionCapability}
+      hasAudioCapability={hasAudioCapability}
     >
       {chatId === "new" ? (
         <div className="flex flex-col h-screen justify-center relative">

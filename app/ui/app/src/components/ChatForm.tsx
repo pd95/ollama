@@ -18,7 +18,7 @@ import {
 import { useNavigate } from "@tanstack/react-router";
 import { useSelectedModel } from "@/hooks/useSelectedModel";
 import {
-  useHasVisionCapability,
+  useModelCapabilities,
   useHasToolsCapability,
 } from "@/hooks/useModelCapabilities";
 import { useUser } from "@/hooks/useUser";
@@ -28,7 +28,11 @@ import { useSettings } from "@/hooks/useSettings";
 import { useCloudStatus } from "@/hooks/useCloudStatus";
 import { ThinkButton } from "./ThinkButton";
 import { ErrorMessage } from "./ErrorMessage";
-import { processFiles } from "@/utils/fileValidation";
+import {
+  processFiles,
+  attachmentCapabilityError,
+  allowedAttachmentExtensions,
+} from "@/utils/fileValidation";
 import type { ImageData } from "@/types/webview";
 import { PlusIcon } from "@heroicons/react/24/outline";
 import { useThinking } from "@/hooks/useThinking";
@@ -113,7 +117,20 @@ function ChatForm({
   const cancelMessage = useCancelMessage();
   const isDownloading = isDownloadingModel;
   const { selectedModel } = useSelectedModel();
-  const hasVisionCapability = useHasVisionCapability(selectedModel?.model);
+  const { data: modelCapabilities } = useModelCapabilities(
+    selectedModel?.model,
+  );
+  const hasVisionCapability =
+    modelCapabilities?.capabilities?.includes("vision") ?? false;
+  const hasAudioCapability =
+    modelCapabilities?.capabilities?.includes("audio") ?? false;
+  const attachmentCapabilities = { hasVisionCapability, hasAudioCapability };
+  // Async picker/read callbacks validate against the model selected now.
+  const attachmentCapabilitiesRef = useRef(attachmentCapabilities);
+  attachmentCapabilitiesRef.current = attachmentCapabilities;
+  const hasUnsupportedAttachments = message.attachments.some((attachment) =>
+    attachmentCapabilityError(attachment.filename, attachmentCapabilities),
+  );
   const { isAuthenticated, isLoading: isLoadingUser } = useUser();
   const [loginPromptFeature, setLoginPromptFeature] = useState<
     "webSearch" | "turbo" | null
@@ -216,10 +233,24 @@ function ChatForm({
       files: Array<{ filename: string; data: Uint8Array; type?: string }>,
       errors: Array<{ filename: string; error: string }> = [],
     ) => {
-      if (files.length > 0) {
+      const accepted = files.filter(
+        (file) =>
+          !attachmentCapabilityError(
+            file.filename,
+            attachmentCapabilitiesRef.current,
+          ),
+      );
+      const rejected = files.flatMap((file) => {
+        const error = attachmentCapabilityError(
+          file.filename,
+          attachmentCapabilitiesRef.current,
+        );
+        return error ? [{ filename: file.filename, error }] : [];
+      });
+      if (accepted.length > 0) {
         setFileUploadError(null);
 
-        const newAttachments = files.map((file) => ({
+        const newAttachments = accepted.map((file) => ({
           id: crypto.randomUUID(),
           filename: file.filename,
           data: file.data,
@@ -232,10 +263,10 @@ function ChatForm({
       }
 
       // Add validation errors to form state
-      if (errors.length > 0) {
+      if (errors.length > 0 || rejected.length > 0) {
         setMessage((prev) => ({
           ...prev,
-          fileErrors: [...prev.fileErrors, ...errors],
+          fileErrors: [...prev.fileErrors, ...errors, ...rejected],
         }));
       }
     },
@@ -487,7 +518,14 @@ function ChatForm({
   }, [isStreaming, editingMessage, onCancelEdit, navigateToNextElement]);
 
   const handleSubmit = async () => {
-    if (!message.content.trim() || isStreaming || isDownloading) return;
+    if (
+      !message.content.trim() ||
+      isStreaming ||
+      isDownloading ||
+      hasUnsupportedAttachments ||
+      message.fileErrors.length > 0
+    )
+      return;
 
     if (cloudDisabled && selectedModel?.isCloud()) {
       return;
@@ -498,15 +536,13 @@ function ChatForm({
       return;
     }
 
-    // Prepare attachments for submission, excluding unsupported images
-    const attachmentsToSend: FileAttachment[] = message.attachments
-      .filter(
-        (att) => hasVisionCapability || !isImageFile(att.filename),
-      )
-      .map((att) => ({
+    // Unsupported queued media blocks submission instead of being dropped.
+    const attachmentsToSend: FileAttachment[] = message.attachments.map(
+      (att) => ({
         filename: att.filename,
         data: att.data || new Uint8Array(0), // Empty data for existing files
-      }));
+      }),
+    );
 
     const useWebSearch =
       supportsWebSearch && webSearchEnabled && !cloudDisabled;
@@ -623,19 +659,19 @@ function ChatForm({
     }, 0);
   };
 
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileInputChange = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
     const files = e.target.files;
     if (!files) return;
 
-    Array.from(files).forEach((file) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-    });
-
-    // Reset file input
-    if (e.target) {
-      e.target.value = "";
-    }
+    const selectedFiles = Array.from(files);
+    e.target.value = "";
+    const { validFiles, errors } = await processFiles(
+      selectedFiles,
+      attachmentCapabilitiesRef.current,
+    );
+    handleFilesReceived(validFiles, errors);
   };
 
   // Auto-resize textarea function
@@ -651,7 +687,14 @@ function ChatForm({
     try {
       setFileUploadError(null);
 
-      const results = await window.webview?.selectMultipleFiles();
+      if (!window.webview?.selectMultipleFiles) {
+        fileInputRef.current?.click();
+        return;
+      }
+      const results = await window.webview.selectMultipleFiles({
+        images: hasVisionCapability,
+        audio: hasAudioCapability,
+      });
       if (results && results.length > 0) {
         // Convert native dialog results to File objects
         const files = results
@@ -679,7 +722,7 @@ function ChatForm({
         if (files.length > 0) {
           const { validFiles, errors } = await processFiles(files, {
             selectedModel,
-            hasVisionCapability,
+            ...attachmentCapabilitiesRef.current,
           });
 
           // Send processed files and errors to the same handler as FileUpload
@@ -752,71 +795,75 @@ function ChatForm({
         {(message.attachments.length > 0 || message.fileErrors.length > 0) && (
           <div className="flex gap-2 overflow-x-auto px-3 pt pb-3 w-full scrollbar-hide">
             {message.attachments.map((attachment, index) => {
-              const isUnsupportedImage =
-                !hasVisionCapability && isImageFile(attachment.filename);
+              const unsupportedReason = attachmentCapabilityError(
+                attachment.filename,
+                attachmentCapabilities,
+              );
               return (
-              <div
-                key={attachment.id}
-                className={`group flex items-center gap-2 py-2 px-3 rounded-lg transition-colors flex-shrink-0 ${
-                  isUnsupportedImage
-                    ? "bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800"
-                    : "bg-neutral-50 dark:bg-neutral-700/50 hover:bg-neutral-100 dark:hover:bg-neutral-700"
-                }`}
-              >
-                {isImageFile(attachment.filename) ? (
-                  <ImageThumbnail
-                    image={{
-                      filename: attachment.filename,
-                      data: attachment.data || new Uint8Array(0),
-                    }}
-                    className="w-8 h-8 object-cover rounded-md flex-shrink-0"
-                  />
-                ) : (
-                  <svg
-                    className="w-4 h-4 text-neutral-400 dark:text-neutral-500 flex-shrink-0"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={1.5}
-                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                    />
-                  </svg>
-                )}
-                <div className="flex flex-col min-w-0">
-                  <span className={`text-sm max-w-36 truncate ${isUnsupportedImage ? "text-red-700 dark:text-red-300" : "text-neutral-700 dark:text-neutral-300"}`}>
-                    {attachment.filename}
-                  </span>
-                  {isUnsupportedImage && (
-                    <span className="text-xs text-red-600 dark:text-red-400 opacity-75">
-                      This model does not support images
-                    </span>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => removeFile(index)}
-                  className="opacity-0 group-hover:opacity-100 transition-opacity text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300 -mr-1 cursor-pointer"
-                  aria-label={`Remove ${attachment.filename}`}
+                <div
+                  key={attachment.id}
+                  className={`group flex items-center gap-2 py-2 px-3 rounded-lg transition-colors flex-shrink-0 ${
+                    unsupportedReason
+                      ? "bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800"
+                      : "bg-neutral-50 dark:bg-neutral-700/50 hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                  }`}
                 >
-                  <svg
-                    className="w-4 h-4"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M6 18L18 6M6 6l12 12"
+                  {isImageFile(attachment.filename) ? (
+                    <ImageThumbnail
+                      image={{
+                        filename: attachment.filename,
+                        data: attachment.data || new Uint8Array(0),
+                      }}
+                      className="w-8 h-8 object-cover rounded-md flex-shrink-0"
                     />
-                  </svg>
-                </button>
-              </div>
+                  ) : (
+                    <svg
+                      className="w-4 h-4 text-neutral-400 dark:text-neutral-500 flex-shrink-0"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={1.5}
+                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                      />
+                    </svg>
+                  )}
+                  <div className="flex flex-col min-w-0">
+                    <span
+                      className={`text-sm max-w-36 truncate ${unsupportedReason ? "text-red-700 dark:text-red-300" : "text-neutral-700 dark:text-neutral-300"}`}
+                    >
+                      {attachment.filename}
+                    </span>
+                    {unsupportedReason && (
+                      <span className="text-xs text-red-600 dark:text-red-400 opacity-75">
+                        {unsupportedReason}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeFile(index)}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300 -mr-1 cursor-pointer"
+                    aria-label={`Remove ${attachment.filename}`}
+                  >
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </button>
+                </div>
               );
             })}
             {message.fileErrors.map((fileError, index) => (
@@ -960,6 +1007,7 @@ function ChatForm({
                 !isDownloading &&
                 (!message.content.trim() ||
                   shouldShowLoginBanner ||
+                  hasUnsupportedAttachments ||
                   (cloudDisabled && selectedModel?.isCloud()) ||
                   message.fileErrors.length > 0)
               }
@@ -993,7 +1041,9 @@ function ChatForm({
       <input
         ref={fileInputRef}
         type="file"
-        accept="*/*"
+        accept={allowedAttachmentExtensions(attachmentCapabilities)
+          .map((extension) => `.${extension}`)
+          .join(",")}
         multiple
         onChange={handleFileInputChange}
         className="hidden"

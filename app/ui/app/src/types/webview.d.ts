@@ -118,8 +118,14 @@ type ClaudeDesktopInstallResult = "opened" | "cancelled" | "failed";
 type CodexDesktopInstallResult = "opened" | "cancelled" | "failed";
 
 interface WebviewAPI {
-  selectFile: () => Promise<ImageData | null>;
-  selectMultipleFiles: () => Promise<ImageData[] | null>;
+  selectFile: (media?: {
+    images?: boolean;
+    audio?: boolean;
+  }) => Promise<ImageData | null>;
+  selectMultipleFiles: (media?: {
+    images?: boolean;
+    audio?: boolean;
+  }) => Promise<ImageData[] | null>;
   selectModelsDirectory: () => Promise<string | null>;
   selectWorkingDirectory: () => Promise<string | null>;
 }

@@ -34,6 +34,23 @@ const (
 	minimumWindowHeight    = onboardingWindowHeight
 )
 
+// Text documents are extracted for every model; media requires its own input capability.
+func attachmentFileExtensions(images, audio bool) []string {
+	exts := []string{
+		"pdf", "docx", "txt", "md", "csv", "json", "xml", "html", "htm",
+		"js", "jsx", "ts", "tsx", "py", "java", "cpp", "c", "cc", "h", "cs", "php", "rb",
+		"go", "rs", "swift", "kt", "scala", "sh", "bat", "yaml", "yml", "toml", "ini",
+		"cfg", "conf", "log", "rtf",
+	}
+	if images {
+		exts = append(exts, "png", "jpg", "jpeg", "webp")
+	}
+	if audio {
+		exts = append(exts, "wav", "mp3")
+	}
+	return exts
+}
+
 type Webview struct {
 	port       int
 	token      string
@@ -285,7 +302,7 @@ func (w *Webview) Run(path string) unsafe.Pointer {
 		})
 
 		// Bind selectFiles function for selecting multiple files at once
-		wv.Bind("selectFiles", func() {
+		wv.Bind("selectFiles", func(images, audio bool) {
 			go func() {
 				// Helper function to call the JavaScript callback with data or null
 				callCallback := func(data interface{}) {
@@ -295,17 +312,7 @@ func (w *Webview) Run(path string) unsafe.Pointer {
 					})
 				}
 
-				// Define allowed extensions for native dialog filtering
-				textExts := []string{
-					"pdf", "docx", "txt", "md", "csv", "json", "xml", "html", "htm",
-					"js", "jsx", "ts", "tsx", "py", "java", "cpp", "c", "cc", "h", "cs", "php", "rb",
-					"go", "rs", "swift", "kt", "scala", "sh", "bat", "yaml", "yml", "toml", "ini",
-					"cfg", "conf", "log", "rtf",
-				}
-				imageExts := []string{"png", "jpg", "jpeg", "webp"}
-				audioExts := []string{"wav", "mp3"}
-				allowedExts := append(textExts, imageExts...)
-				allowedExts = append(allowedExts, audioExts...)
+				allowedExts := attachmentFileExtensions(images, audio)
 
 				// Use native multiple file selection with extension filtering
 				filenames, err := dialog.File().

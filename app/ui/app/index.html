@@ -17,25 +17,25 @@
         window.webview = window.webview || {};
 
         // Single file selection (returns first file or null)
-        window.webview.selectFile = function () {
+        window.webview.selectFile = function (media) {
           return new Promise((resolve) => {
             window.__selectFilesCallback = (data) => {
               window.__selectFilesCallback = null;
               // For single file, return first file or null
               resolve(data && data.length > 0 ? data[0] : null);
             };
-            window.selectFiles();
+            window.selectFiles(media?.images === true, media?.audio === true);
           });
         };
 
         // Multiple file selection (returns array or null)
-        window.webview.selectMultipleFiles = function () {
+        window.webview.selectMultipleFiles = function (media) {
           return new Promise((resolve) => {
             window.__selectFilesCallback = (data) => {
               window.__selectFilesCallback = null;
               resolve(data); // Returns array of files or null if cancelled
             };
-            window.selectFiles();
+            window.selectFiles(media?.images === true, media?.audio === true);
           });
         };
       }

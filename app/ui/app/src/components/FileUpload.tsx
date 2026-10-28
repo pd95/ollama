@@ -17,6 +17,7 @@ interface FileUploadProps {
   ) => void;
   selectedModel?: Model | null;
   hasVisionCapability?: boolean;
+  hasAudioCapability?: boolean;
   validateFile?: (file: File) => { valid: boolean; error?: string };
   maxFileSize?: number;
   allowedExtensions?: string[];
@@ -27,6 +28,7 @@ export function FileUpload({
   onFilesAdded,
   selectedModel,
   hasVisionCapability = false,
+  hasAudioCapability = false,
   validateFile,
   maxFileSize = 10,
   allowedExtensions,
@@ -91,7 +93,7 @@ export function FileUpload({
         for (const item of dataTransfer.items) {
           if (item.kind === "file") {
             const entry = item.webkitGetAsEntry?.();
-            if (entry?.isFile) {
+            if (entry?.isFile || !entry) {
               const file = item.getAsFile();
               if (file) allFiles.push(file);
             } else if (entry?.isDirectory) {
@@ -110,6 +112,7 @@ export function FileUpload({
         maxFileSize,
         allowedExtensions,
         hasVisionCapability,
+        hasAudioCapability,
         selectedModel,
         customValidator: validateFile,
       });
@@ -123,6 +126,7 @@ export function FileUpload({
       readDirectory,
       selectedModel,
       hasVisionCapability,
+      hasAudioCapability,
       allowedExtensions,
       maxFileSize,
       validateFile,

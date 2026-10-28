@@ -1,4 +1,5 @@
 import { Model } from "@/gotypes";
+import { isImageFile } from "./imageUtils";
 // Shared file validation logic used by both FileUpload and native dialog selection
 
 export const TEXT_FILE_EXTENSIONS = [
@@ -44,10 +45,41 @@ export const TEXT_FILE_EXTENSIONS = [
 export const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp"];
 export const AUDIO_EXTENSIONS = ["wav", "mp3"];
 
-export interface FileValidationOptions {
+export interface AttachmentCapabilities {
+  hasVisionCapability?: boolean;
+  hasAudioCapability?: boolean;
+}
+
+export function attachmentCapabilityError(
+  filename: string,
+  capabilities: AttachmentCapabilities,
+): string | undefined {
+  if (isImageFile(filename) && !capabilities.hasVisionCapability) {
+    return "This model does not support images";
+  }
+  const extension = filename.toLowerCase().split(".").pop() || "";
+  if (
+    AUDIO_EXTENSIONS.includes(extension) &&
+    !capabilities.hasAudioCapability
+  ) {
+    return "This model does not support audio";
+  }
+  return undefined;
+}
+
+export function allowedAttachmentExtensions(
+  capabilities: AttachmentCapabilities,
+): string[] {
+  return [
+    ...TEXT_FILE_EXTENSIONS,
+    ...(capabilities.hasVisionCapability ? IMAGE_EXTENSIONS : []),
+    ...(capabilities.hasAudioCapability ? AUDIO_EXTENSIONS : []),
+  ];
+}
+
+export interface FileValidationOptions extends AttachmentCapabilities {
   maxFileSize?: number; // in MB
   allowedExtensions?: string[];
-  hasVisionCapability?: boolean;
   selectedModel?: Model | null;
   customValidator?: (file: File) => { valid: boolean; error?: string };
 }
@@ -88,6 +120,11 @@ export function validateFile(
   }
 
   // File size validation
+  const capabilityError = attachmentCapabilityError(file.name, options);
+  if (capabilityError) {
+    return { valid: false, error: capabilityError };
+  }
+
   if (file.size > MAX_FILE_SIZE) {
     return { valid: false, error: "File too large" };
   }

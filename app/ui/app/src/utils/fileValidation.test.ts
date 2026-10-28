@@ -12,19 +12,25 @@ describe("fileValidation", () => {
   });
 
   describe("validateFile", () => {
-    const createMockFile = (
-      name: string,
-      size: number,
-      type: string,
-    ): File => {
+    const createMockFile = (name: string, size: number, type: string): File => {
       const blob = new Blob(["test content"], { type });
       return new File([blob], name, { type });
     };
 
     it("accepts WAV and MP3 audio and keeps unsupported extensions rejected", () => {
-      expect(validateFile(createMockFile("speech.wav", 1024, "audio/wav")).valid).toBe(true);
-      expect(validateFile(createMockFile("speech.mp3", 1024, "audio/mpeg")).valid).toBe(true);
-      expect(validateFile(createMockFile("speech.flac", 1024, "audio/flac")).valid).toBe(false);
+      expect(
+        validateFile(createMockFile("speech.wav", 1024, "audio/wav"), {
+          hasAudioCapability: true,
+        }).valid,
+      ).toBe(true);
+      expect(
+        validateFile(createMockFile("speech.mp3", 1024, "audio/mpeg"), {
+          hasAudioCapability: true,
+        }).valid,
+      ).toBe(true);
+      expect(
+        validateFile(createMockFile("speech.flac", 1024, "audio/flac")).valid,
+      ).toBe(false);
     });
 
     it("should accept WebP images when vision capability is enabled", () => {
@@ -35,15 +41,54 @@ describe("fileValidation", () => {
       expect(result.valid).toBe(true);
     });
 
-    it("should accept images regardless of vision capability", () => {
-      // Vision capability check is handled at the UI layer (ChatForm),
-      // not at validation time, so users can switch models without
-      // needing to re-upload files.
+    it("rejects images when the selected model lacks vision", () => {
       const file = createMockFile("test.webp", 1024, "image/webp");
       const result = validateFile(file, {
         hasVisionCapability: false,
       });
-      expect(result.valid).toBe(true);
+      expect(result).toEqual({
+        valid: false,
+        error: "This model does not support images",
+      });
+    });
+
+    it.each([
+      [false, false, false, false],
+      [true, false, true, false],
+      [false, true, false, true],
+      [true, true, true, true],
+    ])(
+      "keeps image and audio capability independent (%s, %s)",
+      (vision, audio, imageAllowed, audioAllowed) => {
+        const options = {
+          hasVisionCapability: vision,
+          hasAudioCapability: audio,
+        };
+        expect(
+          validateFile(createMockFile("photo.PNG", 10, "image/png"), options)
+            .valid,
+        ).toBe(imageAllowed);
+        expect(
+          validateFile(createMockFile("speech.MP3", 10, "audio/mpeg"), options)
+            .valid,
+        ).toBe(audioAllowed);
+        expect(
+          validateFile(createMockFile("notes.txt", 10, "text/plain"), options)
+            .valid,
+        ).toBe(true);
+      },
+    );
+
+    it("rejects media until capability discovery succeeds, while allowing documents", () => {
+      expect(
+        validateFile(createMockFile("speech.wav", 10, "audio/wav")),
+      ).toEqual({ valid: false, error: "This model does not support audio" });
+      expect(
+        validateFile(createMockFile("photo.png", 10, "image/png")).valid,
+      ).toBe(false);
+      expect(
+        validateFile(createMockFile("notes.txt", 10, "text/plain")).valid,
+      ).toBe(true);
     });
 
     it("should accept PNG images when vision capability is enabled", () => {
@@ -68,7 +113,7 @@ describe("fileValidation", () => {
       const content = new Uint8Array(largeSize);
       const blob = new Blob([content], { type: "image/webp" });
       const file = new File([blob], "large.webp", { type: "image/webp" });
-      
+
       const result = validateFile(file, {
         hasVisionCapability: true,
         maxFileSize: 10, // 10MB limit
