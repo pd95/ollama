@@ -123,6 +123,18 @@ func newKokoroImportTransform(raw json.RawMessage) (quantizePolicy, error) {
 
 func (p kokoroImportTransform) augmentConfig(cfg *model.ConfigV2) error {
 	cfg.Voices = p.voices
+	cfg.VoiceLanguages = map[string][]string{}
+	for _, voice := range p.voices {
+		language := "en-US"
+		if strings.HasPrefix(voice, "b") {
+			language = "en-GB"
+		}
+		cfg.VoiceLanguages[voice] = []string{language}
+		if !slices.Contains(cfg.Languages, language) {
+			cfg.Languages = append(cfg.Languages, language)
+		}
+	}
+	slices.Sort(cfg.Languages)
 	return nil
 }
 func (kokoroImportTransform) quantizationType(string, []int32, string) string { return "" }

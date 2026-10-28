@@ -49,6 +49,9 @@ func TestKokoroImport(t *testing.T) {
 	if !slices.Equal(info.ModelConfig.Capabilities, []string{"speech"}) || !slices.Equal(info.ModelConfig.Voices, []string{"af_heart", "am_adam", "bf_emma"}) || info.ModelConfig.Parser != "" || info.ModelConfig.Renderer != "" {
 		t.Fatalf("metadata: %+v", info.ModelConfig)
 	}
+	if !slices.Equal(info.ModelConfig.Languages, []string{"en-GB", "en-US"}) || !slices.Equal(info.ModelConfig.VoiceLanguages["bf_emma"], []string{"en-GB"}) || !slices.Equal(info.ModelConfig.VoiceLanguages["af_heart"], []string{"en-US"}) {
+		t.Fatalf("English frontend language associations lost: %+v", info.ModelConfig)
+	}
 	var normalized map[string]any
 	if err := json.Unmarshal(store.blobs["config.json"], &normalized); err != nil {
 		t.Fatal(err)
