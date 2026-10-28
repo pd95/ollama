@@ -34,8 +34,8 @@ func (r *Runner) speechHandler(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-	} else if input.Language != "" || input.Seed != nil || input.Instructions != "" {
-		http.Error(w, "language, seed and instructions are not supported by this speech model", http.StatusBadRequest)
+	} else if input.Language != "" || input.Seed != nil || input.Instructions != "" || (input.Speed != nil && *input.Speed != 1) {
+		http.Error(w, "language, seed, instructions and speed changes are not supported by this speech model", http.StatusBadRequest)
 		return
 	}
 

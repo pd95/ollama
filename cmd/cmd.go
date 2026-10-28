@@ -982,7 +982,7 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("ask") {
 		return fmt.Errorf("%s is not a decision model, so it can't answer --ask questions", name)
 	}
-	for _, flag := range []string{"voice", "language", "seed", "instructions"} {
+	for _, flag := range []string{"voice", "language", "seed", "instructions", "speed"} {
 		if cmd.Flags().Changed(flag) && !speech {
 			return fmt.Errorf("%s is not a speech model, so it can't use --%s", name, flag)
 		}
@@ -1028,6 +1028,14 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		var speed *float64
+		if cmd.Flags().Changed("speed") {
+			value, err := cmd.Flags().GetFloat64("speed")
+			if err != nil {
+				return err
+			}
+			speed = &value
+		}
 		var seed *uint64
 		if cmd.Flags().Changed("seed") {
 			value, err := cmd.Flags().GetUint64("seed")
@@ -1036,7 +1044,7 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 			}
 			seed = &value
 		}
-		return runSpeech(cmd.Context(), name, voice, opts.Prompt, input, interactive, speechOptions{Language: language, Seed: seed, Instructions: instructions})
+		return runSpeech(cmd.Context(), name, voice, opts.Prompt, input, interactive, speechOptions{Language: language, Seed: seed, Instructions: instructions, Speed: speed})
 	}
 
 	if slices.Contains(info.Capabilities, model.CapabilityImage) {
@@ -2652,6 +2660,7 @@ func NewCLI() *cobra.Command {
 	runCmd.Flags().Bool("hidethinking", false, "Hide thinking output (if provided)")
 	runCmd.Flags().Bool("truncate", false, "For embedding models: truncate inputs exceeding context length (default: true). Set --truncate=false to error instead")
 	runCmd.Flags().Int("dimensions", 0, "Truncate output embeddings to specified dimension (embedding models only)")
+	runCmd.Flags().Float64("speed", 1, "Speech speed (supported speech models only)")
 	runCmd.Flags().String("voice", "", "Voice to speak with (speech models only)")
 	runCmd.Flags().String("instructions", "", "Speech style instructions (supported speech models only)")
 	runCmd.Flags().String("language", "", "Speech language (supported speech models only)")

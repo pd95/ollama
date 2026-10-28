@@ -107,6 +107,9 @@ func speechError(format string, args ...any) error {
 }
 
 func (m *Model) ValidateSpeechRequest(req llm.SpeechRequest) error {
+	if req.Speed != nil && *req.Speed != 1 {
+		return speechError("Qwen3-TTS supports only speed 1")
+	}
 	if req.Instructions != "" && m.cfg.Size != "1b7" {
 		return speechError("instructions require Qwen3-TTS 1.7B CustomVoice")
 	}

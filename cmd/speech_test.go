@@ -103,24 +103,26 @@ func TestSynthesize(t *testing.T) {
 
 func TestSynthesizeSpeechOptions(t *testing.T) {
 	seed := uint64(0)
+	speed := .75
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Instructions string  `json:"instructions"`
-			Language     string  `json:"language"`
-			Seed         *uint64 `json:"seed"`
-			Voice        string  `json:"voice"`
+			Instructions string   `json:"instructions"`
+			Language     string   `json:"language"`
+			Seed         *uint64  `json:"seed"`
+			Voice        string   `json:"voice"`
+			Speed        *float64 `json:"speed"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)
 		}
-		if req.Instructions != "Speak cheerfully." || req.Language != "de" || req.Seed == nil || *req.Seed != 0 || req.Voice != "Ryan" {
+		if req.Instructions != "Speak cheerfully." || req.Language != "de" || req.Seed == nil || *req.Seed != 0 || req.Voice != "Ryan" || req.Speed == nil || *req.Speed != speed {
 			t.Errorf("lost options: %+v", req)
 		}
 		w.Write(make([]byte, 46))
 	}))
 	defer server.Close()
 	t.Setenv("OLLAMA_HOST", server.URL)
-	if _, err := synthesize(t.Context(), "qwen", "Ryan", "Hallo", speechOptions{Language: "de", Seed: &seed, Instructions: "Speak cheerfully."}); err != nil {
+	if _, err := synthesize(t.Context(), "qwen", "Ryan", "Hallo", speechOptions{Language: "de", Seed: &seed, Instructions: "Speak cheerfully.", Speed: &speed}); err != nil {
 		t.Fatal(err)
 	}
 }

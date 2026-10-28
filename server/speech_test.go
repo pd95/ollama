@@ -33,7 +33,7 @@ func TestSpeechValidation(t *testing.T) {
 		`{"input":"hello"}`,
 		`{"model":"test","input":"hello","response_format":"mp3"}`,
 		`{"model":"test","input":"hello","speed":0}`,
-		`{"model":"test","input":"hello","speed":2}`,
+		`{"model":"test","input":"hello","speed":4.1}`,
 		`{"model":"test","input":"hello","stream_format":"sse"}`,
 		`{"model":"test","input":"hello","instructions":"` + strings.Repeat("é", 1025) + `"}`,
 		`{"model":"test","input":"` + strings.Repeat("é", 4097) + `"}`,

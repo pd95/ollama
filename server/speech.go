@@ -57,8 +57,8 @@ func (s *Server) SpeechHandler(c *gin.Context) {
 	case format != "wav" && format != "pcm":
 		openAIError(c, http.StatusBadRequest, fmt.Sprintf("response_format %q is not supported, use wav or pcm", format))
 		return
-	case req.Speed != nil && *req.Speed != 1:
-		openAIError(c, http.StatusBadRequest, "only speed 1 is supported")
+	case req.Speed != nil && (math.IsNaN(*req.Speed) || math.IsInf(*req.Speed, 0) || *req.Speed < 0.25 || *req.Speed > 4):
+		openAIError(c, http.StatusBadRequest, "speed must be between 0.25 and 4")
 		return
 	case utf8.RuneCountInString(req.Instructions) > 1024:
 		openAIError(c, http.StatusBadRequest, "instructions must be at most 1024 characters")
@@ -80,7 +80,7 @@ func (s *Server) SpeechHandler(c *gin.Context) {
 		return
 	}
 
-	streamSpeech(c, speaker, llm.SpeechRequest{Input: req.Input, Voice: req.Voice, Language: req.Language, Seed: req.Seed, Instructions: req.Instructions}, format)
+	streamSpeech(c, speaker, llm.SpeechRequest{Input: req.Input, Voice: req.Voice, Language: req.Language, Seed: req.Seed, Instructions: req.Instructions, Speed: req.Speed}, format)
 }
 
 func streamSpeech(c *gin.Context, speaker llm.Speaker, req llm.SpeechRequest, format string) {

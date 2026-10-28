@@ -39,6 +39,10 @@ func TestSpeechOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := &Model{cfg: cfg}
+	speed := .75
+	if err := m.ValidateSpeechRequest(llm.SpeechRequest{Speed: &speed}); err == nil {
+		t.Fatal("Qwen accepted a speed change")
+	}
 	for _, req := range []llm.SpeechRequest{{}, {Voice: "Ryan", Language: "en"}, {Voice: "ryan", Language: "German"}} {
 		if err := m.ValidateSpeechRequest(req); err != nil {
 			t.Fatal(err)
