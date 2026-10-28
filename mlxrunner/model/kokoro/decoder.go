@@ -110,18 +110,27 @@ func inverseSpectrum(magnitude, phase, window *mlx.Array) *mlx.Array {
 	frames := mlx.IRFFT(spectrum, 20, -1)
 	count := frames.Dim(0)
 	length := (count-1)*5 + 20
-	indices := make([]int32, count*20)
-	for i := range count {
-		for j := range 20 {
-			indices[i*20+j] = int32(i*5 + j)
-		}
-	}
-	at := mlx.FromValues(indices, len(indices))
-	signal := mlx.Zeros(mlx.DTypeFloat32, length).ScatterAddAxis(at, mlx.Reshape(mlx.Mul(frames, window), -1), 0)
+	signal := overlapAdd(mlx.Mul(frames, window))
 	norm := mlx.BroadcastTo(mlx.Mul(window, window), int32(count), 20)
-	denominator := mlx.Zeros(mlx.DTypeFloat32, length).ScatterAddAxis(at, mlx.Reshape(norm, -1), 0)
+	denominator := overlapAdd(norm)
 	denominator = mlx.Where(denominator.Greater(mlx.FromValue(float32(1e-10))), denominator, mlx.FromValue(float32(1)))
 	return mlx.Div(signal, denominator).Slice(mlx.Slice(10, length-10))
+}
+
+// Four window quarters overlap at each hop. Adding them in fixed order avoids
+// atomic scatter-add rounding that can change a seeded request's final PCM bit.
+func overlapAdd(frames *mlx.Array) *mlx.Array {
+	var sum *mlx.Array
+	for quarter := range 4 {
+		piece := mlx.Reshape(frames.Slice(mlx.Slice(), mlx.Slice(quarter*5, (quarter+1)*5)), -1)
+		padded := mlx.Concatenate([]*mlx.Array{mlx.Zeros(mlx.DTypeFloat32, quarter*5), piece, mlx.Zeros(mlx.DTypeFloat32, (3-quarter)*5)}, 0)
+		if sum == nil {
+			sum = padded
+		} else {
+			sum = mlx.Add(sum, padded)
+		}
+	}
+	return sum
 }
 
 func (g waveformGenerator) spectrum(x, style, excitation *mlx.Array) (*mlx.Array, *mlx.Array) {
@@ -164,6 +173,7 @@ type Decoder struct {
 	blocks            [4]resBlock
 	pitch, noise, asr *convolution
 	generator         waveformGenerator
+	source            nn.LinearLayer
 	Derived           []*mlx.Array
 }
 
@@ -178,6 +188,7 @@ func LoadDecoder(cfg *config.Config, tensors map[string]*mlx.Array, meta map[str
 		d.blocks[i] = loadResBlock(w, fmt.Sprintf("decoder.decode.%d", i), 1090, output, i == 3)
 	}
 	d.generator = loadGenerator(w)
+	d.source = w.linear("decoder.generator.m_source.l_linear")
 	d.Derived = w.derived
 	return d, w.err
 }

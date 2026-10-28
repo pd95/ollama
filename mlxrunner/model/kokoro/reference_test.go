@@ -113,6 +113,11 @@ func TestReferenceEncoders(t *testing.T) {
 				t.Fatal(err)
 			}
 			waveStyle := want["style"].Slice(mlx.Slice(), mlx.Slice(0, 128))
+			if want["source_initial"] != nil {
+				initial := mlx.Reshape(want["source_initial"], 1, 1, 9)
+				initial = mlx.Concatenate([]*mlx.Array{mlx.Zeros(mlx.DTypeFloat32, 1, 1, 1), initial.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(1, 9))}, 2)
+				compare(t, "harmonic source", harmonicSource(want["f0"], initial, want["source_additive_noise"], decoder.source), want["excitation"])
+			}
 			asr := mlx.Transpose(want["asr"], 0, 2, 1)
 			if want["decoder_features"] != nil {
 				pitchDown := decoder.pitch.run(mlx.ExpandDims(want["f0"], 2))

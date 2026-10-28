@@ -21,6 +21,7 @@ import (
 
 	_ "github.com/ollama/ollama/mlxrunner/model/gptoss"
 
+	_ "github.com/ollama/ollama/mlxrunner/model/kokoro"
 	_ "github.com/ollama/ollama/mlxrunner/model/nemotron_h"
 	_ "github.com/ollama/ollama/mlxrunner/model/phonon"
 	_ "github.com/ollama/ollama/mlxrunner/model/qwen3"

@@ -1,0 +1,25 @@
+{
+  "package": "misaki",
+  "version": "0.9.4",
+  "source": "https://github.com/hexgrad/misaki",
+  "license": "Apache-2.0",
+  "modification": "gzip packaging only; JSON payloads unchanged",
+  "files": {
+    "us_gold.json": {
+      "source_sha256": "dc414872a49a28ae6c141463d502fd945f3b2fde040484fdc47d00cc4612686f",
+      "compressed_sha256": "7798de4f852303b694e8bcd7b77ef809c8ec10b10a1deb4f3c7a648b40810415"
+    },
+    "us_silver.json": {
+      "source_sha256": "de8f67be911bb6c659187b4a65fd966b6a30e56350e0f790d763210b053ac475",
+      "compressed_sha256": "0ff0986a395d03ced4bf1658363b57bbb56e0092e181c2ec59b46066e7aec590"
+    },
+    "gb_gold.json": {
+      "source_sha256": "29e62f4b60261c88f7f3c2c7811ca3825978948090b72d2b27d565b729282f71",
+      "compressed_sha256": "41ccecd80b92cf069e8e5f067f760a97aa91bf459312be2a7e26c7b42b637c33"
+    },
+    "gb_silver.json": {
+      "source_sha256": "48131e2d92ccc41655f4543e87e0f938e71463eb5a54be7f0693bb712ebb6bce",
+      "compressed_sha256": "5ba26b06a41890b09d200b6da41683e6caaca119b67dd8db864db1debc758ef0"
+    }
+  }
+}
