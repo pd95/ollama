@@ -11,3 +11,8 @@ import (
 type SpeechModel interface {
 	Speak(ctx context.Context, req llm.SpeechRequest, emit func(samples []float32) error) error
 }
+
+// SpeechRequestValidator checks model-specific options before streaming begins.
+type SpeechRequestValidator interface {
+	ValidateSpeechRequest(llm.SpeechRequest) error
+}

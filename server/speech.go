@@ -33,6 +33,8 @@ func (s *Server) SpeechHandler(c *gin.Context) {
 		Voice          string   `json:"voice"`
 		ResponseFormat string   `json:"response_format"`
 		Speed          *float64 `json:"speed"`
+		Language       string   `json:"language"`
+		Seed           *uint64  `json:"seed"`
 		Instructions   string   `json:"instructions"`
 		StreamFormat   string   `json:"stream_format"`
 	}
@@ -78,7 +80,7 @@ func (s *Server) SpeechHandler(c *gin.Context) {
 		return
 	}
 
-	streamSpeech(c, speaker, llm.SpeechRequest{Input: req.Input, Voice: req.Voice}, format)
+	streamSpeech(c, speaker, llm.SpeechRequest{Input: req.Input, Voice: req.Voice, Language: req.Language, Seed: req.Seed}, format)
 }
 
 func streamSpeech(c *gin.Context, speaker llm.Speaker, req llm.SpeechRequest, format string) {

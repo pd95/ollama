@@ -233,6 +233,16 @@ func Conv1d(x, weight *Array, bias *Array, stride, padding, dilation, groups int
 	return out
 }
 
+// ConvTranspose1d applies a transposed convolution in NLC/OKI layout.
+func ConvTranspose1d(x, weight, bias *Array, stride, padding, dilation, outputPadding, groups int32) *Array {
+	out := New("CONV_TRANSPOSE1D")
+	mlxCheck(C.mlx_conv_transpose1d(&out.ctx, x.ctx, weight.ctx, C.int(stride), C.int(padding), C.int(dilation), C.int(outputPadding), C.int(groups), DefaultStream().ctx))
+	if bias != nil {
+		out = Add(out, bias)
+	}
+	return out
+}
+
 func Contiguous(a *Array, allowColMajor bool) *Array {
 	out := New("CONTIGUOUS")
 	mlxCheck(C.mlx_contiguous(&out.ctx, a.ctx, C.bool(allowColMajor), DefaultStream().ctx))

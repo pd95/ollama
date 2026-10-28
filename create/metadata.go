@@ -28,6 +28,11 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 	var parserName, rendererName, sourceDecisionRenderer string
 	var decisionModel, decisionVision bool
 	switch cfg.Architecture() {
+	case qwen3TTSArchitecture:
+		// The speech tokenizer's Qwen family name does not imply a chat renderer.
+		if parserOverride != "" || rendererOverride != "" {
+			return model.ConfigV2{}, fmt.Errorf("Qwen3-TTS does not support chat parsers or renderers")
+		}
 	case "Qwen3_5Model":
 		hasSidecar, err := hasPplxSidecar(modelDir)
 		if err != nil {

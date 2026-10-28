@@ -982,8 +982,10 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("ask") {
 		return fmt.Errorf("%s is not a decision model, so it can't answer --ask questions", name)
 	}
-	if cmd.Flags().Changed("voice") && !speech {
-		return fmt.Errorf("%s is not a speech model, so it can't use --voice", name)
+	for _, flag := range []string{"voice", "language", "seed"} {
+		if cmd.Flags().Changed(flag) && !speech {
+			return fmt.Errorf("%s is not a speech model, so it can't use --%s", name, flag)
+		}
 	}
 
 	// Check if this is an embedding model
@@ -1018,7 +1020,19 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		if stdinPiped {
 			input = os.Stdin
 		}
-		return runSpeech(cmd.Context(), name, voice, opts.Prompt, input, interactive)
+		language, err := cmd.Flags().GetString("language")
+		if err != nil {
+			return err
+		}
+		var seed *uint64
+		if cmd.Flags().Changed("seed") {
+			value, err := cmd.Flags().GetUint64("seed")
+			if err != nil {
+				return err
+			}
+			seed = &value
+		}
+		return runSpeech(cmd.Context(), name, voice, opts.Prompt, input, interactive, speechOptions{Language: language, Seed: seed})
 	}
 
 	if slices.Contains(info.Capabilities, model.CapabilityImage) {
@@ -2635,6 +2649,8 @@ func NewCLI() *cobra.Command {
 	runCmd.Flags().Bool("truncate", false, "For embedding models: truncate inputs exceeding context length (default: true). Set --truncate=false to error instead")
 	runCmd.Flags().Int("dimensions", 0, "Truncate output embeddings to specified dimension (embedding models only)")
 	runCmd.Flags().String("voice", "", "Voice to speak with (speech models only)")
+	runCmd.Flags().String("language", "", "Speech language (supported speech models only)")
+	runCmd.Flags().Uint64("seed", 0, "Speech sampling seed (supported speech models only)")
 	var asked []askedQuestion
 	runCmd.Flags().Var(questionFlag{"ask", &asked}, "ask", "Ask a decision model a question, answered yes or no unless --choice or --level follow")
 	runCmd.Flags().Var(questionFlag{"choice", &asked}, "choice", `Add a label for the preceding --ask to choose from, e.g. billing="Payments and refunds"`)

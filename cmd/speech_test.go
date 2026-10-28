@@ -100,3 +100,26 @@ func TestSynthesize(t *testing.T) {
 		t.Fatalf("server error lost: %v", err)
 	}
 }
+
+func TestSynthesizeSpeechOptions(t *testing.T) {
+	seed := uint64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Language string  `json:"language"`
+			Seed     *uint64 `json:"seed"`
+			Voice    string  `json:"voice"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+		}
+		if req.Language != "de" || req.Seed == nil || *req.Seed != 0 || req.Voice != "Ryan" {
+			t.Errorf("lost options: %+v", req)
+		}
+		w.Write(make([]byte, 46))
+	}))
+	defer server.Close()
+	t.Setenv("OLLAMA_HOST", server.URL)
+	if _, err := synthesize(t.Context(), "qwen", "Ryan", "Hallo", speechOptions{Language: "de", Seed: &seed}); err != nil {
+		t.Fatal(err)
+	}
+}

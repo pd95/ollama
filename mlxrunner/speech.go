@@ -29,6 +29,16 @@ func (r *Runner) speechHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if validator, ok := speaker.(model.SpeechRequestValidator); ok {
+		if err := validator.ValidateSpeechRequest(input); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else if input.Language != "" || input.Seed != nil {
+		http.Error(w, "language and seed are not supported by this speech model", http.StatusBadRequest)
+		return
+	}
+
 	// Generation queues audio for a separate writer instead of waiting on the
 	// client, so a client reading at playback speed does not hold the MLX worker.
 	ctx, cancel := context.WithCancel(req.Context())

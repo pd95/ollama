@@ -314,6 +314,11 @@ func TestInferSafetensorsConfigFamilies(t *testing.T) {
 			wantCaps:     []string{"completion", "tools", "thinking"},
 		},
 		{
+			name:     "Qwen3-TTS speech only",
+			config:   `{"architectures":["Qwen3TTSForConditionalGeneration"],"model_type":"qwen3_tts"}`,
+			wantCaps: []string{"speech"},
+		},
+		{
 			name:     "phonon",
 			config:   `{"architectures":["GradiumPhononTTSForConditionalGeneration"],"model_type":"gradium_phonon_tts"}`,
 			wantCaps: []string{"speech"},
