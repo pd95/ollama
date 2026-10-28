@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -21,7 +22,8 @@ import (
 var ErrInvalidTokenizer = errors.New("invalid tokenizer")
 
 type validatedTokenizerSource struct {
-	data []byte
+	data      []byte
+	generated bool
 }
 
 // validateTokenizerSource checks the exact tokenizer.json bytes that will be
@@ -78,6 +80,10 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if err != nil {
 		return err
 	}
+	inv, err = prepareQwen3TTSInventory(inv)
+	if err != nil {
+		return err
+	}
 	if opts.Renderer == "clef" {
 		inv, err = prepareClefInventory(inv)
 		if err != nil {
@@ -118,6 +124,12 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	validatedTokenizer, err := validateTokenizerSource(modelDir)
 	if err != nil {
 		return err
+	}
+	if validatedTokenizer == nil && inv.Config.Architecture() == qwen3TTSArchitecture {
+		validatedTokenizer, err = qwen3TTSTokenizer(modelDir)
+		if err != nil {
+			return err
+		}
 	}
 	if err := checkContext(ctx); err != nil {
 		return err
@@ -217,6 +229,9 @@ func importConfigBlobs(ctx context.Context, modelDir, namePrefix string, configO
 	names, err := SafetensorsConfigFiles(modelDir)
 	if err != nil {
 		return nil, LayerInfo{}, err
+	}
+	if validatedTokenizer != nil && validatedTokenizer.generated && !slices.Contains(names, "tokenizer.json") {
+		names = append(names, "tokenizer.json")
 	}
 	var layers []LayerInfo
 	var configLayer LayerInfo

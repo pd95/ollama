@@ -159,6 +159,15 @@ func SafetensorsWeightFiles(dir string) ([]string, error) {
 		}
 		files = append(files, file)
 	}
+	if isTTS, err := qwen3TTSSource(dir); err != nil {
+		return nil, err
+	} else if isTTS {
+		file, err := qwen3TTSAsset(dir, "speech_tokenizer/model.safetensors")
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "readout.safetensors")); errors.Is(err, os.ErrNotExist) {
 		return files, nil
 	} else if err != nil {
@@ -231,6 +240,22 @@ func SafetensorsConfigFiles(dir string) ([]string, error) {
 			return nil, err
 		}
 		names = append(names, name)
+	}
+	if isTTS, err := qwen3TTSSource(dir); err != nil {
+		return nil, err
+	} else if isTTS {
+		name, err := qwen3TTSAsset(dir, "speech_tokenizer/config.json")
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+		if _, err := os.Stat(filepath.Join(dir, "tokenizer.json")); os.IsNotExist(err) {
+			name, err := qwen3TTSAsset(dir, "merges.txt")
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, name)
+		}
 	}
 	hasSidecar, err := hasPplxSidecar(dir)
 	if err != nil {

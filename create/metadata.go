@@ -97,7 +97,7 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 		if cfg.Architecture() == "D1Model" && cfg.ModelType == "lfm3_omni" {
 			capabilities = append(capabilities, "audio")
 		}
-	} else if isPhononArchitecture(cfg.Architecture()) {
+	} else if isPhononArchitecture(cfg.Architecture()) || cfg.Architecture() == qwen3TTSArchitecture {
 		capabilities = []string{"speech"}
 	} else if sourceConfigHasApertus1p5(cfg) {
 		vision, audio := false, false
