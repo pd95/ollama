@@ -30,4 +30,5 @@ import (
 	_ "github.com/ollama/ollama/mlxrunner/model/qwen3tts"
 	_ "github.com/ollama/ollama/mlxrunner/model/qwen4_exp"
 	_ "github.com/ollama/ollama/mlxrunner/model/strands"
+	_ "github.com/ollama/ollama/mlxrunner/model/voxtraltts"
 )
