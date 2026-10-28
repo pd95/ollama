@@ -57,6 +57,9 @@ func TestChatterboxImport(t *testing.T) {
 			if !slices.Equal(info.ModelConfig.Capabilities, []string{"speech"}) || info.ModelConfig.Renderer != "" || info.ModelConfig.Parser != "" || len(info.ModelConfig.Voices) > 0 {
 				t.Fatal(info.ModelConfig)
 			}
+			if !slices.Equal(info.ModelConfig.Languages, []string{"de", "en"}) {
+				t.Fatal("missing qualified reference-speech languages")
+			}
 			if store.blobs["s3_tokenizer.encoder.conv1.weight"] == nil || store.blobs["s3_tokenizer/config.json"] == nil {
 				t.Fatal("missing S3 runtime assets")
 			}

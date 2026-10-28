@@ -9,6 +9,7 @@ import (
 
 	"github.com/ollama/ollama/fs/safetensors"
 	schema "github.com/ollama/ollama/mlxrunner/model/chatterbox/config"
+	"github.com/ollama/ollama/types/model"
 )
 
 const chatterboxArchitecture = schema.Architecture
@@ -96,3 +97,7 @@ func newChatterboxImportTransform(raw json.RawMessage) (quantizePolicy, error) {
 	return chatterboxImportTransform{}, nil
 }
 func (chatterboxImportTransform) quantizationType(string, []int32, string) string { return "" }
+func (chatterboxImportTransform) augmentConfig(c *model.ConfigV2) error {
+	c.Languages = []string{"de", "en"}
+	return nil
+}
