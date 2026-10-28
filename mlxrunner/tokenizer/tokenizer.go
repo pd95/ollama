@@ -42,6 +42,7 @@ type Tokenizer struct {
 	normalizeNFC           bool
 	normalizeSpaces        bool
 	ignoreMerges           bool
+	mergeByTokenRank       bool // Tekken ranks byte strings, rather than declared pairs.
 	metaspace              *metaspace
 }
 
