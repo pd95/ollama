@@ -133,6 +133,13 @@ func SafetensorsWeightFiles(dir string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		if cfg.Architecture() == kokoroArchitecture {
+			voices, err := kokoroVoiceFiles(dir)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, voices...)
+		}
 		if cfg.Architecture() == gradiumPhononArchitecture {
 			files, err = appendWeightSidecar(dir, files, "default-voice.safetensors", "Phonon")
 			if err != nil {
@@ -325,6 +332,26 @@ func inventoryShardFiles(dir string, index map[string]string) ([]string, error) 
 		return sortedKeys(files), nil
 	}
 
+	if _, err := os.Stat(filepath.Join(dir, "config.json")); err == nil {
+		cfg, _, err := readSourceModelConfig(dir)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.Architecture() == kokoroArchitecture {
+			file := "kokoro-v1_0.safetensors"
+			if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
+				return nil, fmt.Errorf("Kokoro requires %s: %w", file, err)
+			}
+			other, err := filepath.Glob(filepath.Join(dir, "model*.safetensors"))
+			if err != nil {
+				return nil, err
+			}
+			if len(other) != 0 {
+				return nil, fmt.Errorf("ambiguous Kokoro model weights")
+			}
+			return []string{file}, nil
+		}
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err

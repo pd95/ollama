@@ -28,10 +28,10 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 	var parserName, rendererName, sourceDecisionRenderer string
 	var decisionModel, decisionVision bool
 	switch cfg.Architecture() {
-	case qwen3TTSArchitecture:
+	case qwen3TTSArchitecture, kokoroArchitecture:
 		// The speech tokenizer's Qwen family name does not imply a chat renderer.
 		if parserOverride != "" || rendererOverride != "" {
-			return model.ConfigV2{}, fmt.Errorf("Qwen3-TTS does not support chat parsers or renderers")
+			return model.ConfigV2{}, fmt.Errorf("%s does not support chat parsers or renderers", cfg.Architecture())
 		}
 	case "Qwen3_5Model":
 		hasSidecar, err := hasPplxSidecar(modelDir)
@@ -102,7 +102,7 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 		if cfg.Architecture() == "D1Model" && cfg.ModelType == "lfm3_omni" {
 			capabilities = append(capabilities, "audio")
 		}
-	} else if isPhononArchitecture(cfg.Architecture()) || cfg.Architecture() == qwen3TTSArchitecture {
+	} else if isPhononArchitecture(cfg.Architecture()) || (cfg.Architecture() == qwen3TTSArchitecture || cfg.Architecture() == kokoroArchitecture) {
 		capabilities = []string{"speech"}
 	} else if sourceConfigHasApertus1p5(cfg) {
 		vision, audio := false, false

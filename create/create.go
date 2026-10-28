@@ -400,6 +400,18 @@ func readSourceModelConfig(modelDir string) (sourceModelConfig, json.RawMessage,
 		return sourceModelConfig{}, nil, fmt.Errorf("parse %s: %w", configPath, err)
 	}
 
+	if cfg.Architecture() == "" || cfg.Architecture() == "kokoro" || cfg.Architecture() == kokoroArchitecture {
+		normalized, recognized, err := normalizeKokoroConfig(data)
+		if err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+		if recognized {
+			data = normalized
+			if err := json.Unmarshal(data, &cfg); err != nil {
+				return sourceModelConfig{}, nil, err
+			}
+		}
+	}
 	return cfg, data, nil
 }
 
@@ -516,6 +528,7 @@ type tensorImportTransformFactory func(rawConfig json.RawMessage) (quantizePolic
 
 var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
 	qwen3TTSArchitecture:                    newQwen3TTSImportTransform,
+	kokoroArchitecture:                      newKokoroImportTransform,
 	"Qwen3_5Model":                          newPplxImportTransform,
 	"KevForDecision":                        newQwen35DecisionImportTransform,
 	"StrandsDeciderForDecision":             newQwen35DecisionImportTransform,

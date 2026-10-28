@@ -84,6 +84,10 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if err != nil {
 		return err
 	}
+	inv, err = prepareKokoroInventory(inv)
+	if err != nil {
+		return err
+	}
 	if opts.Renderer == "clef" {
 		inv, err = prepareClefInventory(inv)
 		if err != nil {
@@ -139,6 +143,9 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	}
 	if isPhononArchitecture(inv.Config.Architecture()) && opts.Quantize != "" {
 		return fmt.Errorf("Phonon currently requires unquantized weights")
+	}
+	if inv.Config.Architecture() == kokoroArchitecture && opts.Quantize != "" {
+		return fmt.Errorf("Kokoro currently requires source precision; import the supplied prequantized checkpoint instead")
 	}
 	class, err := Classify(inv, opts.Quantize)
 	if err != nil {
