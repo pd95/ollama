@@ -85,6 +85,10 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if err != nil {
 		return err
 	}
+	inv, err = prepareChatterboxTurboInventory(inv)
+	if err != nil {
+		return err
+	}
 	inv, err = prepareChatterboxInventory(inv)
 	if err != nil {
 		return err
@@ -138,6 +142,13 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if err != nil {
 		return err
 	}
+	if inv.Config.Architecture() == chatterboxTurboArchitecture {
+		validatedTokenizer, err = chatterboxTurboTokenizer(modelDir)
+		if err != nil {
+			return err
+		}
+	}
+
 	if voxtralTokenizer != nil {
 		if validatedTokenizer == nil {
 			validatedTokenizer = voxtralTokenizer

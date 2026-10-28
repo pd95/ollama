@@ -28,3 +28,20 @@ func TestConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestTurboConfiguration(t *testing.T) {
+	raw, err := os.ReadFile("../../../../create/testdata/chatterbox-turbo-config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateTurbo(raw); err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	_ = json.Unmarshal(raw, &fields)
+	fields["s3gen"].(map[string]any)["decoder_channels"] = []any{float64(128)}
+	raw, _ = json.Marshal(fields)
+	if ValidateTurbo(raw) == nil {
+		t.Fatal("accepted incompatible flow geometry")
+	}
+}

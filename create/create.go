@@ -400,6 +400,15 @@ func readSourceModelConfig(modelDir string) (sourceModelConfig, json.RawMessage,
 		return sourceModelConfig{}, nil, fmt.Errorf("parse %s: %w", configPath, err)
 	}
 
+	if cfg.Architecture() == "chatterbox_turbo" || cfg.Architecture() == chatterboxTurboArchitecture {
+		data, err = normalizeChatterboxTurboConfig(data)
+		if err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+	}
 	if cfg.Architecture() == "chatterbox" || cfg.Architecture() == chatterboxArchitecture {
 		data, err = normalizeChatterboxConfig(data)
 		if err != nil {
@@ -548,6 +557,7 @@ type tensorImportTransformFactory func(rawConfig json.RawMessage) (quantizePolic
 var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
 	qwen3TTSArchitecture:                    newQwen3TTSImportTransform,
 	chatterboxArchitecture:                  newChatterboxImportTransform,
+	chatterboxTurboArchitecture:             newChatterboxTurboImportTransform,
 	voxtralTTSArchitecture:                  newVoxtralTTSImportTransform,
 	kokoroArchitecture:                      newKokoroImportTransform,
 	"Qwen3_5Model":                          newPplxImportTransform,

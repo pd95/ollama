@@ -18,6 +18,7 @@ type conformerEncoder struct {
 	inputNorm, upNorm, finalNorm *nn.LayerNorm
 	lookOne, lookTwo, upsample   conv
 	layers, upLayers             []conformerLayer
+	positions, upPositions       *mlx.Array
 }
 
 func loadConformer(w *weights) *conformerEncoder {
@@ -104,9 +105,17 @@ func (e *conformerEncoder) afterUp(x, pos *mlx.Array) *mlx.Array {
 }
 
 func (e *conformerEncoder) forward(x *mlx.Array) *mlx.Array {
-	position := conformerPosition(x.Dim(1))
+	position := conformerPositions(x.Dim(1), e.positions)
 	x = e.beforeUp(e.lookahead(conformerEmbed(x, e.input, e.inputNorm)), position)
 	x = mlx.Transpose(e.up(x), 0, 2, 1)
-	position = conformerPosition(x.Dim(1))
+	position = conformerPositions(x.Dim(1), e.upPositions)
 	return e.afterUp(conformerEmbed(x, e.upInput, e.upNorm), position)
+}
+
+func conformerPositions(length int, cached *mlx.Array) *mlx.Array {
+	if cached == nil {
+		return conformerPosition(length)
+	}
+	center := cached.Dim(1) / 2
+	return cached.Slice(mlx.Slice(), mlx.Slice(center-length+1, center+length), mlx.Slice())
 }

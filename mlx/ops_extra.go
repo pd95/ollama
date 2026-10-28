@@ -858,3 +858,28 @@ func EnableCompile() {
 func DisableCompile() {
 	mlxCheck(C.mlx_disable_compile())
 }
+
+// RFFTCPU retains the CPU FFT arithmetic used by NumPy-based audio frontends.
+func RFFTCPU(a *Array, n, axis int) *Array {
+	dev := mlxCheck(C.mlx_device_new_type(C.MLX_CPU, 0))
+	defer freeDevice(dev)
+	stream := mlxCheck(C.mlx_stream_new())
+	defer freeStream(stream)
+	mlxCheck(C.mlx_get_default_stream(&stream, dev))
+	out := New("RFFTCPU")
+	mlxCheck(C.mlx_fft_rfft(&out.ctx, a.ctx, C.int(n), C.int(axis), C.MLX_FFT_NORM_BACKWARD, stream))
+	return out
+}
+
+// MatmulCPU uses the host BLAS for reference frontends whose reductions were
+// performed on the CPU. It does not change the global inference device.
+func MatmulCPU(a, b *Array) *Array {
+	dev := mlxCheck(C.mlx_device_new_type(C.MLX_CPU, 0))
+	defer freeDevice(dev)
+	stream := mlxCheck(C.mlx_stream_new())
+	defer freeStream(stream)
+	mlxCheck(C.mlx_get_default_stream(&stream, dev))
+	out := New("MATMULCPU")
+	mlxCheck(C.mlx_matmul(&out.ctx, a.ctx, b.ctx, stream))
+	return out
+}

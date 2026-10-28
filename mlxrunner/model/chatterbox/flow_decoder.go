@@ -98,6 +98,7 @@ func (s flowStage) forward(x, mask, time, bias *mlx.Array) *mlx.Array {
 
 type flowDecoder struct {
 	timeOne, timeTwo            nn.LinearLayer
+	mixer                       nn.LinearLayer
 	down, up                    flowStage
 	middle                      []flowStage
 	downsample, upsample, final conv
@@ -121,6 +122,10 @@ func flowTimeEmbedding(time *mlx.Array) *mlx.Array {
 
 func (d *flowDecoder) forward(x, mask, mu, time, speaker, condition *mlx.Array) *mlx.Array {
 	embedding := d.timeTwo.Forward(mlx.SiLU(d.timeOne.Forward(flowTimeEmbedding(time))))
+	return d.forwardEmbedding(x, mask, mu, embedding, speaker, condition)
+}
+
+func (d *flowDecoder) forwardEmbedding(x, mask, mu, embedding, speaker, condition *mlx.Array) *mlx.Array {
 	batch, length := int32(x.Dim(0)), int32(x.Dim(2))
 	x = mlx.Concatenate([]*mlx.Array{x, mu}, 1)
 	x = mlx.Concatenate([]*mlx.Array{x, mlx.BroadcastTo(mlx.ExpandDims(speaker, -1), batch, int32(speaker.Dim(1)), length)}, 1)
@@ -180,6 +185,26 @@ func (d *flowDecoder) solveContext(ctx context.Context, x, times, mu, mask, spea
 			return []*mlx.Array{x, t, dt}
 		})
 		x, t, dt = result[0], result[1], result[2]
+	}
+	return x, ctx.Err()
+}
+
+func (d *flowDecoder) meanVelocity(x, mask, mu, time, end, speaker, condition *mlx.Array) *mlx.Array {
+	t := d.timeTwo.Forward(mlx.SiLU(d.timeOne.Forward(flowTimeEmbedding(time))))
+	r := d.timeTwo.Forward(mlx.SiLU(d.timeOne.Forward(flowTimeEmbedding(end))))
+	return d.forwardEmbedding(x, mask, mu, d.mixer.Forward(mlx.Concatenate([]*mlx.Array{t, r}, -1)), speaker, condition)
+}
+
+func (d *flowDecoder) solveMean(ctx context.Context, x, times, mu, mask, speaker, condition *mlx.Array) (*mlx.Array, error) {
+	for step := range times.Size() - 1 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		x = mlx.ScopedEval(func() []*mlx.Array {
+			t, r := times.Slice(mlx.Slice(step, step+1)), times.Slice(mlx.Slice(step+1, step+2))
+			velocity := d.meanVelocity(x, mask, mu, t, r, speaker, condition)
+			return []*mlx.Array{mlx.Add(x, mlx.Mul(mlx.Sub(r, t), velocity))}
+		})[0]
 	}
 	return x, ctx.Err()
 }

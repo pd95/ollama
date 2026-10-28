@@ -17,9 +17,9 @@ func loadHifiSnake(w *weights, p string) hifiSnake {
 	}
 	alpha = mlx.Reshape(alpha, 1, int32(alpha.Size()), 1)
 	abs := alpha.Abs()
-	clamped := mlx.Mul(alpha.Sign(), mlx.Maximum(abs, mlx.FromValue(float32(1e-4))))
-	clamped = mlx.Where(abs.Less(mlx.FromValue(float32(1e-9))), mlx.FromValue(float32(1e-4)), clamped)
-	return hifiSnake{alpha, mlx.Div(mlx.FromValue(float32(1)), clamped)}
+	clamped := mlx.Mul(alpha.Sign(), mlx.Maximum(abs, mlx.FromValue(float32(1e-4)).AsType(alpha.DType())))
+	clamped = mlx.Where(abs.Less(mlx.FromValue(float32(1e-9)).AsType(alpha.DType())), mlx.FromValue(float32(1e-4)).AsType(alpha.DType()), clamped)
+	return hifiSnake{alpha, mlx.Div(mlx.FromValue(float32(1)).AsType(alpha.DType()), clamped)}
 }
 
 func (s hifiSnake) forward(x *mlx.Array) *mlx.Array {
@@ -50,6 +50,7 @@ func (r hifiResidual) forward(x *mlx.Array) *mlx.Array {
 }
 
 type hiFT struct {
+	turbo             bool
 	pre, post         conv
 	ups, sourceDown   []conv
 	sourceBlocks      []hifiResidual
@@ -121,6 +122,10 @@ func (h *hiFT) harmonics(f0, phase, noise *mlx.Array) *mlx.Array {
 	multipliers := mlx.Reshape(mlx.Arange(1, 10, 1, mlx.DTypeInt32), 1, 9, 1)
 	frequencies := mlx.Div(mlx.Mul(f0, multipliers), mlx.FromValue(24000))
 	theta := mlx.Mul(mlx.FromValue(float32(2*math.Pi)), frequencies.Cumsum(-1, false, true).Remainder(mlx.FromValue(1)))
+	if h.turbo {
+		theta = mlx.Mul(mlx.FromValue(float32(2*math.Pi)), frequencies.Cumsum(-1, false, true)).Remainder(mlx.FromValue(float32(2 * math.Pi)))
+		phase = mlx.Concatenate([]*mlx.Array{mlx.Zeros(mlx.DTypeFloat32, 1, 1, 1), phase}, 1)
+	}
 	phase = mlx.Where(mlx.Reshape(mlx.Arange(0, 9, 1, mlx.DTypeInt32), 1, 9, 1).Greater(mlx.FromValue(0)), phase, mlx.FromValue(float32(0)))
 	sines := mlx.Mul(mlx.FromValue(float32(.1)), mlx.Sin(mlx.Add(theta, phase)))
 	voiced := f0.Greater(mlx.FromValue(float32(10))).AsType(mlx.DTypeFloat32)
@@ -135,7 +140,9 @@ func (h *hiFT) excitation(f0, phase, noise *mlx.Array) *mlx.Array {
 
 func (h *hiFT) sourceSTFT(source *mlx.Array) (*mlx.Array, *mlx.Array) {
 	x := mlx.Squeeze(source, 1)
-	x = mlx.Pad(x, []int{1}, []int{8}, []int{8}, mlx.FromValue(float32(0)), "reflect")
+	if !h.turbo {
+		x = mlx.Pad(x, []int{1}, []int{8}, []int{8}, mlx.FromValue(float32(0)), "reflect")
+	}
 	count := 1 + (x.Dim(1)-16)/4
 	indices := make([]int32, count*16)
 	for i := range count {
@@ -145,6 +152,9 @@ func (h *hiFT) sourceSTFT(source *mlx.Array) (*mlx.Array, *mlx.Array) {
 	}
 	frames := mlx.Transpose(mlx.Reshape(mlx.Take(x, mlx.FromValues(indices, len(indices)), 1), 1, int32(count), 16), 0, 2, 1)
 	frames = mlx.Mul(frames, mlx.Reshape(h.window, 1, 16, 1))
+	if h.turbo {
+		return turboSourceFFT(frames)
+	}
 	fft := mlx.FFT(frames, 16, 1).Slice(mlx.Slice(), mlx.Slice(0, 9), mlx.Slice())
 	return mlx.Real(fft), mlx.Imag(fft)
 }
@@ -159,13 +169,26 @@ func (h *hiFT) stage(x, source *mlx.Array, index int) *mlx.Array {
 	x = mlx.ConvTranspose1d(x, c.weight, c.bias, c.stride, c.padding, 1, 0, 1)
 	x = mlx.Transpose(x, 0, 2, 1)
 	if index == 2 {
-		x = mlx.Concatenate([]*mlx.Array{x.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(1, 2)), x}, 2)
+		if h.turbo {
+			x = mlx.PadConstant(x, []int{2}, []int{1}, []int{0})
+		} else {
+			x = mlx.Concatenate([]*mlx.Array{x.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(1, 2)), x}, 2)
+		}
 	}
 	part := mlx.Transpose(h.sourceDown[index].forward(mlx.Transpose(source, 0, 2, 1)), 0, 2, 1)
-	x = mlx.Add(x, h.sourceBlocks[index].forward(part))
+	part = h.sourceBlocks[index].forward(part)
+	if h.turbo {
+		length := min(x.Dim(2), part.Dim(2))
+		x = x.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(0, length))
+		part = part.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(0, length))
+	}
+	x = mlx.Add(x, part)
 	outputs := make([]*mlx.Array, 3)
 	for i, b := range h.blocks[index] {
 		outputs[i] = b.forward(x)
+	}
+	if h.turbo {
+		return mlx.Div(mlx.Add(mlx.Add(outputs[0], outputs[1]), outputs[2]), mlx.FromValue(float32(3)))
 	}
 	return mlx.Mean(mlx.Stack(outputs, 0), 0, false)
 }
@@ -177,7 +200,12 @@ func (h *hiFT) spectrum(mels, source *mlx.Array) *mlx.Array {
 	for i := range h.ups {
 		x = h.stage(x, spec, i)
 	}
-	return mlx.Transpose(h.post.forward(mlx.Transpose(hifiLeaky(x), 0, 2, 1)), 0, 2, 1)
+	if h.turbo {
+		x = mlx.Maximum(x, mlx.Mul(x, mlx.FromValue(float32(.01))))
+	} else {
+		x = hifiLeaky(x)
+	}
+	return mlx.Transpose(h.post.forward(mlx.Transpose(x, 0, 2, 1)), 0, 2, 1)
 }
 
 func hifiOverlap(frames *mlx.Array) *mlx.Array {
@@ -206,10 +234,17 @@ func (h *hiFT) inverse(spectrum *mlx.Array) *mlx.Array {
 	imag = mlx.Concatenate([]*mlx.Array{imag, mlx.Neg(mirror(imag))}, 1)
 	complex := mlx.Add(real, mlx.Mul(mlx.FromValue(complex64(1i)), imag))
 	frames := mlx.Real(mlx.IFFT(complex, 16, 1))
+	if h.turbo {
+		frames = mlx.Transpose(mlx.IRFFT(mlx.Transpose(mlx.Add(real.Slice(mlx.Slice(), mlx.Slice(0, 9), mlx.Slice()), mlx.Mul(mlx.FromValue(complex64(1i)), imag.Slice(mlx.Slice(), mlx.Slice(0, 9), mlx.Slice()))), 0, 2, 1), 16, -1), 0, 2, 1)
+	}
 	window := mlx.Reshape(h.window, 1, 16, 1)
 	frames = mlx.Mul(frames, window)
 	output := hifiOverlap(frames)
-	norm := hifiOverlap(mlx.BroadcastTo(h.window.Power(mlx.FromValue(2)).Reshape(1, 16, 1), 1, 16, int32(count)))
+	square := h.window.Power(mlx.FromValue(2))
+	if h.turbo {
+		square = square.AsType(mlx.DTypeFloat32)
+	}
+	norm := hifiOverlap(mlx.BroadcastTo(square.Reshape(1, 16, 1), 1, 16, int32(count)))
 	output = mlx.Div(output, mlx.Maximum(norm, mlx.FromValue(float32(1e-8))))
 	output = output.Slice(mlx.Slice(), mlx.Slice(8, output.Dim(1)-8))
 	return mlx.Clip(output, mlx.FromValue(float32(-.99)), mlx.FromValue(float32(.99)))
@@ -224,4 +259,32 @@ func fadeHiFT(wave *mlx.Array) *mlx.Array {
 	fade := mlx.Div(mlx.Add(mlx.Cos(mlx.Linspace(math.Pi, 0, 480, mlx.DTypeFloat32)), mlx.FromValue(float32(1))), mlx.FromValue(float32(2)))
 	fade = mlx.Concatenate([]*mlx.Array{mlx.Zeros(mlx.DTypeFloat32, 480), fade}, 0)
 	return mlx.Concatenate([]*mlx.Array{mlx.Mul(wave.Slice(mlx.Slice(), mlx.Slice(0, 960)), fade), wave.Slice(mlx.Slice(), mlx.Slice(960, wave.Dim(1)))}, 1)
+}
+
+// Turbo's reference computes the 16-point source FFT with NumPy's double
+// intermediates before rounding to float32. Keep that DSP boundary explicit.
+func turboSourceFFT(frames *mlx.Array) (*mlx.Array, *mlx.Array) {
+	length := frames.Dim(2)
+	input := mlx.Contiguous(frames.AsType(mlx.DTypeFloat32), false).Floats()
+	real, imag := make([]float32, 9*length), make([]float32, 9*length)
+	for bin := range 9 {
+		var cosine, sine [16]float64
+		a, b, c := math.Cos(math.Pi/8), math.Sqrt(.5), math.Sin(math.Pi/8)
+		table := [16]float64{1, a, b, c, 0, -c, -b, -a, -1, -a, -b, -c, 0, c, b, a}
+		for n := range 16 {
+			k := bin * n % 16
+			cosine[n], sine[n] = table[k], -table[(4-k+16)%16]
+		}
+
+		for i := range length {
+			var r, j float64
+			for n := range 16 {
+				v := float64(input[n*length+i])
+				r += v * cosine[n]
+				j += v * sine[n]
+			}
+			real[bin*length+i], imag[bin*length+i] = float32(r), float32(j)
+		}
+	}
+	return mlx.FromValues(real, 1, 9, length), mlx.FromValues(imag, 1, 9, length)
 }

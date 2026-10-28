@@ -24,3 +24,25 @@ carries Copyright © 2023–2024 Apple Inc.
 cached generation, flow inputs/all steps and fixed-source waveform stages.
 Set `OLLAMA_CHATTERBOX_SOURCE`, `OLLAMA_S3_SOURCE` and
 `OLLAMA_SPEECH_REFERENCE_DIR` to pinned inputs for native numerical checks.
+
+
+## Turbo 4-bit
+
+Turbo has its own GPT-2 backbone, cached default voice, top-k/top-p sampler and
+two-step mean-flow solver. Its positional tables and half-precision arithmetic,
+source FFT, zero padding, length cropping, output activation and fade are
+qualified separately. English only; `default` preset or per-request reference.
+The nonstreaming reference duplicates its first generated code; this behavior is
+preserved. Request seeds are repeatable in native PCG, without Python RNG identity.
+
+The supplied MLX-Community Turbo checkpoint omits trained CAMPPlus weights.
+Reference cloning explicitly imports the pinned multilingual-v3 CAMPPlus encoder;
+that dependency is part of the manifest. It does not establish official Turbo
+fidelity. References must be mono PCM16, 16–48 kHz, longer than 5 seconds and at
+most 15 seconds. Reference levels are preserved (MLX-Audio's `norm_loudness=False`
+profile). Presets/transcripts/styles/speed changes are rejected for cloning.
+Its NumPy-based frontends use CPU FFT/BLAS; fixed final mel/conditioning checks
+retain their tolerances, with separately bounded float32 FFT arithmetic.
+
+Current evidence compares the pinned conversions to MLX-Audio. Original-provider
+checkpoint import and independent upstream fidelity require separate qualification.

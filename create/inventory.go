@@ -173,6 +173,15 @@ func SafetensorsWeightFiles(dir string) ([]string, error) {
 		}
 		files = append(files, file)
 	}
+	if cfg, _, err := readSourceModelConfig(dir); err == nil && cfg.Architecture() == chatterboxTurboArchitecture {
+		for _, name := range []string{"conds.safetensors", "s3_tokenizer/model.safetensors", "reference_encoder/model.safetensors"} {
+			file, err := chatterboxAsset(dir, name)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, file)
+		}
+	}
 	if isChatterbox, err := chatterboxSource(dir); err != nil {
 		return nil, err
 	} else if isChatterbox {
@@ -263,6 +272,15 @@ func SafetensorsConfigFiles(dir string) ([]string, error) {
 			return nil, err
 		}
 		names = append(names, name)
+	}
+	if cfg, _, err := readSourceModelConfig(dir); err == nil && cfg.Architecture() == chatterboxTurboArchitecture {
+		for _, name := range []string{"s3_tokenizer/config.json", "reference_encoder/config.json"} {
+			file, err := chatterboxAsset(dir, name)
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, file)
+		}
 	}
 	if isChatterbox, err := chatterboxSource(dir); err != nil {
 		return nil, err

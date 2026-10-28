@@ -33,6 +33,8 @@ func (l voiceLSTM) forward(x *mlx.Array) *mlx.Array {
 }
 
 type voiceEncoder struct {
+	epsilon      float32
+	turbo        bool
 	layers       []voiceLSTM
 	project      nn.LinearLayer
 	bank, window *mlx.Array
@@ -89,6 +91,9 @@ func (v *voiceEncoder) mels(pcm *mlx.Array) *mlx.Array {
 	padded := mlx.Pad(pcm, []int{0}, []int{200}, []int{200}, mlx.FromValue(float32(0)), "reflect")
 	frames := padded.AsStrided([]int{1 + pcm.Size()/160, 400}, []int{160, 1}, 0)
 	power := mlx.RFFT(mlx.Mul(frames, v.window), 400, -1).Abs().Power(mlx.FromValue(2))
+	if v.turbo {
+		return mlx.MatmulCPU(v.bank, mlx.Transpose(power, 1, 0))
+	}
 	return mlx.Transpose(mlx.Matmul(power, mlx.Transpose(v.bank, 1, 0)), 1, 0)
 }
 
@@ -115,19 +120,23 @@ func (v *voiceEncoder) partials(mels *mlx.Array) *mlx.Array {
 	return mlx.Reshape(mlx.Take(x, mlx.FromValues(indices, len(indices)), 0), int32(count), window, 40)
 }
 
-func normalizeVoice(x *mlx.Array) *mlx.Array {
-	return mlx.Div(x, mlx.Sum(x.Power(mlx.FromValue(2)), 1, true).Sqrt())
-}
-
 func (v *voiceEncoder) forward(partials *mlx.Array) *mlx.Array {
 	x := partials
 	for _, l := range v.layers {
 		x = l.forward(x)
 	}
 	x = mlx.Squeeze(x.Slice(mlx.Slice(), mlx.Slice(x.Dim(1)-1, x.Dim(1)), mlx.Slice()), 1)
-	return normalizeVoice(mlx.ReLU(v.project.Forward(x)))
+	return v.normalize(mlx.ReLU(v.project.Forward(x)))
 }
 
 func (v *voiceEncoder) embedding(mels *mlx.Array) *mlx.Array {
-	return normalizeVoice(mlx.Mean(v.forward(v.partials(mels)), 0, true))
+	return v.normalize(mlx.Mean(v.forward(v.partials(mels)), 0, true))
+}
+
+func (v *voiceEncoder) normalize(x *mlx.Array) *mlx.Array {
+	norm := mlx.Sum(x.Power(mlx.FromValue(2)), 1, true).Sqrt()
+	if v.epsilon != 0 {
+		norm = mlx.Add(norm, mlx.FromValue(v.epsilon))
+	}
+	return mlx.Div(x, norm)
 }

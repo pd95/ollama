@@ -10,14 +10,17 @@ import (
 	"github.com/ollama/ollama/mlxrunner/nn"
 )
 
-type referenceMel struct{ bank, window *mlx.Array }
+type referenceMel struct {
+	bank, window *mlx.Array
+	turbo        bool
+}
 
 func newReferenceMel() referenceMel {
 	window := make([]float32, 1920)
 	for i := range window {
 		window[i] = float32(.5 * (1 - math.Cos(2*math.Pi*float64(i)/1919)))
 	}
-	return referenceMel{nn.SlaneyMelFilters(24000, 1920, 80, 8000), mlx.FromValues(window, 1920)}
+	return referenceMel{bank: nn.SlaneyMelFilters(24000, 1920, 80, 8000), window: mlx.FromValues(window, 1920)}
 }
 
 func (m referenceMel) forward(pcm *mlx.Array) *mlx.Array {
@@ -25,6 +28,10 @@ func (m referenceMel) forward(pcm *mlx.Array) *mlx.Array {
 	count := 1 + (x.Size()-1920)/480
 	frames := x.AsStrided([]int{count, 1920}, []int{480, 1}, 0)
 	spectrum := mlx.RFFT(mlx.Mul(frames, m.window), 1920, -1).Abs()
+	if m.turbo {
+		spectrum = mlx.RFFTCPU(mlx.Mul(frames, m.window), 1920, -1).Abs()
+		return mlx.ExpandDims(mlx.Log(mlx.Maximum(mlx.Transpose(mlx.MatmulCPU(m.bank, mlx.Transpose(spectrum, 1, 0)), 1, 0), mlx.FromValue(float32(1e-5)))), 0)
+	}
 	return mlx.ExpandDims(mlx.Log(mlx.Maximum(mlx.Matmul(spectrum, mlx.Transpose(m.bank, 1, 0)), mlx.FromValue(float32(1e-5)))), 0)
 }
 

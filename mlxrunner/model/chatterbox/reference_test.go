@@ -54,6 +54,9 @@ func sourceTensors(t *mlxtest.T, path string) map[string]*mlx.Array {
 }
 
 func TestReference(t *testing.T) {
+	if os.Getenv("OLLAMA_SPEECH_REFERENCE_MODEL") == "mlx-community/chatterbox-turbo-4bit" {
+		t.Skip("Turbo has separate references")
+	}
 	source, reference := os.Getenv("OLLAMA_S3_SOURCE"), os.Getenv("OLLAMA_SPEECH_REFERENCE_DIR")
 	if source == "" || reference == "" {
 		t.Skip("set pinned source and reference directories")
