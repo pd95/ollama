@@ -442,6 +442,14 @@ export async function* sendMessage(
 
 export async function getSettings(): Promise<{
   settings: Settings;
+  manualUpdatesOnly: boolean;
+  updateReady: boolean;
+  updateVersion?: string;
+  updateBuildVersion?: string;
+  updateSource: string;
+  updateChannel?: string;
+  updateReleaseUrl?: string;
+  updates: Record<string, UpdateSourceStatus>;
 }> {
   const response = await fetch(`${API_BASE}/api/v1/settings`);
   if (!response.ok) {
@@ -450,6 +458,24 @@ export async function getSettings(): Promise<{
   const data = await response.json();
   return {
     settings: new Settings(data.settings),
+    manualUpdatesOnly: Boolean(data.manualUpdatesOnly),
+    updateReady: Boolean(data.updateReady),
+    updateVersion:
+      typeof data.updateVersion === "string" ? data.updateVersion : undefined,
+    updateBuildVersion:
+      typeof data.updateBuildVersion === "string"
+        ? data.updateBuildVersion
+        : undefined,
+    updateSource:
+      typeof data.updateSource === "string" ? data.updateSource : "official",
+    updateChannel:
+      typeof data.updateChannel === "string" ? data.updateChannel : undefined,
+    updateReleaseUrl:
+      typeof data.updateReleaseUrl === "string"
+        ? data.updateReleaseUrl
+        : undefined,
+    updates:
+      data.updates && typeof data.updates === "object" ? data.updates : {},
   };
 }
 
@@ -471,6 +497,89 @@ export async function updateSettings(settings: Settings): Promise<{
   return {
     settings: new Settings(data.settings),
   };
+}
+
+export type UpdateCheckResult =
+  | { status: "up_to_date"; source?: string; channel?: string }
+  | {
+      status: "ready";
+      version: string;
+      buildVersion?: string;
+      source?: string;
+      channel?: string;
+      releasePageUrl?: string;
+    };
+
+export interface UpdateSourceStatus {
+  available: boolean;
+  automatic: boolean;
+  ready: boolean;
+  version?: string;
+  buildVersion?: string;
+  channel?: string;
+  releasePageUrl?: string;
+}
+
+async function responseError(response: Response, fallback: string) {
+  const body = await response.text();
+  if (!body) return fallback;
+  try {
+    const parsed = JSON.parse(body) as { error?: string };
+    return parsed.error || fallback;
+  } catch {
+    return body;
+  }
+}
+
+export async function checkForUpdates(
+  source?: "mlx-preview" | "official",
+): Promise<UpdateCheckResult> {
+  const request: RequestInit = { method: "POST" };
+  if (source) {
+    request.headers = { "Content-Type": "application/json" };
+    request.body = JSON.stringify({ source });
+  }
+  const response = await fetch(`${API_BASE}/api/v1/update/check`, {
+    ...request,
+  });
+  if (!response.ok) {
+    throw new Error(
+      await responseError(response, "Failed to check for updates"),
+    );
+  }
+  const result = (await response.json()) as UpdateCheckResult;
+  if (result.status !== "up_to_date" && result.status !== "ready") {
+    throw new Error("Ollama returned an invalid update status");
+  }
+  if (result.status === "ready" && !result.version) {
+    throw new Error("Ollama did not identify the downloaded update");
+  }
+  return result;
+}
+
+export type InstallUpdateResult = { status: "cancelled" | "started" };
+
+export async function installUpdate(
+  source?: "mlx-preview" | "official",
+): Promise<InstallUpdateResult> {
+  const request: RequestInit = { method: "POST" };
+  if (source) {
+    request.headers = { "Content-Type": "application/json" };
+    request.body = JSON.stringify({ source });
+  }
+  const response = await fetch(`${API_BASE}/api/v1/update/install`, {
+    ...request,
+  });
+  if (!response.ok) {
+    throw new Error(
+      await responseError(response, "Failed to start update installation"),
+    );
+  }
+  const result = (await response.json()) as InstallUpdateResult;
+  if (result.status !== "cancelled" && result.status !== "started") {
+    throw new Error("Ollama returned an invalid installation status");
+  }
+  return result;
 }
 
 export async function updateCloudSetting(

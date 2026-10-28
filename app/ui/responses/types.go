@@ -94,7 +94,25 @@ type ErrorEvent struct {
 }
 
 type SettingsResponse struct {
-	Settings store.Settings `json:"settings"`
+	Settings           store.Settings                `json:"settings"`
+	ManualUpdatesOnly  bool                          `json:"manualUpdatesOnly"`
+	UpdateReady        bool                          `json:"updateReady"`
+	UpdateVersion      string                        `json:"updateVersion,omitempty"`
+	UpdateBuildVersion string                        `json:"updateBuildVersion,omitempty"`
+	UpdateSource       string                        `json:"updateSource"`
+	UpdateChannel      string                        `json:"updateChannel,omitempty"`
+	UpdateReleaseURL   string                        `json:"updateReleaseUrl,omitempty"`
+	Updates            map[string]UpdateSourceStatus `json:"updates,omitempty"`
+}
+
+type UpdateSourceStatus struct {
+	Available      bool   `json:"available"`
+	Automatic      bool   `json:"automatic"`
+	Ready          bool   `json:"ready"`
+	Version        string `json:"version,omitempty"`
+	BuildVersion   string `json:"buildVersion,omitempty"`
+	Channel        string `json:"channel,omitempty"`
+	ReleasePageURL string `json:"releasePageUrl,omitempty"`
 }
 
 type HealthResponse struct {
