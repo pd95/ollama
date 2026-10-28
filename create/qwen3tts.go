@@ -113,8 +113,8 @@ func newQwen3TTSImportTransform(raw json.RawMessage) (quantizePolicy, error) {
 			var dialect string
 			if json.Unmarshal(cfg.Talker.Dialects[voice], &dialect) == nil && dialect != "" {
 				if _, ok := cfg.Talker.Languages[dialect]; !ok {
-					// These snapshots name two Chinese dialects without supplying
-					// their codec IDs. Do not advertise that pairing as supported.
+					// A checkpoint must supply the selected dialect codec ID
+					// before that Chinese pairing can be advertised.
 					languages = slices.DeleteFunc(languages, func(s string) bool { return s == "zh" })
 				}
 			}

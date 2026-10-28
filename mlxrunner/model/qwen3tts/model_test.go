@@ -49,7 +49,7 @@ func TestSpeechOptions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The original snapshots name dialect voices without their codec IDs.
+	// A malformed checkpoint can name a dialect without its codec ID.
 	// Reject that pairing before inference; explicit English remains valid.
 	cfg.Talker.Speakers["eric"] = 2875
 	if cfg.Talker.Dialects == nil {
