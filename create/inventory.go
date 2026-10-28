@@ -173,6 +173,15 @@ func SafetensorsWeightFiles(dir string) ([]string, error) {
 		}
 		files = append(files, file)
 	}
+	if isChatterbox, err := chatterboxSource(dir); err != nil {
+		return nil, err
+	} else if isChatterbox {
+		file, err := chatterboxAsset(dir, "s3_tokenizer/model.safetensors")
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
 	if isTTS, err := qwen3TTSSource(dir); err != nil {
 		return nil, err
 	} else if isTTS {
@@ -254,6 +263,15 @@ func SafetensorsConfigFiles(dir string) ([]string, error) {
 			return nil, err
 		}
 		names = append(names, name)
+	}
+	if isChatterbox, err := chatterboxSource(dir); err != nil {
+		return nil, err
+	} else if isChatterbox {
+		file, err := chatterboxAsset(dir, "s3_tokenizer/config.json")
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, file)
 	}
 	if isTTS, err := qwen3TTSSource(dir); err != nil {
 		return nil, err

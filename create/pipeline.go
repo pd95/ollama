@@ -85,6 +85,10 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if err != nil {
 		return err
 	}
+	inv, err = prepareChatterboxInventory(inv)
+	if err != nil {
+		return err
+	}
 	inv, err = prepareKokoroInventory(inv)
 	if err != nil {
 		return err

@@ -633,6 +633,18 @@ func IRFFT(a *Array, n, axis int) *Array {
 	return out
 }
 
+func FFT(a *Array, n, axis int) *Array {
+	out := New("FFT")
+	mlxCheck(C.mlx_fft_fft(&out.ctx, a.ctx, C.int(n), C.int(axis), C.MLX_FFT_NORM_BACKWARD, DefaultStream().ctx))
+	return out
+}
+
+func IFFT(a *Array, n, axis int) *Array {
+	out := New("IFFT")
+	mlxCheck(C.mlx_fft_ifft(&out.ctx, a.ctx, C.int(n), C.int(axis), C.MLX_FFT_NORM_BACKWARD, DefaultStream().ctx))
+	return out
+}
+
 func Real(a *Array) *Array {
 	out := New("REAL")
 	mlxCheck(C.mlx_real(&out.ctx, a.ctx, DefaultStream().ctx))
