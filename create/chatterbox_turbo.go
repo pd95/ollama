@@ -32,7 +32,7 @@ func prepareChatterboxTurboInventory(inv Inventory) (Inventory, error) {
 	if inv.Config.Architecture() != chatterboxTurboArchitecture {
 		return inv, nil
 	}
-	for name, validate := range map[string]func([]byte) error{"s3_tokenizer/config.json": schema.ValidateS3, "reference_encoder/config.json": schema.Validate} {
+	for name, validate := range map[string]func([]byte) error{"s3_tokenizer/config.json": schema.ValidateS3, "reference_encoder/config.json": schema.ValidateReferenceEncoder} {
 		raw, err := os.ReadFile(filepath.Join(inv.Dir, name))
 		if err != nil {
 			return Inventory{}, err
@@ -76,6 +76,13 @@ func prepareChatterboxTurboInventory(inv Inventory) (Inventory, error) {
 		if count == 0 {
 			return Inventory{}, fmt.Errorf("Turbo dependency %s is empty", asset.file)
 		}
+		if asset.prefix == "s3_tokenizer." {
+			bank, hasBank := inv.Tensors["s3_tokenizer.mel_filters"]
+			window, hasWindow := inv.Tensors["s3_tokenizer.window"]
+			if hasBank != hasWindow || (hasBank && (!slices.Equal(bank.Shape, []int32{128, 201}) || !slices.Equal(window.Shape, []int32{400}))) {
+				return Inventory{}, fmt.Errorf("Turbo original S3 frontend requires mel_filters [128,201] and window [400]")
+			}
+		}
 	}
 	for name, shape := range map[string][]int32{"default.t3.speaker_emb": {1, 256}, "default.t3.cond_prompt_speech_tokens": {1, 375}, "default.gen.embedding": {1, 192}, "default.gen.prompt_feat": {1, 500, 80}, "default.gen.prompt_token": {1, 250}} {
 		if !slices.Equal(inv.Tensors[name].Shape, shape) {
@@ -96,5 +103,7 @@ func newChatterboxTurboImportTransform(raw json.RawMessage) (quantizePolicy, err
 func (chatterboxTurboImportTransform) quantizationType(string, []int32, string) string { return "" }
 func (chatterboxTurboImportTransform) augmentConfig(c *model.ConfigV2) error {
 	c.Voices = []string{"default"}
+	c.Languages = []string{"en"}
+	c.VoiceLanguages = map[string][]string{"default": {"en"}}
 	return nil
 }

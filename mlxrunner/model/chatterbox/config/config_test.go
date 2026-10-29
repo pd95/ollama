@@ -39,6 +39,17 @@ func TestTurboConfiguration(t *testing.T) {
 	}
 	var fields map[string]any
 	_ = json.Unmarshal(raw, &fields)
+	delete(fields, "quantization")
+	floating, _ := json.Marshal(fields)
+	if err := ValidateTurbo(floating); err != nil {
+		t.Fatalf("original F32 configuration: %v", err)
+	}
+	fields["quantization"] = "unsupported"
+	malformed, _ := json.Marshal(fields)
+	if ValidateTurbo(malformed) == nil {
+		t.Fatal("accepted malformed quantization")
+	}
+	delete(fields, "quantization")
 	fields["s3gen"].(map[string]any)["decoder_channels"] = []any{float64(128)}
 	raw, _ = json.Marshal(fields)
 	if ValidateTurbo(raw) == nil {

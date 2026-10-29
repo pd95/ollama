@@ -15,7 +15,7 @@ import (
 )
 
 func TestTurboReference(t *testing.T) {
-	if os.Getenv("OLLAMA_SPEECH_REFERENCE_MODEL") != "mlx-community/chatterbox-turbo-4bit" {
+	if name := os.Getenv("OLLAMA_SPEECH_REFERENCE_MODEL"); name != "mlx-community/chatterbox-turbo-4bit" && name != "ResembleAI/chatterbox-turbo" {
 		t.Skip("requires pinned Turbo sources")
 	}
 	source, reference := os.Getenv("OLLAMA_CHATTERBOX_SOURCE"), os.Getenv("OLLAMA_SPEECH_REFERENCE_DIR")
@@ -87,6 +87,17 @@ func TestTurboReference(t *testing.T) {
 		candidate.s3, errS3 = loadS3Tokenizer(sourceTensors(t, filepath.Join(os.Getenv("OLLAMA_S3_SOURCE"), "model.safetensors")))
 		if errS3 != nil {
 			t.Fatal(errS3)
+		}
+		if want["clone_s3_mels"] != nil {
+			// Independent CPU PyTorch STFT/mel reference with original saved assets.
+			pcm := want["clone_s3_pcm"]
+			padded := mlx.Pad(pcm, []int{0}, []int{200}, []int{200}, mlx.FromValue(float32(0)), "reflect")
+			frames := padded.AsStrided([]int{pcm.Size() / 160, 400}, []int{160, 1}, 0)
+			power := mlx.RFFTCPU(mlx.Mul(frames, candidate.s3.window), 400, -1).Abs().Power(mlx.FromValue(2))
+			compare(t, "original S3 FFT power", power, want["clone_s3_power"], 1e-5, 1e-5)
+			mel := mlx.MatmulCPU(candidate.s3.bank, mlx.Transpose(power, 1, 0))
+			compare(t, "original S3 raw mel", mel, want["clone_s3_raw_mel"], 1e-6, 1e-5)
+			compare(t, "original S3 Torch frontend", candidate.s3.mels(want["clone_s3_pcm"]), want["clone_s3_mels"], 5e-6, 5e-6)
 		}
 		referenceWAV, err := os.ReadFile(filepath.Join(reference, "reference.wav"))
 		if err != nil {

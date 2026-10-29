@@ -3,6 +3,7 @@ package chatterbox
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/ollama/ollama/mlx"
 	"github.com/ollama/ollama/mlxrunner/model"
@@ -20,6 +21,7 @@ type s3Tokenizer struct {
 	projection             nn.LinearLayer
 	bank, window, cos, sin *mlx.Array
 	derived                []*mlx.Array
+	originalFrontend       bool
 }
 
 func loadS3Tokenizer(tensors map[string]*mlx.Array) (*s3Tokenizer, error) {
@@ -32,26 +34,47 @@ func loadS3Tokenizer(tensors map[string]*mlx.Array) (*s3Tokenizer, error) {
 	if w.err != nil {
 		return nil, w.err
 	}
-	s.bank = nn.SlaneyMelFilters(16000, 400, 128, 8000)
-	window := make([]float32, 400)
-	for i := range window {
-		window[i] = float32(.5 * (1 - math.Cos(2*math.Pi*float64(i)/399)))
+	if bank, window := tensors["mel_filters"], tensors["window"]; bank != nil || window != nil {
+		if bank == nil || window == nil || !slices.Equal(bank.Dims(), []int{128, 201}) || !slices.Equal(window.Dims(), []int{400}) || bank.DType() != mlx.DTypeFloat32 || window.DType() != mlx.DTypeFloat32 {
+			return nil, fmt.Errorf("incompatible original S3 frontend assets")
+		}
+		s.bank, s.window = bank, window
+		s.originalFrontend = true
+	} else {
+		s.bank = nn.SlaneyMelFilters(16000, 400, 128, 8000)
+		window := make([]float32, 400)
+		for i := range window {
+			window[i] = float32(.5 * (1 - math.Cos(2*math.Pi*float64(i)/399)))
+		}
+		s.window = mlx.FromValues(window, 400)
+		s.derived = append(s.derived, s.bank, s.window)
 	}
-	s.window = mlx.FromValues(window, 400)
 	inv := mlx.Div(mlx.FromValue(float32(1)), mlx.FromValue(float32(10000)).Power(mlx.Div(mlx.Arange(0, 64, 2, mlx.DTypeInt32).AsType(mlx.DTypeFloat32), mlx.FromValue(float32(64)))))
 	freq := mlx.Mul(mlx.ExpandDims(mlx.Arange(0, 2048, 1, mlx.DTypeInt32), 1), mlx.ExpandDims(inv, 0)).AsType(mlx.DTypeFloat32)
 	s.cos = mlx.Concatenate([]*mlx.Array{mlx.Cos(freq), mlx.Cos(freq)}, -1)
 	s.sin = mlx.Concatenate([]*mlx.Array{mlx.Sin(freq), mlx.Sin(freq)}, -1)
-	s.derived = []*mlx.Array{s.bank, s.window, s.cos, s.sin}
+	s.derived = append(s.derived, s.cos, s.sin)
 	return s, nil
 }
 
 func (s *s3Tokenizer) mels(pcm *mlx.Array) *mlx.Array {
 	padded := mlx.Pad(pcm, []int{0}, []int{200}, []int{200}, mlx.FromValue(float32(0)), "reflect")
 	frames := padded.AsStrided([]int{pcm.Size() / 160, 400}, []int{160, 1}, 0)
-	power := mlx.RFFT(mlx.Mul(frames, s.window), 400, -1).Abs().Power(mlx.FromValue(2))
+	var spectrum *mlx.Array
+	if s.originalFrontend {
+		spectrum = mlx.RFFTCPU(mlx.Mul(frames, s.window), 400, -1)
+	} else {
+		spectrum = mlx.RFFT(mlx.Mul(frames, s.window), 400, -1)
+	}
+	power := spectrum.Abs().Power(mlx.FromValue(2))
 	mel := mlx.Matmul(mlx.ExpandDims(power, 0), mlx.Transpose(s.bank, 1, 0))
 	mel = mlx.Transpose(mel, 0, 2, 1)
+	if s.originalFrontend {
+		// Original S3 uses a float32 Torch mel projection. The GPU GEMM's
+		// reduced-precision products shift the global log-mel floor; preserve
+		// the original arithmetic with the existing native host BLAS path.
+		mel = mlx.ExpandDims(mlx.MatmulCPU(s.bank, mlx.Transpose(power, 1, 0)), 0)
+	}
 	log := mlx.Log10(mlx.Maximum(mel, mlx.FromValue(float32(1e-10))))
 	log = mlx.Maximum(log, mlx.Sub(log.MaxAxis(-1, true).MaxAxis(1, true).MaxAxis(0, true), mlx.FromValue(float32(8))))
 	return mlx.Div(mlx.Add(log, mlx.FromValue(float32(4))), mlx.FromValue(float32(4)))

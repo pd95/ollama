@@ -2,6 +2,7 @@ package create
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -68,6 +69,31 @@ func TestTurboImport(t *testing.T) {
 	if store.blobs["default.gen.prompt_feat"] == nil || store.blobs["tokenizer.json"] == nil || store.blobs["s3gen.speaker_encoder.head.conv1.weight"] == nil || store.blobs["t3.unused.weight"] != nil {
 		t.Fatal("wrong imported dependencies")
 	}
+	var floating map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &floating); err != nil {
+		t.Fatal(err)
+	}
+	delete(floating, "quantization")
+	floatConfig, err := json.Marshal(floating)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("config.json", floatConfig)
+	write("reference_encoder/config.json", []byte(`{"model_type":"chatterbox_campplus","version":"1.0","sample_rate":16000,"mel_bins":80,"embedding_dim":192}`))
+	s3Tensors := []*st.TensorData{tensor("encoder.conv1.weight", "F32", []int32{2, 2}), tensor("mel_filters", "F32", []int32{128, 201}), tensor("window", "F32", []int32{400})}
+	createTestSafetensors(t, filepath.Join(dir, "s3_tokenizer/model.safetensors"), s3Tensors)
+	store = newCaptureStore()
+	err = Create(t.Context(), "original-turbo", dir, testPipelineOptions(), store, func(_ context.Context, _ string, m ManifestInfo) error { info = m; return nil }, func(string) {})
+	if err != nil || store.blobs["s3_tokenizer.mel_filters"] == nil || !slices.Equal(info.ModelConfig.VoiceLanguages["default"], []string{"en"}) {
+		t.Fatalf("original import: %v %+v", err, info.ModelConfig)
+	}
+	createTestSafetensors(t, filepath.Join(dir, "s3_tokenizer/model.safetensors"), s3Tensors[:2])
+	store = newCaptureStore()
+	err = Create(t.Context(), "bad-frontend", dir, testPipelineOptions(), store, func(context.Context, string, ManifestInfo) error { return nil }, func(string) {})
+	if err == nil || len(store.blobs) > 0 {
+		t.Fatal("incomplete original frontend reached writes")
+	}
+	createTestSafetensors(t, filepath.Join(dir, "s3_tokenizer/model.safetensors"), s3Tensors)
 	if err := os.Remove(filepath.Join(dir, "reference_encoder/config.json")); err != nil {
 		t.Fatal(err)
 	}
