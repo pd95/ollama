@@ -37,6 +37,21 @@ func TestSpeechOptions(t *testing.T) {
 	}
 }
 
+func TestTextChunksKeepsShortRequestsTogether(t *testing.T) {
+	for _, text := range []string{
+		"Guten Tag! Dies ist ein kurzer test.",
+		"Hello! This is a short speech test.",
+		"Hello. Goodbye? Yes!",
+		"नमस्ते। फिर मिलेंगे।",
+		"مرحبا؟ نعم!",
+		strings.Repeat("a", 160),
+	} {
+		if chunks := textChunks("  " + text + "  "); len(chunks) != 1 || chunks[0] != text {
+			t.Errorf("short request fragmented: %q -> %q", text, chunks)
+		}
+	}
+}
+
 func TestTextChunks(t *testing.T) {
 	input := strings.Repeat("Hallo! Grüße aus Köln. ", 40)
 	chunks := textChunks(input)
@@ -66,8 +81,8 @@ func TestNonEnglishNormalization(t *testing.T) {
 		t.Fatalf("unexpected non-English placeholders: %q %v", got, err)
 	}
 	for _, input := range []string{"नमस्ते। फिर मिलेंगे।", "مرحبا؟ نعم!"} {
-		if chunks := textChunks(input); len(chunks) != 2 {
-			t.Fatalf("Unicode sentence boundaries: %v", chunks)
+		if chunks := textChunks(input); len(chunks) != 1 {
+			t.Fatalf("short Unicode text fragmented: %v", chunks)
 		}
 	}
 }

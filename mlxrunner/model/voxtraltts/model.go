@@ -136,6 +136,11 @@ func (m *Model) ValidateSpeechRequest(req llm.SpeechRequest) error {
 func textChunks(text string) []string {
 	var result []string
 	runes := []rune(strings.TrimSpace(text))
+	// Preserve context for short utterances instead of restarting generation
+	// for each sentence. Longer requests retain the bounded chunking path.
+	if len(runes) > 0 && len(runes) <= 160 {
+		return []string{string(runes)}
+	}
 	for len(runes) > 0 {
 		end := min(160, len(runes))
 		split := 0
