@@ -51,6 +51,7 @@ func (r hifiResidual) forward(x *mlx.Array) *mlx.Array {
 
 type hiFT struct {
 	turbo             bool
+	finalSlope        float32
 	pre, post         conv
 	ups, sourceDown   []conv
 	sourceBlocks      []hifiResidual
@@ -63,7 +64,7 @@ type hiFT struct {
 
 func loadHiFT(w *weights) *hiFT {
 	p := "s3gen.mel2wav"
-	h := &hiFT{pre: w.conv(p+".conv_pre", 1, 3, 1, 1), post: w.conv(p+".conv_post", 1, 3, 1, 1), f0Head: w.linear(p + ".f0_predictor.classifier"), sourceMix: w.linear(p + ".m_source.l_linear")}
+	h := &hiFT{finalSlope: .1, pre: w.conv(p+".conv_pre", 1, 3, 1, 1), post: w.conv(p+".conv_post", 1, 3, 1, 1), f0Head: w.linear(p + ".f0_predictor.classifier"), sourceMix: w.linear(p + ".m_source.l_linear")}
 	for i := range 5 {
 		h.f0 = append(h.f0, w.conv(fmt.Sprintf("%s.f0_predictor.condnet.%d", p, i), 1, 1, 1, 1))
 	}
@@ -200,11 +201,15 @@ func (h *hiFT) spectrum(mels, source *mlx.Array) *mlx.Array {
 	for i := range h.ups {
 		x = h.stage(x, spec, i)
 	}
+	return h.postSpectrum(x)
+}
+
+func (h *hiFT) postSpectrum(x *mlx.Array) *mlx.Array {
+	slope := h.finalSlope
 	if h.turbo {
-		x = mlx.Maximum(x, mlx.Mul(x, mlx.FromValue(float32(.01))))
-	} else {
-		x = hifiLeaky(x)
+		slope = .01
 	}
+	x = mlx.Maximum(x, mlx.Mul(x, mlx.FromValue(slope)))
 	return mlx.Transpose(h.post.forward(mlx.Transpose(x, 0, 2, 1)), 0, 2, 1)
 }
 

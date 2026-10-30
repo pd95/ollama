@@ -16,7 +16,7 @@ func TestConfiguration(t *testing.T) {
 	}
 	var fields map[string]any
 	_ = json.Unmarshal(raw, &fields)
-	for key, value := range map[string]any{"t3_model": "turbo", "multilingual": false, "sample_rate": 22050, "quantization": map[string]any{"bits": 4}} {
+	for key, value := range map[string]any{"t3_model": "turbo", "multilingual": false, "sample_rate": 22050, "quantization": map[string]any{"bits": 4}, "vocoder_profile": "unknown"} {
 		copy := map[string]any{}
 		for k, v := range fields {
 			copy[k] = v
@@ -25,6 +25,18 @@ func TestConfiguration(t *testing.T) {
 		changed, _ := json.Marshal(copy)
 		if Validate(changed) == nil {
 			t.Errorf("accepted %s", key)
+		}
+	}
+}
+
+func TestVocoderProfiles(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want float32
+	}{{`{}`, .1}, {`{"vocoder_profile":"mlx-audio-v3"}`, .1}, {`{"vocoder_profile":"provider-v3"}`, .01}} {
+		got, err := VocoderFinalSlope([]byte(tc.raw))
+		if err != nil || got != tc.want {
+			t.Fatalf("profile %s: %v / %v", tc.raw, got, err)
 		}
 	}
 }

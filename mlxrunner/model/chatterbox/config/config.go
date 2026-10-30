@@ -8,6 +8,25 @@ import (
 
 const Architecture = "ChatterboxForConditionalGeneration"
 
+// VocoderFinalSlope is an imported execution profile. Existing converted
+// checkpoints retain their MLX-Audio math unless explicitly reimported.
+func VocoderFinalSlope(raw []byte) (float32, error) {
+	var c struct {
+		Profile string `json:"vocoder_profile"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return 0, err
+	}
+	switch c.Profile {
+	case "", "mlx-audio-v3":
+		return .1, nil
+	case "provider-v3":
+		return .01, nil
+	default:
+		return 0, fmt.Errorf("unsupported Chatterbox vocoder_profile %q", c.Profile)
+	}
+}
+
 func Validate(raw []byte) error {
 	var c struct {
 		Type          string          `json:"model_type"`
@@ -21,6 +40,9 @@ func Validate(raw []byte) error {
 		T3Config      map[string]any  `json:"t3_config"`
 	}
 	if err := json.Unmarshal(raw, &c); err != nil {
+		return err
+	}
+	if _, err := VocoderFinalSlope(raw); err != nil {
 		return err
 	}
 	if c.Type != "chatterbox" || c.Version != "1.0" || c.T3 != "v3" || !c.Multilingual || c.Vocab != 2454 || c.Preprocessing != "NFKD,fullcase" || (c.Rate != 0 && c.Rate != 24000) || (len(c.Quant) > 0 && string(c.Quant) != "null") {

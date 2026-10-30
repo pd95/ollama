@@ -53,6 +53,20 @@ func sourceTensors(t *mlxtest.T, path string) map[string]*mlx.Array {
 	return out
 }
 
+func TestHiFTFinalActivationProfiles(t *testing.T) {
+	mlxtest.Run(t, func(t *mlxtest.T) {
+		for _, tc := range []struct {
+			slope    float32
+			turbo    bool
+			negative float32
+		}{{.1, false, -.2}, {.01, false, -.02}, {.1, true, -.02}} {
+			h := &hiFT{finalSlope: tc.slope, turbo: tc.turbo, post: conv{weight: mlx.FromValues([]float32{1}, 1, 1, 1), stride: 1, dilation: 1, groups: 1}}
+			x := mlx.FromValues([]float32{-2, 0, 2}, 1, 1, 3)
+			compare(t, "final activation", h.postSpectrum(x), mlx.FromValues([]float32{tc.negative, 0, 2}, 1, 1, 3), 1e-7, 1e-7)
+		}
+	})
+}
+
 func TestReference(t *testing.T) {
 	if name := os.Getenv("OLLAMA_SPEECH_REFERENCE_MODEL"); name == "mlx-community/chatterbox-turbo-4bit" || name == "ResembleAI/chatterbox-turbo" {
 		t.Skip("Turbo has separate references")

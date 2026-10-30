@@ -2,6 +2,7 @@ package create
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,6 +10,33 @@ import (
 
 	st "github.com/ollama/ollama/fs/safetensors"
 )
+
+func TestChatterboxVocoderProfileImported(t *testing.T) {
+	raw, err := os.ReadFile("testdata/chatterbox-config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["vocoder_profile"] = "provider-v3"
+	source, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported, err := normalizeChatterboxConfig(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var normalized map[string]any
+	if err := json.Unmarshal(imported, &normalized); err != nil {
+		t.Fatal(err)
+	}
+	if normalized["vocoder_profile"] != "provider-v3" {
+		t.Fatal("import discarded the decoder profile")
+	}
+}
 
 func TestChatterboxImport(t *testing.T) {
 	for _, broken := range []string{"", "missing", "dtype", "collision"} {

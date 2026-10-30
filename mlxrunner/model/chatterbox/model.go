@@ -25,6 +25,7 @@ import (
 func init() { model.Register(schema.Architecture, newModel) }
 
 type Model struct {
+	vocoderFinalSlope    float32
 	Arrays               []*mlx.Array
 	tok                  *tokenizer.Tokenizer
 	t3                   *t3
@@ -47,6 +48,10 @@ func newModel(root *model.Root) (model.Model, error) {
 	if err = schema.Validate(raw); err != nil {
 		return nil, err
 	}
+	finalSlope, err := schema.VocoderFinalSlope(raw)
+	if err != nil {
+		return nil, err
+	}
 	raw, err = root.Manifest.ReadConfig("s3_tokenizer/config.json")
 	if err != nil {
 		return nil, err
@@ -65,7 +70,7 @@ func newModel(root *model.Root) (model.Model, error) {
 	if tok.VocabSize() != 2454 {
 		return nil, fmt.Errorf("Chatterbox tokenizer vocabulary mismatch")
 	}
-	return &Model{tok: tok}, nil
+	return &Model{tok: tok, vocoderFinalSlope: finalSlope}, nil
 }
 
 func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
@@ -91,6 +96,9 @@ func (m *Model) LoadWeights(tensors map[string]*mlx.Array) error {
 	m.conformer = loadConformer(w)
 	m.flow = loadFlowDecoder(w)
 	m.hift = loadHiFT(w)
+	if m.vocoderFinalSlope != 0 {
+		m.hift.finalSlope = m.vocoderFinalSlope
+	}
 	m.embedding = w.get("s3gen.flow.input_embedding.weight")
 	m.projection = w.linear("s3gen.flow.encoder_proj")
 	m.speaker = w.linear("s3gen.flow.spk_embed_affine_layer")
