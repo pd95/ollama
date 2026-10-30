@@ -97,13 +97,13 @@ func TestSpeechPiecesStream(t *testing.T) {
 
 func TestRunSpeechCompleteText(t *testing.T) {
 	text := "Heute testen wir die Sprachausgabe mit einem längeren Absatz. Jedes Wort soll genau einmal gesprochen werden. Achten Sie auf klare Satzgrenzen und gleichmäßige Pausen. Auch der letzte Satz muss vollständig zu hören sein."
-	var inputs []string
+	inputs := make(chan string, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct{ Input string }
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		inputs = append(inputs, body.Input)
+		inputs <- body.Input
 		w.Write(audio.EncodeWAV([]float32{.1}, 24000))
 	}))
 	defer server.Close()
@@ -116,11 +116,17 @@ func TestRunSpeechCompleteText(t *testing.T) {
 	previous := os.Stdout
 	os.Stdout = output
 	defer func() { os.Stdout = previous }()
-	if err := runSpeech(t.Context(), "test", "Ryan", text, nil, false); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(inputs, []string{text}) {
-		t.Fatalf("complete text fragmented into requests: %q", inputs)
+	for _, input := range []io.Reader{nil, strings.NewReader("")} {
+		if err := runSpeech(t.Context(), "test", "Ryan", text, input, false); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for len(inputs) > 0 {
+			got = append(got, <-inputs)
+		}
+		if !slices.Equal(got, []string{text}) {
+			t.Fatalf("complete text fragmented into requests: %q", got)
+		}
 	}
 }
 

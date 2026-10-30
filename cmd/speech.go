@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -58,7 +59,14 @@ func readSpeechReference(path string) (*llm.ReferenceAudio, error) {
 // text arguments, the text arguments alone, or each line typed at the prompt.
 func runSpeech(ctx context.Context, model, voice, text string, input io.Reader, interactive bool, options ...speechOptions) error {
 	if input != nil {
-		return speak(ctx, model, voice, io.MultiReader(input, strings.NewReader(" "+text)), options...)
+		buffered := bufio.NewReader(input)
+		if _, err := buffered.Peek(1); err == nil {
+			return speak(ctx, model, voice, io.MultiReader(buffered, strings.NewReader(" "+text)), options...)
+		} else if !errors.Is(err, io.EOF) {
+			return err
+		}
+		// Empty redirected stdin supplies no incremental text. In particular,
+		// headless callers using /dev/null still have a complete text argument.
 	}
 	if text != "" || !interactive {
 		return speakInput(ctx, model, voice, nil, text, options...)
