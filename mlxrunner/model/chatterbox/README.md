@@ -19,6 +19,8 @@ do not claim Python RNG identity. Fixed-input neural stages are compared to
 MLX-Audio 0.6.2; only inverse-FFT overlap-add has rounding differences (<4.5e-8).
 The MIT notice is in `MLX_AUDIO_LICENSE`. The vendored MLX-LM Llama transformer
 carries Copyright © 2023–2024 Apple Inc.
+The [speech notice](../SPEECH_NOTICE) and [MLX-LM license](../MLX_LM_LICENSE)
+retain those credits; the build stages full notices/licenses with the runtime.
 
 `TestReference` checks preprocessing, reference encoders, conditioning, prefill,
 cached generation, flow inputs/all steps and fixed-source waveform stages.

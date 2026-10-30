@@ -5,6 +5,8 @@ Base supports the supplied 0.6B/1.7B bf16 checkpoints with per-request reference
 audio and a transcript. VoiceDesign is unsupported. Runtime inference uses Go/MLX;
 Python MLX-Audio 0.6.2 is the compatibility reference, with its MIT notice in
 `MLX_AUDIO_LICENSE`. The Base codec encoder follows its Mimi/SEANet components.
+The [speech notice](../SPEECH_NOTICE) credits the upstream authors, describes
+the native adaptations and identifies the license texts staged with the runtime.
 
 Base receives mono PCM16 WAV at 16–48 kHz, at most 15 seconds, through
 `reference_audio: {"format":"wav","data":"<base64>"}` plus `reference_text`.

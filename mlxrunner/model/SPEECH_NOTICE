@@ -1,0 +1,58 @@
+Native MLX speech: third-party attribution
+========================================
+
+MLX-Audio 0.6.2
+https://github.com/Blaizzy/mlx-audio/tree/v0.6.2
+Copyright (c) 2024 Prince Canuma
+Copyright (c) 2025, Prince Canuma and contributors
+MIT License
+
+The Qwen3-TTS, Kokoro, Voxtral TTS, and Chatterbox/multilingual-v3/Turbo
+implementations in this directory adapt MLX-Audio's model implementations to
+Go and Ollama's native MLX operators. Changes include native model import and
+asset management, request-local conditioning and sampling, bounded sentence
+planning, streaming, cancellation, and lifecycle integration. The original
+Python runtime is not included. Family-local license copies are retained in:
+  qwen3tts/MLX_AUDIO_LICENSE
+  kokoro/MLX_AUDIO_LICENSE
+  voxtraltts/LICENSE.MLX-Audio
+  chatterbox/MLX_AUDIO_LICENSE
+
+MLX-LM Llama implementation, as vendored in MLX-Audio 0.6.2
+https://github.com/ml-explore/mlx-lm
+Copyright © 2023 Apple Inc.
+Copyright © 2023-2024 Apple Inc.
+MIT License
+
+The Llama/Mistral transformer components used by the native speech ports follow
+the MLX-LM implementation vendored by MLX-Audio, which retains the Apple file
+copyright notice. See MLX_LM_LICENSE.
+
+Misaki 0.9.4 English pronunciation dictionaries
+https://github.com/hexgrad/misaki
+Author: hexgrad (as identified by the source distribution)
+Apache License, Version 2.0
+
+Kokoro's English frontend includes the unmodified American/British gold/silver
+dictionary JSON payloads from Misaki, compressed with gzip for embedding. The
+native Go frontend and its fallback/context rules are adaptations for Ollama;
+the dictionaries' source and compressed hashes are retained in
+kokoro/english/data/provenance.json. See kokoro/english/data/LICENSE.
+
+Chatterbox HiFT upstream implementation
+https://github.com/resemble-ai/chatterbox/blob/5de7a54aa4e5e2baadb0182dde554908b48b85c2/src/chatterbox/models/s3gen/hifigan.py
+Adapted there from CosyVoice/cosyvoice/hifigan/generator.py
+Copyright (c) 2024 Alibaba Inc (authors: Xiang Lyu, Kai Hu)
+Apache License, Version 2.0
+
+The HiFT lineage is retained alongside the MLX-Audio port attribution. Native
+changes include Go data structures, MLX array operations, streaming integration
+and explicit final-activation profiles. See chatterbox/HIFT_LICENSE. The
+upstream HiFT file also acknowledges HiFi-GAN (jik876/hifi-gan), ParallelWaveGAN
+(kan-bayashi/ParallelWaveGAN) and NVIDIA BigVGAN (NVIDIA/BigVGAN).
+
+The build installs this notice as SPEECH_NOTICE and the full applicable license
+texts as SPEECH_LICENSE beside the runtime libraries. These cover ported code
+and pronunciation dictionaries. Model checkpoints, tokenizers/codecs imported
+with a checkpoint, preset voice packs, and reference recordings are separate
+user-provided model inputs and are not bundled by this feature.

@@ -1,3 +1,8 @@
+// HiFT adapted for Go/MLX from MLX-Audio 0.6.2. Its upstream implementation in
+// ResembleAI/Chatterbox derives from CosyVoice's HiFT generator:
+// Copyright (c) 2024 Alibaba Inc (authors: Xiang Lyu, Kai Hu), Apache-2.0.
+// Modifications include native MLX operations and explicit activation profiles.
+// See HIFT_LICENSE, MLX_AUDIO_LICENSE and ../SPEECH_NOTICE for retained notices.
 package chatterbox
 
 import (

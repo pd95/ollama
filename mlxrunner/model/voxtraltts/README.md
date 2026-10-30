@@ -7,6 +7,9 @@ Source implementation copyright (c) 2024 Prince Canuma, MIT; retained in
 LICENSE.MLX-Audio. The port uses the same fixed model mathematics. Model weights
 are separate local inputs, with their own model-card license; they are not
 included in this source package.
+The [speech notice](../SPEECH_NOTICE) also credits the vendored MLX-LM transformer
+source and describes native adaptations. Full notices/licenses ship with the
+runtime payload independently of user-imported models.
 
 Config/ validates supplied bf16 and affine 4/6-bit geometry. The importer freezes
 Tekken data and namespaces seven English/German voice packs. Runtime speech uses
