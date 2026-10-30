@@ -30,6 +30,17 @@ func TestTextChunks(t *testing.T) {
 	}
 }
 
+func TestTextChunksKeepSentences(t *testing.T) {
+	text := "Heute testen wir die Sprachausgabe mit einem längeren Absatz. Jedes Wort soll genau einmal gesprochen werden. Achten Sie auf klare Satzgrenzen und gleichmäßige Pausen. Auch der letzte Satz muss vollständig zu hören sein."
+	parts := textChunks(text, 160)
+	if len(parts) != 2 || !strings.HasSuffix(parts[0], "gesprochen werden.") || !strings.HasPrefix(parts[1], "Achten Sie") {
+		t.Fatalf("sentence fragmented: %q", parts)
+	}
+	if strings.Join(parts, " ") != text {
+		t.Fatal("text changed")
+	}
+}
+
 func TestSpeechOptions(t *testing.T) {
 	raw, err := os.ReadFile("testdata/config.json")
 	if err != nil {

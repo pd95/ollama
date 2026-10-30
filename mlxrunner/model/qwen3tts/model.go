@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/ollama/ollama/api"
@@ -181,7 +180,12 @@ func (m *Model) Speak(ctx context.Context, req llm.SpeechRequest, emit func([]fl
 	if voice == "" && m.cfg.Type == "custom_voice" {
 		voice = "Ryan"
 	}
-	chunks := textChunks(req.Input, 160)
+	chunks, err := audio.PlanSpeech(req.Input, 160, func(text string) int {
+		return max(utf8.RuneCountInString(text), len(m.tok.Encode(text, false)))
+	})
+	if err != nil {
+		return speechError("%s", err)
+	}
 	if len(chunks) == 0 {
 		return speechError("speech requires nonempty text")
 	}
@@ -208,26 +212,10 @@ func (m *Model) Speak(ctx context.Context, req llm.SpeechRequest, emit func([]fl
 	return nil
 }
 
-// Bound each autoregressive utterance without dropping any input. Prefer a word
-// boundary; long words are split by Unicode code point rather than UTF-8 byte.
+// Keep complete sentences inside the conservative text budget. Speak also
+// checks the tokenizer count; the autoregressive 512-frame cap remains separate.
 func textChunks(text string, limit int) []string {
-	var chunks []string
-	runes := []rune(strings.TrimSpace(text))
-	for len(runes) > 0 {
-		end := min(limit, len(runes))
-		if end < len(runes) {
-			for i := end - 1; i > 0; i-- {
-				if unicode.IsSpace(runes[i]) {
-					end = i
-					break
-				}
-			}
-		}
-		if s := strings.TrimSpace(string(runes[:end])); s != "" {
-			chunks = append(chunks, s)
-		}
-		runes = runes[end:]
-	}
+	chunks, _ := audio.PlanSpeech(text, limit, utf8.RuneCountInString)
 	return chunks
 }
 
