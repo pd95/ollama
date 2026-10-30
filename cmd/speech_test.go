@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ollama/ollama/llm"
 	"github.com/ollama/ollama/mlxrunner/model/audio"
@@ -120,6 +121,21 @@ func TestRunSpeechCompleteText(t *testing.T) {
 	}
 	if !slices.Equal(inputs, []string{text}) {
 		t.Fatalf("complete text fragmented into requests: %q", inputs)
+	}
+}
+
+func TestCompleteSpeechPiecesBounded(t *testing.T) {
+	text := strings.Repeat("Grüße aus Köln! ", 400) + strings.Repeat("語", 4300)
+	var got []string
+	for part := range completeSpeechPieces(t.Context(), text) {
+		if utf8.RuneCountInString(part) > maxSpeechInput || !utf8.ValidString(part) {
+			t.Fatal("invalid API-sized piece")
+		}
+		got = append(got, part)
+	}
+	compact := func(s string) string { return strings.Join(strings.Fields(s), "") }
+	if len(got) < 2 || compact(strings.Join(got, "")) != compact(text) {
+		t.Fatal("long complete text lost/duplicated")
 	}
 }
 

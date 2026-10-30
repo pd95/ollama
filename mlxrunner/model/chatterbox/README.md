@@ -25,6 +25,14 @@ cached generation, flow inputs/all steps and fixed-source waveform stages.
 Set `OLLAMA_CHATTERBOX_SOURCE`, `OLLAMA_S3_SOURCE` and
 `OLLAMA_SPEECH_REFERENCE_DIR` to pinned inputs for native numerical checks.
 
+Original v3 imports can explicitly select `"vocoder_profile":"provider-v3"`
+in the imported configuration. This uses the provider's 0.01 negative slope
+before the final HiFT convolution; earlier upsampling activations remain 0.1.
+An absent profile or `mlx-audio-v3` retains the existing converted 0.1 behavior.
+Existing imports need reimporting to select the provider profile. Turbo keeps
+its separately qualified decoder behavior. Fixed profile controls and provenance
+are in [testdata](testdata/README.md); they do not establish whole-provider fidelity.
+
 
 ## Turbo 4-bit
 

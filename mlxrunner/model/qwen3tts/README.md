@@ -20,6 +20,12 @@ The decoder prepends reference codes and trims their exact sample duration from
 each target waveform. Reference profiles are never retained on the model.
 The 512-frame target-utterance limit reports an error if EOS has not occurred.
 
+The text planner groups complete sentences within a conservative budget of
+160 Unicode code points and 160 text tokens. Oversized sentences prefer clauses,
+then words, then Unicode code points. Framing/reference conditioning and decoder
+state remain model-specific; changing text grouping does not carry generation
+caches across utterances or relax the 512-frame cap.
+
 `TestBaseReference` compares mels, ECAPA-TDNN blocks, speaker pooling/embedding,
 SEANet, encoder attention, downsampling, reference codes, ICL prompt/talker and
 fixed-code decoded audio against pinned fixtures when source/reference environment

@@ -2,6 +2,7 @@ package chatterbox
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"math"
 	"os"
@@ -250,6 +251,27 @@ func TestReference(t *testing.T) {
 			compare(t, language+" HiFT inverse spectrum", wave, v["audio_before_fade"], 1e-6, 1e-5)
 			compare(t, language+" HiFT full fixed-source decode", hifi.decode(v["mels"], v["vocoder_source"]), v["audio_before_fade"], 1e-6, 1e-5)
 			compare(t, language+" HiFT fade", fadeHiFT(wave), v["audio"], 1e-6, 1e-5)
+			if os.Getenv("OLLAMA_SPEECH_REFERENCE_MODEL") == "ResembleAI/chatterbox" {
+				// Independent final-stage ablation: hold the stored original-v3
+				// inputs fixed and use the provider's final 0.01 activation.
+				provider := *hifi
+				provider.finalSlope = .01
+				fixed := provider.inverse(provider.postSpectrum(v["vocoder_stage_2"]))
+				got := audio.EncodeWAV(mlx.Contiguous(fixed, false).Floats(), 24000)
+				want, err := os.ReadFile(filepath.Join("testdata", "provider-hift-"+language+".wav"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got) != len(want) {
+					t.Fatal("provider-profile waveform length changed")
+				}
+				for i := 44; i < len(got); i += 2 {
+					delta := int(int16(binary.LittleEndian.Uint16(got[i:]))) - int(int16(binary.LittleEndian.Uint16(want[i:])))
+					if delta < -1 || delta > 1 {
+						t.Fatalf("provider profile PCM differs at sample %d by %d", (i-44)/2, delta)
+					}
+				}
+			}
 		}
 	})
 }

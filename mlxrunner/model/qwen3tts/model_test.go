@@ -16,7 +16,10 @@ import (
 
 func TestTextChunks(t *testing.T) {
 	for _, input := range []string{"Hello!", strings.Repeat("Grüße aus Köln. ", 40), strings.Repeat("語", 350), " \n "} {
-		chunks := textChunks(input, 160)
+		chunks, err := textChunks(input, 160, utf8.RuneCountInString)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, chunk := range chunks {
 			if chunk == "" || !utf8.ValidString(chunk) || utf8.RuneCountInString(chunk) > 160 {
 				t.Fatalf("invalid chunk %q", chunk)
@@ -32,7 +35,10 @@ func TestTextChunks(t *testing.T) {
 
 func TestTextChunksKeepSentences(t *testing.T) {
 	text := "Heute testen wir die Sprachausgabe mit einem längeren Absatz. Jedes Wort soll genau einmal gesprochen werden. Achten Sie auf klare Satzgrenzen und gleichmäßige Pausen. Auch der letzte Satz muss vollständig zu hören sein."
-	parts := textChunks(text, 160)
+	parts, err := textChunks(text, 160, utf8.RuneCountInString)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(parts) != 2 || !strings.HasSuffix(parts[0], "gesprochen werden.") || !strings.HasPrefix(parts[1], "Achten Sie") {
 		t.Fatalf("sentence fragmented: %q", parts)
 	}

@@ -180,8 +180,8 @@ func (m *Model) Speak(ctx context.Context, req llm.SpeechRequest, emit func([]fl
 	if voice == "" && m.cfg.Type == "custom_voice" {
 		voice = "Ryan"
 	}
-	chunks, err := audio.PlanSpeech(req.Input, 160, func(text string) int {
-		return max(utf8.RuneCountInString(text), len(m.tok.Encode(text, false)))
+	chunks, err := textChunks(req.Input, 160, func(text string) int {
+		return len(m.tok.Encode(text, false))
 	})
 	if err != nil {
 		return speechError("%s", err)
@@ -214,9 +214,8 @@ func (m *Model) Speak(ctx context.Context, req llm.SpeechRequest, emit func([]fl
 
 // Keep complete sentences inside the conservative text budget. Speak also
 // checks the tokenizer count; the autoregressive 512-frame cap remains separate.
-func textChunks(text string, limit int) []string {
-	chunks, _ := audio.PlanSpeech(text, limit, utf8.RuneCountInString)
-	return chunks
+func textChunks(text string, limit int, tokens func(string) int) ([]string, error) {
+	return audio.PlanSpeech(text, limit, func(part string) int { return max(utf8.RuneCountInString(part), tokens(part)) })
 }
 
 func (m *Model) speak(ctx context.Context, text, language, voice, instructions string, profile *cloneProfile, rng *rand.Rand, emit func([]float32) error) error {
