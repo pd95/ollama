@@ -2,6 +2,7 @@ package kokoro
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -15,6 +16,7 @@ import (
 	"github.com/ollama/ollama/mlxrunner/batch"
 	"github.com/ollama/ollama/mlxrunner/cache"
 	"github.com/ollama/ollama/mlxrunner/model"
+	"github.com/ollama/ollama/mlxrunner/model/audio"
 	"github.com/ollama/ollama/mlxrunner/model/kokoro/config"
 	"github.com/ollama/ollama/mlxrunner/model/kokoro/english"
 	"github.com/ollama/ollama/mlxrunner/tokenizer"
@@ -155,34 +157,44 @@ func (m *Model) ValidateSpeechRequest(req llm.SpeechRequest) error {
 }
 
 func phonemeChunks(text string, limit int) []string {
-	var chunks []string
-	runes := []rune(strings.TrimSpace(text))
-	for len(runes) > 0 {
-		end := min(limit, len(runes))
-		// Sentence boundaries take precedence, then word boundaries, with no omission.
-		split := 0
-		for i := range end {
-			if strings.ContainsRune(".!?;", runes[i]) {
-				split = i + 1
-				break
-			}
-		}
-		if split != 0 {
-			end = split
-		} else if end < len(runes) {
-			for i := end - 1; i > 0; i-- {
-				if runes[i] == ' ' {
-					end = i
-					break
-				}
-			}
-		}
-		if s := strings.TrimSpace(string(runes[:end])); s != "" {
-			chunks = append(chunks, s)
-		}
-		runes = runes[end:]
-	}
+	chunks, _ := audio.PlanSpeech(text, limit, utf8.RuneCountInString)
 	return chunks
+}
+
+var errUtteranceTooLong = errors.New("Kokoro utterance exceeds the 12-second synthesis bound")
+
+// Fit durations before stochastic waveform synthesis. Oversized candidates
+// consume no RNG, so retries cannot leak into the accepted utterances.
+func fitPhonemes(ctx context.Context, phonemes string, limit int, synthesize func(string) ([]float32, error), emit func([]float32) error) error {
+	pending := phonemeChunks(phonemes, limit)
+	for len(pending) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		part := pending[0]
+		pending = pending[1:]
+		samples, err := synthesize(part)
+		if errors.Is(err, errUtteranceTooLong) {
+			left, right := audio.SplitSpeech(part)
+			if left == "" || right == "" {
+				return err
+			}
+			pending = append([]string{left, right}, pending...)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for offset := 0; offset < len(samples); offset += 6000 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := emit(samples[offset:min(offset+6000, len(samples))]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (m *Model) Speak(ctx context.Context, req llm.SpeechRequest, emit func([]float32) error) error {
@@ -209,33 +221,19 @@ func (m *Model) Speak(ctx context.Context, req llm.SpeechRequest, emit func([]fl
 		seed = *req.Seed
 	}
 	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
-	for _, chunk := range phonemeChunks(phonemes, 80) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	return fitPhonemes(ctx, phonemes, m.cfg.BERT.Context-2, func(chunk string) ([]float32, error) {
 		var samples []float32
 		var generationErr error
 		mlx.Scoped(func() { samples, generationErr = m.synthesize(ctx, chunk, m.voices[voice], speed, rng) })
-		if generationErr != nil {
-			return generationErr
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		for offset := 0; offset < len(samples); offset += 6000 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := emit(samples[offset:min(offset+6000, len(samples))]); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+		return samples, generationErr
+	}, emit)
 }
 
 func (m *Model) synthesize(ctx context.Context, phonemes string, voice *mlx.Array, speed float32, rng *rand.Rand) ([]float32, error) {
 	runes := []rune(phonemes)
+	if len(runes) < 1 || len(runes)+2 > m.cfg.BERT.Context || len(runes) > voice.Dim(0) {
+		return nil, fmt.Errorf("Kokoro phonemes exceed the context/voice limits")
+	}
 	ids := make([]int32, len(runes)+2)
 	for i, r := range runes {
 		ids[i+1] = int32(m.cfg.Vocab[string(r)])
@@ -256,7 +254,7 @@ func (m *Model) synthesize(ctx context.Context, phonemes string, voice *mlx.Arra
 		}
 		count := int(max(1, min(100, math.RoundToEven(float64(value)))))
 		if len(indices)+count > 480 {
-			return nil, fmt.Errorf("Kokoro utterance exceeds the 12-second synthesis bound")
+			return nil, errUtteranceTooLong
 		}
 		for range count {
 			indices = append(indices, int32(i))

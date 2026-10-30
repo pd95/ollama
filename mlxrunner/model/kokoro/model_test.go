@@ -1,7 +1,10 @@
 package kokoro
 
 import (
+	"context"
+	"errors"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,6 +41,45 @@ func TestSpeechOptions(t *testing.T) {
 		if err := m.ValidateSpeechRequest(llm.SpeechRequest{Input: "Hello", Speed: &value}); err == nil {
 			t.Fatalf("accepted speed %v", value)
 		}
+	}
+}
+
+func TestFitPhonemesDurationAndCancellation(t *testing.T) {
+	text := "first sentence. second sentence."
+	var accepted []string
+	err := fitPhonemes(t.Context(), text, 510, func(part string) ([]float32, error) {
+		if len(part) > 20 {
+			return nil, errUtteranceTooLong
+		}
+		accepted = append(accepted, part)
+		return []float32{1}, nil
+	}, func([]float32) error { return nil })
+	if err != nil || !slices.Equal(accepted, []string{"first sentence.", "second sentence."}) {
+		t.Fatalf("fit: %q / %v", accepted, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	accepted = nil
+	err = fitPhonemes(ctx, text, 510, func(part string) ([]float32, error) {
+		if len(part) > 20 {
+			return nil, errUtteranceTooLong
+		}
+		accepted = append(accepted, part)
+		return []float32{1}, nil
+	}, func([]float32) error { cancel(); return nil })
+	if !errors.Is(err, context.Canceled) || len(accepted) != 1 {
+		t.Fatalf("generated after cancellation: %q / %v", accepted, err)
+	}
+	err = fitPhonemes(t.Context(), "ɑ", 510, func(string) ([]float32, error) { return nil, errUtteranceTooLong }, func([]float32) error { t.Fatal("emitted oversized candidate"); return nil })
+	if !errors.Is(err, errUtteranceTooLong) {
+		t.Fatalf("unsplittable: %v", err)
+	}
+}
+
+func TestPhonemeSentenceCanExceedOldPolicy(t *testing.T) {
+	text := "wi wɪl kəntˈɪnju ˈɪntu ðə nˈɛkst ʧˈʌŋk ænd fˈɪnəʃ ðə kəmplˈit pˈɛɹəɡɹˌæf wɪðˈWt lˈuzɪŋ ɪts fˈInᵊl sˈɛntᵊns."
+	parts := phonemeChunks(text, 510)
+	if !slices.Equal(parts, []string{text}) {
+		t.Fatalf("sentence fragmented: %q", parts)
 	}
 }
 
