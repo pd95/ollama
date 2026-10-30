@@ -61,7 +61,7 @@ func runSpeech(ctx context.Context, model, voice, text string, input io.Reader, 
 		return speak(ctx, model, voice, io.MultiReader(input, strings.NewReader(" "+text)), options...)
 	}
 	if text != "" || !interactive {
-		return speak(ctx, model, voice, strings.NewReader(text), options...)
+		return speakInput(ctx, model, voice, nil, text, options...)
 	}
 	if _, err := player(model, ""); err != nil {
 		return err
@@ -104,7 +104,7 @@ func runSpeech(ctx context.Context, model, voice, text string, input io.Reader, 
 		}
 		// Ctrl+C stops speaking and returns to the prompt.
 		speakCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
-		if err := speak(speakCtx, model, voice, strings.NewReader(text), options...); err != nil && speakCtx.Err() == nil {
+		if err := speakInput(speakCtx, model, voice, nil, text, options...); err != nil && speakCtx.Err() == nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
 		stop()
@@ -116,6 +116,12 @@ func runSpeech(ctx context.Context, model, voice, text string, input io.Reader, 
 // stdout is not a terminal it writes one WAV instead, for example
 // `ollama run model "text" > speech.wav` on a machine without speakers.
 func speak(ctx context.Context, model, voice string, r io.Reader, options ...speechOptions) error {
+	return speakInput(ctx, model, voice, r, "", options...)
+}
+
+// A nil reader denotes complete command/interactive text. It must not acquire
+// extra request boundaries from the incremental-input latency policy.
+func speakInput(ctx context.Context, model, voice string, r io.Reader, text string, options ...speechOptions) error {
 	toTerminal := term.IsTerminal(int(os.Stdout.Fd()))
 	if toTerminal {
 		if _, err := player(model, ""); err != nil {
@@ -133,7 +139,11 @@ func speak(ctx context.Context, model, voice string, r io.Reader, options ...spe
 	audio := make(chan result, 1)
 	go func() {
 		defer close(audio)
-		for piece := range speechPieces(ctx, r) {
+		pieces := completeSpeechPieces(ctx, text)
+		if r != nil {
+			pieces = speechPieces(ctx, r)
+		}
+		for piece := range pieces {
 			wav, err := synthesize(ctx, model, voice, piece, options...)
 			select {
 			case audio <- result{wav, err}:
@@ -173,6 +183,29 @@ func speak(ctx context.Context, model, voice string, r io.Reader, options ...spe
 	setWAVSizes(out)
 	_, err := os.Stdout.Write(out)
 	return err
+}
+
+func completeSpeechPieces(ctx context.Context, text string) <-chan string {
+	pieces := make(chan string)
+	go func() {
+		defer close(pieces)
+		text = strings.TrimSpace(text)
+		chunks := []string{text}
+		if utf8.RuneCountInString(text) > maxSpeechInput {
+			chunks = speechChunks(text, maxSpeechInput)
+		}
+		for _, chunk := range chunks {
+			if chunk == "" {
+				continue
+			}
+			select {
+			case pieces <- chunk:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return pieces
 }
 
 // minSpeechPiece is how much text speechPieces gathers before it sends a
