@@ -79,6 +79,12 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if err != nil {
 		return fmt.Errorf("read model: %w", err)
 	}
+	if err := validateQwen3ASRInventory(inv); err != nil {
+		return err
+	}
+	if inv.Config.Architecture() == "Qwen3ASRForConditionalGeneration" && opts.Quantize != "" {
+		return fmt.Errorf("Qwen3-ASR component milestone requires original BF16 weights without quantization")
+	}
 	if inv.Config.Architecture() == gradiumPhononArchitecture {
 		inv, err = prepareGradiumPhononInventory(inv)
 		if err != nil {
@@ -164,11 +170,14 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 			validatedTokenizer.tekken = voxtralTokenizer.tekken
 		}
 	}
-	if validatedTokenizer == nil && inv.Config.Architecture() == qwen3TTSArchitecture {
+	if validatedTokenizer == nil && (inv.Config.Architecture() == qwen3TTSArchitecture || inv.Config.Architecture() == "Qwen3ASRForConditionalGeneration") {
 		validatedTokenizer, err = qwen3TTSTokenizer(modelDir)
 		if err != nil {
 			return err
 		}
+	}
+	if err := validateQwen3ASRTokenizer(inv, validatedTokenizer); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidTokenizer, err)
 	}
 	if err := checkContext(ctx); err != nil {
 		return err

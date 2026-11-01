@@ -28,6 +28,11 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 	var parserName, rendererName, sourceDecisionRenderer string
 	var decisionModel, decisionVision bool
 	switch cfg.Architecture() {
+	case "Qwen3ASRForConditionalGeneration":
+		if parserOverride != "" || (rendererOverride != "" && rendererOverride != "qwen3-asr") {
+			return model.ConfigV2{}, fmt.Errorf("Qwen3-ASR requires its qwen3-asr renderer and no chat parser")
+		}
+		rendererName = "qwen3-asr"
 	case qwen3TTSArchitecture, kokoroArchitecture, voxtralTTSArchitecture, chatterboxArchitecture, chatterboxTurboArchitecture:
 		// The speech tokenizer's Qwen family name does not imply a chat renderer.
 		if parserOverride != "" || rendererOverride != "" {
@@ -94,7 +99,9 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 	}
 
 	var capabilities []string
-	if decisionModel {
+	if cfg.Architecture() == "Qwen3ASRForConditionalGeneration" {
+		capabilities = []string{"completion", "audio"}
+	} else if decisionModel {
 		capabilities = []string{"decision"}
 		if decisionVision {
 			capabilities = append(capabilities, "vision")
@@ -149,6 +156,9 @@ func modelFamilies(family string) []string {
 }
 
 func inferModelFamilyFromConfig(cfg sourceModelConfig) string {
+	if cfg.Architecture() == "Qwen3ASRForConditionalGeneration" {
+		return "qwen3_asr"
+	}
 	for _, id := range sourceConfigIdentifiers(cfg) {
 		if isApertusFamily(id) || isApertus1p5Family(id) {
 			return "apertus"

@@ -59,6 +59,8 @@ func rendererForName(name string) Renderer {
 		return constructor()
 	}
 	switch name {
+	case "qwen3-asr":
+		return &Qwen3ASRRenderer{useImgTags: RenderImgTags}
 	case "apertus":
 		return &ApertusRenderer{}
 	case "apertus1p1":

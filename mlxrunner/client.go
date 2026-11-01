@@ -80,11 +80,11 @@ func NewClient(modelName string, softContextLength int) (*Client, error) {
 	if len(config.Architectures) > 0 {
 		c.architecture = config.Architectures[0]
 	}
-	var tensorBytes int64
-	for _, layer := range modelManifest.TensorLayers() {
-		tensorBytes += layer.Size
+	memory, err := estimatedLoadMemory(modelManifest)
+	if err != nil {
+		return nil, err
 	}
-	c.memory.Store(uint64(tensorBytes))
+	c.memory.Store(memory)
 
 	return c, nil
 }

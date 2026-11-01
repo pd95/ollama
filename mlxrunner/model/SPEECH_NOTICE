@@ -1,6 +1,17 @@
 Native MLX speech: third-party attribution
 ========================================
 
+Qwen3-ASR original provider implementation
+https://github.com/QwenLM/Qwen3-ASR/tree/7c6daf77a2421100f5fb066495372c00129d39ff
+Copyright 2026 The Qwen team, Alibaba Group and the HuggingFace Inc. team
+Apache License, Version 2.0
+
+qwen3asr adapts the original provider architecture, Whisper preprocessing and
+checkpoint mapping to native Go/MLX. The initial qualified execution baseline
+promotes original BF16 weights to F32 in memory. It reuses existing Qwen3
+transformer primitives; it does not include the provider Python runtime.
+See qwen3asr/QWEN_ASR_LICENSE.
+
 MLX-Audio 0.6.2
 https://github.com/Blaizzy/mlx-audio/tree/v0.6.2
 Copyright (c) 2024 Prince Canuma

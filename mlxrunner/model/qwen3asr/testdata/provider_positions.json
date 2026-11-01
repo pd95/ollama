@@ -1,0 +1,90 @@
+{
+  "provider_commit": "7c6daf77a2421100f5fb066495372c00129d39ff",
+  "provider_module_sha256": "2fb5d98da1933748f5117ee05ce4e7150c9ead8154fb8e25f7af3968b853adc7",
+  "trace_safetensors_sha256": "65f18929541b34527879f8a05e86de8181e39bbe3d0f3eb890eb9a4b75a5290e",
+  "steps": 13,
+  "width": 896,
+  "atol": 1.2e-07,
+  "samples": [
+    {
+      "step": 0,
+      "channel": 0,
+      "value": 0.0
+    },
+    {
+      "step": 0,
+      "channel": 448,
+      "value": 1.0
+    },
+    {
+      "step": 12,
+      "channel": 12,
+      "value": 0.05347653850913048
+    },
+    {
+      "step": 11,
+      "channel": 29,
+      "value": -0.2293217033147812
+    },
+    {
+      "step": 12,
+      "channel": 29,
+      "value": 0.31341153383255005
+    },
+    {
+      "step": 11,
+      "channel": 57,
+      "value": -0.2543806731700897
+    },
+    {
+      "step": 6,
+      "channel": 460,
+      "value": -0.026747839525341988
+    },
+    {
+      "step": 12,
+      "channel": 65,
+      "value": -0.0027206784579902887
+    },
+    {
+      "step": 12,
+      "channel": 494,
+      "value": -0.0613308921456337
+    },
+    {
+      "step": 6,
+      "channel": 29,
+      "value": -0.15871767699718475
+    },
+    {
+      "step": 10,
+      "channel": 56,
+      "value": -0.012550827115774155
+    },
+    {
+      "step": 11,
+      "channel": 489,
+      "value": 0.013704359531402588
+    },
+    {
+      "step": 8,
+      "channel": 12,
+      "value": -0.03566063567996025
+    },
+    {
+      "step": 10,
+      "channel": 460,
+      "value": 0.044570595026016235
+    },
+    {
+      "step": 12,
+      "channel": 447,
+      "value": 0.0012000007554888725
+    },
+    {
+      "step": 12,
+      "channel": 895,
+      "value": 0.9999992847442627
+    }
+  ]
+}

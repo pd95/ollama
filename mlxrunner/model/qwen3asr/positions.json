@@ -1,0 +1,24 @@
+{
+  "kind": "non-learned fixed sinusoidal configuration buffer",
+  "model": "Qwen/Qwen3-ASR-0.6B",
+  "provider_commit": "7c6daf77a2421100f5fb066495372c00129d39ff",
+  "provider_module_sha256": "2fb5d98da1933748f5117ee05ce4e7150c9ead8154fb8e25f7af3968b853adc7",
+  "trace_safetensors_sha256": "65f18929541b34527879f8a05e86de8181e39bbe3d0f3eb890eb9a4b75a5290e",
+  "shape": [
+    13,
+    896
+  ],
+  "dtype": "float32",
+  "byte_order": "little",
+  "sha256": "a4fd1967b01488a102b77692fa6290c90438f30d81ededed83226538173792f1",
+  "generation": "Original SinusoidsPositionEmbedding constructed on CPU by pinned verified provider module; first13 rows of positional_embedding",
+  "scope": "canonical CPU math buffer for strict0.6B configuration, not learned checkpoint weights or universal backend bitidentity",
+  "generation_environment": {
+    "torch_version": "2.15.0",
+    "numpy_version": "2.3.5",
+    "platform": "Darwin",
+    "machine": "arm64",
+    "device": "cpu",
+    "generator_sha256": "8a241841c8527e46b4a83ba2a0f855ccb0b9597083615a9d3c6003a9c8b43380"
+  }
+}

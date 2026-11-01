@@ -29,10 +29,6 @@ func decodeMP3Context(ctx context.Context, data []byte, maxInputBytes, maxSample
 	return decodeMP3ContextDuration(ctx, data, maxInputBytes, maxSamples, maxAudioSeconds)
 }
 
-func decodeMP3Duration(data []byte, maxInputBytes, maxSeconds int) ([]float32, int, error) {
-	return decodeMP3ContextDuration(context.Background(), data, maxInputBytes, 0, maxSeconds)
-}
-
 func decodeMP3ContextDuration(ctx context.Context, data []byte, maxInputBytes, maxSamples, maxSeconds int) ([]float32, int, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err

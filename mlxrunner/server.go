@@ -91,6 +91,12 @@ func Execute(args []string) error {
 	)
 
 	mux := http.NewServeMux()
+	closeReplay, err := runner.installASRReplayRoutes(runnerCtx, mux)
+	if err != nil {
+		return err
+	}
+	// Drains outside the MLX worker before deferred model/worker teardown.
+	defer closeReplay()
 	mux.HandleFunc("POST /v1/score", runner.scoreHandler)
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
 		resp := statusResponse{
@@ -155,6 +161,9 @@ func Execute(args []string) error {
 			TopLogprobs:      request.TopLogprobs,
 		}
 
+		var cancel context.CancelFunc
+		request.Ctx, cancel = context.WithCancel(r.Context())
+		defer cancel()
 		if err := runner.Prepare(&request); err != nil {
 			var statusErr api.StatusError
 			if errors.As(err, &statusErr) {
@@ -164,10 +173,6 @@ func Execute(args []string) error {
 			}
 			return
 		}
-
-		var cancel context.CancelFunc
-		request.Ctx, cancel = context.WithCancel(r.Context())
-		defer cancel()
 
 		select {
 		case <-r.Context().Done():

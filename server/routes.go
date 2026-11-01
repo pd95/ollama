@@ -108,6 +108,7 @@ var useClient2 = experimentEnabled("client2")
 var mode string = gin.DebugMode
 
 type Server struct {
+	asrSessions   *asrSessionManager
 	addr          net.Addr
 	sched         *Scheduler
 	defaultNumCtx int
@@ -2430,6 +2431,8 @@ func (s *Server) GenerateRoutes() (http.Handler, error) {
 	r.POST("/api/experimental/web_fetch", s.WebFetchExperimentalHandler)
 	r.GET("/api/experimental/model-recommendations", s.ModelRecommendationsExperimentalHandler)
 
+	s.registerASRSessionRoutes(r)
+
 	// Inference
 	r.GET("/api/ps", s.PsHandler)
 	r.POST("/api/generate", s.withInferenceRequestLogging("/api/generate", s.GenerateHandler)...)
@@ -2559,6 +2562,7 @@ func Serve(ln net.Listener) error {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-signals
+		s.closeASRSessions()
 		srvr.Close()
 		schedDone()
 		sched.unloadAllRunners()

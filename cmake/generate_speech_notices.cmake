@@ -10,6 +10,7 @@ endforeach()
 
 set(_model_dir "${SOURCE_DIR}/mlxrunner/model")
 set(_license_files
+    qwen3asr/QWEN_ASR_LICENSE
     qwen3tts/MLX_AUDIO_LICENSE
     kokoro/MLX_AUDIO_LICENSE
     voxtraltts/LICENSE.MLX-Audio

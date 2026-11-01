@@ -92,7 +92,7 @@ func (s *Server) audioTextHandler(c *gin.Context, task renderers.AudioTask) {
 	}
 	prompter := renderers.AudioPrompterForRenderer(rendererName)
 
-	clips, err := splitAudio(form.audio, prompter.AudioClipLimit())
+	clips, err := splitAudioContext(c.Request.Context(), form.audio, prompter.AudioClipLimit())
 	if err != nil {
 		openAIError(c, http.StatusBadRequest, err.Error())
 		return
@@ -103,7 +103,11 @@ func (s *Server) audioTextHandler(c *gin.Context, task renderers.AudioTask) {
 	out := audioTextWriter{c: c, req: form.request, format: form.responseFormat, stream: form.stream}
 	for i, clip := range clips {
 		req := form.request
-		req.Audio = clip.wav()
+		req.Audio, err = clip.wavContext(c.Request.Context())
+		if err != nil {
+			out.fail(http.StatusBadRequest, err.Error())
+			return
+		}
 		prompt, err := prompter.AudioPrompt(req)
 		if err != nil {
 			out.fail(http.StatusBadRequest, err.Error())
@@ -197,13 +201,25 @@ func parseAudioTextForm(r *http.Request, task renderers.AudioTask) (audioTextFor
 		return f, fmt.Errorf("file is required: %w", err)
 	}
 	defer file.Close()
-	if f.audio, err = io.ReadAll(file); err != nil {
+	if f.audio, err = io.ReadAll(&audioUploadReader{Reader: file, check: r.Context().Err}); err != nil {
 		return f, fmt.Errorf("failed to read audio file: %w", err)
 	}
 	if len(f.audio) == 0 {
 		return f, errors.New("audio file is empty")
 	}
 	return f, nil
+}
+
+type audioUploadReader struct {
+	io.Reader
+	check func() error
+}
+
+func (r *audioUploadReader) Read(p []byte) (int, error) {
+	if err := r.check(); err != nil {
+		return 0, err
+	}
+	return r.Reader.Read(p[:min(len(p), 64<<10)])
 }
 
 // parseAudioLanguage accepts ISO 639-1 codes and other BCP 47 tags ("pt-BR"),
@@ -233,17 +249,29 @@ type audioClip struct {
 }
 
 func (c audioClip) wav() []byte {
-	if c.data != nil {
-		return c.data
+	data, _ := c.wavContext(context.Background())
+	return data
+}
+
+func (c audioClip) wavContext(ctx context.Context) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return audio.EncodeWAV(c.samples, c.rate)
+	if c.data != nil {
+		return c.data, nil
+	}
+	return audio.EncodeWAVContext(ctx, c.samples, c.rate)
 }
 
 // splitAudio cuts audio longer than limit into clips at quiet points. Audio
 // in containers the server doesn't decode passes through whole for the
 // runner to handle.
 func splitAudio(data []byte, limit time.Duration) ([]audioClip, error) {
-	samples, rate, err := audio.DecodeLimit(data, maxAudioSeconds)
+	return splitAudioContext(context.Background(), data, limit)
+}
+
+func splitAudioContext(ctx context.Context, data []byte, limit time.Duration) ([]audioClip, error) {
+	samples, rate, err := audio.DecodeLimitContext(ctx, data, maxAudioSeconds)
 	if errors.Is(err, audio.ErrUnrecognized) {
 		return []audioClip{{data: data}}, nil
 	}
@@ -255,7 +283,11 @@ func splitAudio(data []byte, limit time.Duration) ([]audioClip, error) {
 		return []audioClip{{data: data, duration: duration(len(samples))}}, nil
 	}
 	var clips []audioClip
-	for _, piece := range audio.Split(samples, rate, int(limit/time.Second)) {
+	pieces, err := audio.SplitContext(ctx, samples, rate, int(limit/time.Second))
+	if err != nil {
+		return nil, err
+	}
+	for _, piece := range pieces {
 		clips = append(clips, audioClip{samples: piece, rate: rate, duration: duration(len(piece))})
 	}
 	return clips, nil
