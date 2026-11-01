@@ -31,8 +31,14 @@ func TestQwen3ASRAudioReference(t *testing.T) {
 		m := &Model{cfg: cfg, raw: raw}
 		mlx.ScopedArrays(func() []*mlx.Array {
 			tensors := map[string]*mlx.Array{}
-			for n, a := range mlx.Load(filepath.Join(source, "model.safetensors")) {
-				tensors[n] = a
+			files, err := filepath.Glob(filepath.Join(source, "*.safetensors"))
+			if err != nil || len(files) == 0 {
+				t.Fatalf("checkpoint shards: %v", err)
+			}
+			for _, file := range files {
+				for n, a := range mlx.Load(file) {
+					tensors[n] = a
+				}
 			}
 			if err := m.LoadWeights(tensors); err != nil {
 				t.Fatal(err)
@@ -91,6 +97,9 @@ func TestQwen3ASRAudioReference(t *testing.T) {
 				for step, want := range generated {
 					got := logits.Argmax(-1, false).AsType(mlx.DTypeInt32).Ints()[0]
 					if got != want {
+						if cfg.Text.HiddenSize == 2048 {
+							t.Fatalf("1.7B exact greedy mismatch at step %d: %d != %d", step, got, want)
+						}
 						found := -1
 						for j, id := range topIDs[step*4 : step*4+4] {
 							if id == got {

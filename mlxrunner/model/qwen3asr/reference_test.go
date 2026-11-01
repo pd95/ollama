@@ -72,8 +72,14 @@ func TestReference(t *testing.T) {
 			t.Fatal("only the F32 original-checkpoint baseline is qualified")
 		}
 		tensors := map[string]*mlx.Array{}
-		for n, a := range mlx.Load(filepath.Join(source, "model.safetensors")) {
-			tensors[n] = a.AsType(dtype)
+		files, err := filepath.Glob(filepath.Join(source, "*.safetensors"))
+		if err != nil || len(files) == 0 {
+			t.Fatalf("checkpoint shards: %v", err)
+		}
+		for _, file := range files {
+			for n, a := range mlx.Load(file) {
+				tensors[n] = a.AsType(dtype)
+			}
 		}
 		m := &Model{cfg: cfg, raw: raw}
 		if imported := os.Getenv("OLLAMA_QWEN3_ASR_IMPORTED"); imported != "" {
@@ -104,8 +110,12 @@ func TestReference(t *testing.T) {
 			}
 			return mlx.Collect(m)
 		})
-		if len(owned) != 612 {
-			t.Fatalf("runner weight collector retained %d arrays, want 612", len(owned))
+		shapes, err := TensorShapes(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(owned) != len(shapes) {
+			t.Fatalf("runner weight collector retained %d arrays, want %d", len(owned), len(shapes))
 		}
 		refs := map[string]*mlx.Array{}
 		for n, a := range mlx.Load(filepath.Join(reference, "reference.safetensors")) {

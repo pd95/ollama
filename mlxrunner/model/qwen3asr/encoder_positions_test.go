@@ -58,3 +58,19 @@ func TestQwen3ASRProviderPositions(t *testing.T) {
 		}
 	}
 }
+
+func TestQwen3ASRProviderPositions1024(t *testing.T) {
+	if len(encoderPositionData1024) != 13*1024*4 {
+		t.Fatal("wrong width1024 table")
+	}
+	digest := sha256.Sum256([]byte(encoderPositionData1024))
+	if hex.EncodeToString(digest[:]) != "a0836c1315afdc06dbe9e397340b012641f6a269171206123bb851d13480856d" {
+		t.Fatal("provider1024 table changed")
+	}
+	// Selection must retain the width1024 provider phases, not a reshaped896
+	// buffer; both original1.7B and ForcedAligner independently produce this hash.
+	values := encoderPositions(13, 1024)
+	if len(values) != 13*1024 || values[0] != 0 || values[512] != 1 {
+		t.Fatal("invalid provider phases")
+	}
+}

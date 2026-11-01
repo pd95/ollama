@@ -17,13 +17,23 @@ import (
 //go:embed positions.f32
 var encoderPositionData string
 
+// Width1024 is constructed independently by the pinned provider for1.7B and
+// ForcedAligner. It must never be substituted with the0.6B width896 table.
+//
+//go:embed positions1024.f32
+var encoderPositionData1024 string
+
 func encoderPositions(steps, width int) []float32 {
-	if width != 896 || steps < 1 || steps > 13 {
+	data := encoderPositionData
+	if width == 1024 {
+		data = encoderPositionData1024
+	}
+	if (width != 896 && width != 1024) || steps < 1 || steps > 13 {
 		panic("unsupported Qwen3-ASR encoder position shape")
 	}
 	pos := make([]float32, steps*width)
 	for i := range pos {
-		pos[i] = math.Float32frombits(binary.LittleEndian.Uint32([]byte(encoderPositionData[4*i : 4*i+4])))
+		pos[i] = math.Float32frombits(binary.LittleEndian.Uint32([]byte(data[4*i : 4*i+4])))
 	}
 	return pos
 }

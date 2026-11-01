@@ -3,6 +3,7 @@ package mlxrunner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/ollama/ollama/llm"
 	"github.com/ollama/ollama/manifest"
 	"github.com/ollama/ollama/ml"
+	"github.com/ollama/ollama/mlxrunner/model"
 )
 
 func TestQwen3ASRLoadMemory(t *testing.T) {
@@ -81,7 +83,29 @@ func TestQwen3ASRImportedLoadMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := c.memory.Load(); got != 5628051456 {
-		t.Fatalf("imported load estimate %d, want 5628051456", got)
+	root, err := model.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := root.Manifest.ReadConfig("config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Thinker struct {
+			Text struct {
+				Width int `json:"hidden_size"`
+			} `json:"text_config"`
+		} `json:"thinker_config"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	want := uint64(5628051456)
+	if cfg.Thinker.Text.Width == 2048 {
+		want = 14095304448
+	}
+	if got := c.memory.Load(); got != want {
+		t.Fatalf("imported load estimate %d, want %d", got, want)
 	}
 }

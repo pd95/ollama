@@ -77,8 +77,12 @@ func TestQwen3ASRReferenceImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(specs) != 612 {
-		t.Fatalf("planned %d tensor blobs, want 612", len(specs))
+	want := 612
+	if len(inv.Tensors) == 708 {
+		want = 708
+	}
+	if len(specs) != want {
+		t.Fatalf("planned %d tensor blobs, want %d", len(specs), want)
 	}
 	for _, spec := range specs {
 		for _, tensor := range spec.Tensors {

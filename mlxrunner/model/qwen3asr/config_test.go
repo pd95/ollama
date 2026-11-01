@@ -41,6 +41,29 @@ func TestAudioTokenLengths(t *testing.T) {
 	}
 }
 
+func TestOriginalConfig17B(t *testing.T) {
+	raw, err := os.ReadFile("testdata/config-1.7b.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes, err := TensorShapes(raw)
+	if err != nil || len(shapes) != 708 || cfg.Audio.Width != 1024 || cfg.Text.HiddenSize != 2048 {
+		t.Fatalf("wrong 1.7B schema: %d, %+v, %v", len(shapes), cfg, err)
+	}
+	if got := shapes["thinker.audio_tower.proj2.weight"]; len(got) != 2 || got[0] != 2048 || got[1] != 1024 {
+		t.Fatalf("wrong projection: %v", got)
+	}
+	// Reject mixed-size configurations rather than admitting arbitrary dimensions.
+	bad := bytes.Replace(raw, []byte(`"d_model": 1024`), []byte(`"d_model": 896`), 1)
+	if _, err := TensorShapes(bad); err == nil {
+		t.Fatal("mixed encoder profile accepted")
+	}
+}
+
 func TestWhisperSilence(t *testing.T) {
 	f, err := extractFeatures(make([]float32, 16000))
 	if err != nil {

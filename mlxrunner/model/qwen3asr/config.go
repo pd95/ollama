@@ -68,12 +68,14 @@ func parseConfig(raw []byte) (*config, error) {
 		return nil, err
 	}
 	a := source.Thinker.Audio
+	small := a.Width == 896 && a.Layers == 18 && a.Heads == 14 && a.FFN == 3584 && a.Output == 1024 && d.HiddenSize == 1024 && d.IntermediateSize == 3072
+	large := a.Width == 1024 && a.Layers == 24 && a.Heads == 16 && a.FFN == 4096 && a.Output == 2048 && d.HiddenSize == 2048 && d.IntermediateSize == 6144
 	if source.Type != "qwen3_asr" || len(source.Architecture) != 1 || source.Architecture[0] != Architecture ||
-		a.Width != 896 || a.Layers != 18 || a.Heads != 14 || a.FFN != 3584 || a.Channels != 480 || a.Output != 1024 || a.Mel != 128 || a.Window != 50 || a.InferWindow != 800 || a.Activation != "gelu" ||
-		d.HiddenSize != 1024 || d.NumHiddenLayers != 28 || d.NumAttentionHeads != 16 || d.NumKeyValueHeads != 8 || d.HeadDim != 128 || d.IntermediateSize != 3072 || d.VocabSize != 151936 ||
+		(!small && !large) || a.Channels != 480 || a.Mel != 128 || a.Window != 50 || a.InferWindow != 800 || a.Activation != "gelu" ||
+		d.NumHiddenLayers != 28 || d.NumAttentionHeads != 16 || d.NumKeyValueHeads != 8 || d.HeadDim != 128 || d.VocabSize != 151936 ||
 		d.RMSNormEps != 1e-6 || d.RopeTheta != 1000000 || d.MaxPositionEmbeddings != 65536 || details.Bias || details.Act != "silu" || details.Rope.Type != "default" ||
 		source.Thinker.Pad != audioPad || source.Thinker.Start != 151669 || source.Thinker.End != 151670 {
-		return nil, fmt.Errorf("Qwen3-ASR currently requires the original 0.6B configuration")
+		return nil, fmt.Errorf("Qwen3-ASR requires an original 0.6B or 1.7B configuration")
 	}
 	// All three provider position axes are identical for this audio/text path.
 	// Interleaving their frequencies therefore reduces to ordinary half-rotation.
