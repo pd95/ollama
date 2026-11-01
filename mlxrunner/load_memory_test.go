@@ -93,6 +93,7 @@ func TestQwen3ASRImportedLoadMemory(t *testing.T) {
 	}
 	var cfg struct {
 		Thinker struct {
+			Type string `json:"model_type"`
 			Text struct {
 				Width int `json:"hidden_size"`
 			} `json:"text_config"`
@@ -104,6 +105,9 @@ func TestQwen3ASRImportedLoadMemory(t *testing.T) {
 	want := uint64(5628051456)
 	if cfg.Thinker.Text.Width == 2048 {
 		want = 14095304448
+	}
+	if cfg.Thinker.Type == "qwen3_forced_aligner" {
+		want = 5506373376
 	}
 	if got := c.memory.Load(); got != want {
 		t.Fatalf("imported load estimate %d, want %d", got, want)

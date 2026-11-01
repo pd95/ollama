@@ -53,7 +53,11 @@ func TensorShapes(raw []byte) (map[string][]int32, error) {
 	}
 	d := cfg.Text
 	add("thinker.model.embed_tokens.weight", d.VocabSize, d.HiddenSize)
-	linear("thinker.lm_head", d.VocabSize, d.HiddenSize, false)
+	classes := d.VocabSize
+	if cfg.Aligner {
+		classes = 5000
+	}
+	linear("thinker.lm_head", classes, d.HiddenSize, false)
 	norm("thinker.model.norm", d.HiddenSize, false)
 	for i := range d.NumHiddenLayers {
 		p := fmt.Sprintf("thinker.model.layers.%d.", i)

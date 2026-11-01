@@ -1,4 +1,32 @@
-# Qwen3-ASR original 0.6B complete-audio baseline
+# Native Qwen3-ASR and ForcedAligner
+
+Original0.6B and1.7B ASR and the distinct0.6B ForcedAligner checkpoint are
+now admitted by strict model-specific configuration/schema profiles. The1.7B
+encoder is24x1024 with output2048; its decoder width is2048. The aligner uses
+the24x1024 encoder with output1024, a width1024/context8192 decoder and a
+5000-class head, timestamp151705 and80ms classes. Both new schemas contain708
+trained tensors; original BF16 bytes are preserved and execution promotes toF32.
+The width1024 provider position buffer is independent of the0.6B width896 buffer.
+
+`Model.AlignContext` performs one supplied-text/audio classification, preserving
+source text and UTF-8 byte spans, raw classes/milliseconds, provider-repaired
+seconds and explicit repair/outside-audio flags. English/German, <=60s, <=64KiB,
+1..1024 normalized units and8192 expanded tokens are bounded. It rejects ordinary
+ASR media preparation. The importer preserves the pinned original aligner wrapper
+Transformers4.57.6 regex patch without changing ASR/TTS tokenization.
+The imported model advertises `alignment,audio`; no public alignment route exists.
+Use the outer stream native Go driver in `tools/align/main.go` for supplied pairs.
+
+Optional `TestForcedAlignerReference` compares all components, exact timestamp
+classes, wrapper prompts/token IDs, normalization, anomaly repair and repeated
+AlignContext/cancellation against independently executed original provider code.
+The outer stream model-extension guide/evidence records source identities,
+per-model gates, exact commands and limits. New BF16 execution, annotated alignment
+accuracy and multilingual segmentation remain unqualified. No TTS/LFM3/allocator
+math or closed live-caption behavior is changed.
+
+## Preserved0.6B baseline
+
 
 Imports the original `Qwen3ASRForConditionalGeneration` BF16 checkpoint without
 changing source bytes. Runtime promotion to F32 is deliberate: the initial
@@ -72,5 +100,5 @@ scheduler leases, admission, cancellation and positive device-drain cleanup;
 endpoint remains separate. The client live-caption commitment experiment is
 closed after actual-radio joining failures; recovery success does not qualify
 reliable word commitment. The outer workspace's ASR closure and model-extension
-handoff record current direction and evidence. Larger ASR and alignment models
-require their own import/execution qualification; this baseline is0.6B only.
+handoff record current direction and evidence. The baseline sections above remain0.6B-specific; the new model profiles and
+independent checks are summarized at the top of this file.

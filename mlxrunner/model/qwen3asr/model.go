@@ -133,6 +133,9 @@ func (m *Model) PrepareMedia(segments []model.Segment) (*model.PreparedRequest, 
 
 // PrepareMediaContext cancels CPU preparation before requests reach the MLX worker.
 func (m *Model) PrepareMediaContext(ctx context.Context, segments []model.Segment) (*model.PreparedRequest, error) {
+	if m.cfg != nil && m.cfg.Aligner {
+		return nil, fmt.Errorf("Qwen3-ForcedAligner requires supplied text and AlignContext, not autoregressive generation")
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

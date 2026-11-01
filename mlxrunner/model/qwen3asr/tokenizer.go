@@ -33,6 +33,9 @@ func LoadTokenizer(config, data, tokenConfig, generation []byte) (*tokenizer.Tok
 			return nil, fmt.Errorf("Qwen3-ASR tokenizer mismatch at %d", id)
 		}
 	}
+	if IsForcedAligner(config) && (tok.Decode([]int32{151705}) != "<timestamp>" || !slices.Equal(tok.Encode("<timestamp>", false), []int32{151705})) {
+		return nil, fmt.Errorf("Qwen3-ForcedAligner requires timestamp token151705")
+	}
 	if len(tok.EOSTokens()) != 2 || !tok.IsEOS(151643) || !tok.IsEOS(151645) {
 		return nil, fmt.Errorf("Qwen3-ASR requires the original two generation EOS tokens")
 	}

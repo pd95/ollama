@@ -1,6 +1,7 @@
 package create
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,42 @@ import (
 
 	"github.com/ollama/ollama/mlxrunner/model/qwen3asr"
 )
+
+// qwen3ASRTokenizer keeps the checkpoint's Qwen2 normalization for ASR. The
+// pinned original ForcedAligner wrapper explicitly passes fix_mistral_regex=True
+// to Transformers4.57.6, which replaces only its first pretokenizer. Preserve
+// that task-specific behavior without changing TTS or checkpoint source bytes.
+func qwen3ASRTokenizer(inv Inventory) (*validatedTokenizerSource, error) {
+	source, err := qwen3TTSTokenizer(inv.Dir)
+	if err != nil || !qwen3asr.IsForcedAligner(inv.RawConfig) {
+		return source, err
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(source.data, &doc); err != nil {
+		return nil, err
+	}
+	var pre struct {
+		Type  string            `json:"type"`
+		Parts []json.RawMessage `json:"pretokenizers"`
+	}
+	if err := json.Unmarshal(doc["pre_tokenizer"], &pre); err != nil {
+		return nil, err
+	}
+	if pre.Type != "Sequence" || len(pre.Parts) != 2 {
+		return nil, fmt.Errorf("invalid aligner pretokenizer sequence")
+	}
+	const pattern = `[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+`
+	pre.Parts[0], err = json.Marshal(map[string]any{"type": "Split", "pattern": map[string]string{"Regex": pattern}, "behavior": "Isolated", "invert": false})
+	if err != nil {
+		return nil, err
+	}
+	doc["pre_tokenizer"], err = json.Marshal(pre)
+	if err != nil {
+		return nil, err
+	}
+	source.data, err = json.Marshal(doc)
+	return source, err
+}
 
 func validateQwen3ASRInventory(inv Inventory) error {
 	if inv.Config.Architecture() != qwen3asr.Architecture {

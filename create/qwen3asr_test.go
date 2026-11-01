@@ -9,6 +9,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/ollama/ollama/mlxrunner/model/qwen3asr"
 	"github.com/ollama/ollama/mlxrunner/tokenizer"
 )
 
@@ -28,10 +29,14 @@ func TestQwen3ASRReferenceImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(cfg.Capabilities, []string{"completion", "audio"}) || cfg.Parser != "" || cfg.Renderer != "qwen3-asr" || cfg.ModelFamily != "qwen3_asr" {
+	wantCaps, wantRenderer, wantFamily := []string{"completion", "audio"}, "qwen3-asr", "qwen3_asr"
+	if qwen3asr.IsForcedAligner(inv.RawConfig) {
+		wantCaps, wantRenderer, wantFamily = []string{"alignment", "audio"}, "", "qwen3_forced_aligner"
+	}
+	if !slices.Equal(cfg.Capabilities, wantCaps) || cfg.Parser != "" || cfg.Renderer != wantRenderer || cfg.ModelFamily != wantFamily {
 		t.Fatalf("ASR import requires its native audio renderer: %+v", cfg)
 	}
-	source, err := qwen3TTSTokenizer(dir)
+	source, err := qwen3ASRTokenizer(inv)
 	if err != nil {
 		t.Fatal(err)
 	}

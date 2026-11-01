@@ -171,7 +171,11 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 		}
 	}
 	if validatedTokenizer == nil && (inv.Config.Architecture() == qwen3TTSArchitecture || inv.Config.Architecture() == "Qwen3ASRForConditionalGeneration") {
-		validatedTokenizer, err = qwen3TTSTokenizer(modelDir)
+		if inv.Config.Architecture() == "Qwen3ASRForConditionalGeneration" {
+			validatedTokenizer, err = qwen3ASRTokenizer(inv)
+		} else {
+			validatedTokenizer, err = qwen3TTSTokenizer(modelDir)
+		}
 		if err != nil {
 			return err
 		}

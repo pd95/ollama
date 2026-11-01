@@ -33,20 +33,25 @@ type audioConfig struct {
 }
 
 type config struct {
-	Audio audioConfig
-	Text  qwen3.Config
+	Audio   audioConfig
+	Text    qwen3.Config
+	Aligner bool
 }
 
 func parseConfig(raw []byte) (*config, error) {
 	var source struct {
 		Architecture []string `json:"architectures"`
 		Type         string   `json:"model_type"`
+		Timestamp    int      `json:"timestamp_token_id"`
+		SegmentTime  int      `json:"timestamp_segment_time"`
 		Thinker      struct {
-			Audio audioConfig     `json:"audio_config"`
-			Text  json.RawMessage `json:"text_config"`
-			Pad   int32           `json:"audio_token_id"`
-			Start int32           `json:"audio_start_token_id"`
-			End   int32           `json:"audio_end_token_id"`
+			Type    string          `json:"model_type"`
+			Classes int             `json:"classify_num"`
+			Audio   audioConfig     `json:"audio_config"`
+			Text    json.RawMessage `json:"text_config"`
+			Pad     int32           `json:"audio_token_id"`
+			Start   int32           `json:"audio_start_token_id"`
+			End     int32           `json:"audio_end_token_id"`
 		} `json:"thinker_config"`
 	}
 	if err := json.Unmarshal(raw, &source); err != nil {
@@ -70,12 +75,15 @@ func parseConfig(raw []byte) (*config, error) {
 	a := source.Thinker.Audio
 	small := a.Width == 896 && a.Layers == 18 && a.Heads == 14 && a.FFN == 3584 && a.Output == 1024 && d.HiddenSize == 1024 && d.IntermediateSize == 3072
 	large := a.Width == 1024 && a.Layers == 24 && a.Heads == 16 && a.FFN == 4096 && a.Output == 2048 && d.HiddenSize == 2048 && d.IntermediateSize == 6144
+	aligner := source.Thinker.Type == "qwen3_forced_aligner" && source.Thinker.Classes == 5000 && source.Timestamp == 151705 && source.SegmentTime == 80 &&
+		a.Width == 1024 && a.Layers == 24 && a.Heads == 16 && a.FFN == 4096 && a.Output == 1024 && d.HiddenSize == 1024 && d.IntermediateSize == 3072 && d.VocabSize == 152064 && d.MaxPositionEmbeddings == 8192
+	asr := (small || large) && source.Thinker.Type == "qwen3_asr" && source.Thinker.Classes == 0 && source.Timestamp == 0 && source.SegmentTime == 0 && d.VocabSize == 151936 && d.MaxPositionEmbeddings == 65536
 	if source.Type != "qwen3_asr" || len(source.Architecture) != 1 || source.Architecture[0] != Architecture ||
-		(!small && !large) || a.Channels != 480 || a.Mel != 128 || a.Window != 50 || a.InferWindow != 800 || a.Activation != "gelu" ||
-		d.NumHiddenLayers != 28 || d.NumAttentionHeads != 16 || d.NumKeyValueHeads != 8 || d.HeadDim != 128 || d.VocabSize != 151936 ||
-		d.RMSNormEps != 1e-6 || d.RopeTheta != 1000000 || d.MaxPositionEmbeddings != 65536 || details.Bias || details.Act != "silu" || details.Rope.Type != "default" ||
+		(!asr && !aligner) || a.Channels != 480 || a.Mel != 128 || a.Window != 50 || a.InferWindow != 800 || a.Activation != "gelu" ||
+		d.NumHiddenLayers != 28 || d.NumAttentionHeads != 16 || d.NumKeyValueHeads != 8 || d.HeadDim != 128 ||
+		d.RMSNormEps != 1e-6 || d.RopeTheta != 1000000 || details.Bias || details.Act != "silu" || details.Rope.Type != "default" ||
 		source.Thinker.Pad != audioPad || source.Thinker.Start != 151669 || source.Thinker.End != 151670 {
-		return nil, fmt.Errorf("Qwen3-ASR requires an original 0.6B or 1.7B configuration")
+		return nil, fmt.Errorf("Qwen3-ASR requires an original 0.6B, 1.7B or ForcedAligner configuration")
 	}
 	// All three provider position axes are identical for this audio/text path.
 	// Interleaving their frequencies therefore reduces to ordinary half-rotation.
@@ -84,7 +92,14 @@ func parseConfig(raw []byte) (*config, error) {
 	// The thinker has a separate trained output head, regardless of the nested
 	// text-model tie_word_embeddings metadata (that text model has no LM head).
 	d.TieWordEmbeddings = false
-	return &config{Audio: a, Text: d}, nil
+	return &config{Audio: a, Text: d, Aligner: aligner}, nil
+}
+
+// IsForcedAligner identifies the distinct classification task only after full
+// configuration validation. The provider uses the same top-level architecture.
+func IsForcedAligner(raw []byte) bool {
+	cfg, err := parseConfig(raw)
+	return err == nil && cfg.Aligner
 }
 
 func audioTokens(frames int) int {

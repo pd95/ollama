@@ -29,6 +29,12 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 	var decisionModel, decisionVision bool
 	switch cfg.Architecture() {
 	case "Qwen3ASRForConditionalGeneration":
+		if cfg.ThinkerConfig.ModelType == "qwen3_forced_aligner" {
+			if parserOverride != "" || rendererOverride != "" {
+				return model.ConfigV2{}, fmt.Errorf("Qwen3-ForcedAligner uses native alignment, without a chat parser or renderer")
+			}
+			break
+		}
 		if parserOverride != "" || (rendererOverride != "" && rendererOverride != "qwen3-asr") {
 			return model.ConfigV2{}, fmt.Errorf("Qwen3-ASR requires its qwen3-asr renderer and no chat parser")
 		}
@@ -100,7 +106,11 @@ func inferSafetensorsConfig(modelDir string, cfg sourceModelConfig, parserOverri
 
 	var capabilities []string
 	if cfg.Architecture() == "Qwen3ASRForConditionalGeneration" {
-		capabilities = []string{"completion", "audio"}
+		if cfg.ThinkerConfig.ModelType == "qwen3_forced_aligner" {
+			capabilities = []string{"alignment", "audio"}
+		} else {
+			capabilities = []string{"completion", "audio"}
+		}
 	} else if decisionModel {
 		capabilities = []string{"decision"}
 		if decisionVision {
@@ -157,6 +167,9 @@ func modelFamilies(family string) []string {
 
 func inferModelFamilyFromConfig(cfg sourceModelConfig) string {
 	if cfg.Architecture() == "Qwen3ASRForConditionalGeneration" {
+		if cfg.ThinkerConfig.ModelType == "qwen3_forced_aligner" {
+			return "qwen3_forced_aligner"
+		}
 		return "qwen3_asr"
 	}
 	for _, id := range sourceConfigIdentifiers(cfg) {
