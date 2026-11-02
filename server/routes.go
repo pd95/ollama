@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -108,6 +109,8 @@ var useClient2 = experimentEnabled("client2")
 var mode string = gin.DebugMode
 
 type Server struct {
+	timestampOnce sync.Once
+	timestamps    *timestampQueue
 	asrSessions   *asrSessionManager
 	addr          net.Addr
 	sched         *Scheduler
@@ -2562,6 +2565,7 @@ func Serve(ln net.Listener) error {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-signals
+		s.timestampQueue().shutdown()
 		s.closeASRSessions()
 		srvr.Close()
 		schedDone()

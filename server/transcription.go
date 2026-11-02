@@ -63,7 +63,16 @@ func (s *Server) audioTextHandler(c *gin.Context, task renderers.AudioTask) {
 	}
 	form, err := parseAudioTextForm(c.Request, task)
 	if err != nil {
-		openAIError(c, http.StatusBadRequest, err.Error())
+		openAIError(c, audioTextErrorStatus(err, http.StatusBadRequest), err.Error())
+		return
+	}
+	defer form.removeTimestampUpload()
+	if form.wordTimestamps {
+		// The timestamp copy is file-backed. Release multipart's in-memory file
+		// buffers before this request can wait in the feature queue.
+		_ = c.Request.MultipartForm.RemoveAll()
+		c.Request.MultipartForm = nil
+		s.timestampTranscription(c, form)
 		return
 	}
 
@@ -150,12 +159,16 @@ func (s *Server) audioTextHandler(c *gin.Context, task renderers.AudioTask) {
 }
 
 type audioTextForm struct {
-	model          string
-	audio          []byte
-	request        renderers.AudioRequest
-	responseFormat string
-	temperature    float64
-	stream         bool
+	model             string
+	audio             []byte
+	request           renderers.AudioRequest
+	responseFormat    string
+	temperature       float64
+	stream            bool
+	wordTimestamps    bool
+	segmentTimestamps bool
+	alignmentModel    string
+	timestampUpload   string
 }
 
 func parseAudioTextForm(r *http.Request, task renderers.AudioTask) (audioTextForm, error) {
@@ -195,12 +208,22 @@ func parseAudioTextForm(r *http.Request, task renderers.AudioTask) (audioTextFor
 	case to != "":
 		return f, errors.New("to_language is only supported for translations")
 	}
+	if err := f.parseTimestampOptions(r, task); err != nil {
+		return f, err
+	}
 
-	file, _, err := r.FormFile("file")
+	file, header, err := r.FormFile("file")
 	if err != nil {
 		return f, fmt.Errorf("file is required: %w", err)
 	}
 	defer file.Close()
+	if f.wordTimestamps {
+		if header.Size > maxTimestampUploadBytes {
+			return f, timestampUploadTooLarge()
+		}
+		f.timestampUpload, err = spoolTimestampUpload(r.Context(), file)
+		return f, err
+	}
 	if f.audio, err = io.ReadAll(&audioUploadReader{Reader: file, check: r.Context().Err}); err != nil {
 		return f, fmt.Errorf("failed to read audio file: %w", err)
 	}
