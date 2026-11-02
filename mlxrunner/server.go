@@ -91,6 +91,11 @@ func Execute(args []string) error {
 	)
 
 	mux := http.NewServeMux()
+	closeAudioTasks, err := runner.installAudioTaskRoutes(runnerCtx, mux)
+	if err != nil {
+		return err
+	}
+	defer closeAudioTasks()
 	closeReplay, err := runner.installASRReplayRoutes(runnerCtx, mux)
 	if err != nil {
 		return err

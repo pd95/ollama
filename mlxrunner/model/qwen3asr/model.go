@@ -118,6 +118,7 @@ func intDims(shape []int32) []int {
 	return out
 }
 func (m *Model) Tokenizer() *tokenizer.Tokenizer { return m.tok }
+func (m *Model) IsForcedAligner() bool           { return m.cfg != nil && m.cfg.Aligner }
 func (m *Model) MaxContextLength() int           { return int(m.cfg.Text.MaxPositionEmbeddings) }
 
 // RetainRequestCache keeps complete-audio generations independent. KV state
