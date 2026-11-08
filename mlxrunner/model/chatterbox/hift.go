@@ -146,9 +146,8 @@ func (h *hiFT) excitation(f0, phase, noise *mlx.Array) *mlx.Array {
 
 func (h *hiFT) sourceSTFT(source *mlx.Array) (*mlx.Array, *mlx.Array) {
 	x := mlx.Squeeze(source, 1)
-	if !h.turbo {
-		x = mlx.Pad(x, []int{1}, []int{8}, []int{8}, mlx.FromValue(float32(0)), "reflect")
-	}
+	// The original HiFT uses centered reflection padding for both variants.
+	x = mlx.Pad(x, []int{1}, []int{8}, []int{8}, mlx.FromValue(float32(0)), "reflect")
 	count := 1 + (x.Dim(1)-16)/4
 	indices := make([]int32, count*16)
 	for i := range count {
@@ -175,19 +174,10 @@ func (h *hiFT) stage(x, source *mlx.Array, index int) *mlx.Array {
 	x = mlx.ConvTranspose1d(x, c.weight, c.bias, c.stride, c.padding, 1, 0, 1)
 	x = mlx.Transpose(x, 0, 2, 1)
 	if index == 2 {
-		if h.turbo {
-			x = mlx.PadConstant(x, []int{2}, []int{1}, []int{0})
-		} else {
-			x = mlx.Concatenate([]*mlx.Array{x.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(1, 2)), x}, 2)
-		}
+		x = mlx.Concatenate([]*mlx.Array{x.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(1, 2)), x}, 2)
 	}
 	part := mlx.Transpose(h.sourceDown[index].forward(mlx.Transpose(source, 0, 2, 1)), 0, 2, 1)
 	part = h.sourceBlocks[index].forward(part)
-	if h.turbo {
-		length := min(x.Dim(2), part.Dim(2))
-		x = x.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(0, length))
-		part = part.Slice(mlx.Slice(), mlx.Slice(), mlx.Slice(0, length))
-	}
 	x = mlx.Add(x, part)
 	outputs := make([]*mlx.Array, 3)
 	for i, b := range h.blocks[index] {
