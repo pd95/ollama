@@ -127,13 +127,19 @@ func loadSpeaker(cfg speakerConfig, tensors map[string]*mlx.Array) (*speakerEnco
 		return nil, w.err
 	}
 	s.melBank = speakerMelBank()
-	window := make([]float32, 1024)
-	for i := range window {
-		window[i] = float32(.5 * (1 - math.Cos(2*math.Pi*float64(i)/1023)))
-	}
+	window := speakerHannWindow()
 	s.window = mlx.FromValues(window, 1024)
 	s.derived = append(derived, s.melBank, s.window)
 	return s, nil
+}
+
+// The original speaker frontend uses torch.hann_window's periodic default.
+func speakerHannWindow() []float32 {
+	window := make([]float32, 1024)
+	for i := range window {
+		window[i] = float32(.5 * (1 - math.Cos(2*math.Pi*float64(i)/1024)))
+	}
+	return window
 }
 
 // Match the float32 Slaney construction used by the reference DSP module.
