@@ -52,7 +52,10 @@ func (w *weights) layerNorm(name string, eps float32) *nn.LayerNorm {
 }
 
 var gelu = mlx.Compile1("KokoroGELU", func(x *mlx.Array) *mlx.Array {
-	return mlx.Div(mlx.Mul(x, mlx.Add(mlx.FromValue(float32(1)), mlx.Erf(mlx.Div(x, mlx.FromValue(float32(math.Sqrt2)))))), mlx.FromValue(float32(2)))
+	// Original ALBERT hidden_act is gelu_new (the tanh approximation).
+	cubic := mlx.Mul(mlx.Mul(x, x), x)
+	inner := mlx.Mul(mlx.FromValue(float32(math.Sqrt(2/math.Pi))), mlx.Add(x, mlx.Mul(mlx.FromValue(float32(.044715)), cubic)))
+	return mlx.Mul(mlx.Mul(mlx.FromValue(float32(.5)), x), mlx.Add(mlx.FromValue(float32(1)), inner.Tanh()))
 }, mlx.Shapeless())
 
 func leaky(x *mlx.Array, slope float32) *mlx.Array {
