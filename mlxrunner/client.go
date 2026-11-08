@@ -37,6 +37,7 @@ import (
 type Client struct {
 	port                int
 	modelName           string
+	architecture        string
 	contextLength       atomic.Int64
 	softContextLength   int // recommended limit to avoid poor performance
 	memory              atomic.Uint64
@@ -69,6 +70,15 @@ func NewClient(modelName string, softContextLength int) (*Client, error) {
 	modelManifest, err := manifest.ParseNamedManifest(model.ParseName(modelName))
 	if err != nil {
 		return nil, err
+	}
+	var config struct {
+		Architectures []string `json:"architectures"`
+	}
+	if err := modelManifest.ReadConfigJSON("config.json", &config); err != nil {
+		return nil, fmt.Errorf("read MLX model architecture: %w", err)
+	}
+	if len(config.Architectures) > 0 {
+		c.architecture = config.Architectures[0]
 	}
 	var tensorBytes int64
 	for _, layer := range modelManifest.TensorLayers() {
@@ -452,6 +462,9 @@ func (c *Client) Load(ctx context.Context, systemInfo ml.SystemInfo, gpus []ml.D
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Env = os.Environ()
+	if configureSpeechFloat32(cmd, c.architecture) {
+		slog.Info("using full float32 matmuls for MLX speech runner", "architecture", c.architecture)
+	}
 	loadedLibraryPath, err := mlx.LoadedLibraryPath()
 	if err != nil {
 		return nil, fmt.Errorf("unable to determine loaded MLX library path: %w", err)
