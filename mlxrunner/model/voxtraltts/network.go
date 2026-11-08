@@ -141,6 +141,16 @@ func repeatHeads(x *mlx.Array, repeat int) *mlx.Array {
 	return mlx.Reshape(mlx.BroadcastTo(mlx.ExpandDims(x, 2), int32(x.Dim(0)), int32(x.Dim(1)), int32(repeat), int32(x.Dim(2)), int32(x.Dim(3))), int32(x.Dim(0)), int32(x.Dim(1)*repeat), int32(x.Dim(2)), int32(x.Dim(3)))
 }
 
+// codecALiBiSlopes follows the original Voxtral codec's geometric sequence.
+// The supported eight-head codec starts at one, before successive halvings.
+func codecALiBiSlopes(heads int) []float32 {
+	slopes := make([]float32, heads)
+	for head := range slopes {
+		slopes[head] = float32(math.Exp2(-float64(head)))
+	}
+	return slopes
+}
+
 func (t *transformer) attention(l layer, x *mlx.Array, cache *kv, window int) *mlx.Array {
 	b, length := int32(x.Dim(0)), int32(x.Dim(1))
 	d := t.dims
@@ -177,10 +187,7 @@ func (t *transformer) attention(l layer, x *mlx.Array, cache *kv, window int) *m
 		if t.kind == "codec" {
 			positions := mlx.Arange(0, float64(length), 1, mlx.DTypeInt32)
 			distance := mlx.Sub(mlx.ExpandDims(positions, 0), mlx.ExpandDims(positions, 1))
-			slopes := make([]float32, d.Heads)
-			for h := range slopes {
-				slopes[h] = float32(math.Pow(.5, float64(h+1)))
-			}
+			slopes := codecALiBiSlopes(d.Heads)
 			alibi := mlx.Mul(mlx.FromValues(slopes, d.Heads, 1, 1), mlx.ExpandDims(distance.AsType(mlx.DTypeFloat32), 0))
 			causal := mlx.Where(distance.Greater(mlx.FromValue(0)), mlx.FromValue(float32(-1e9)), mlx.FromValue(float32(0)))
 			if window > 0 {
