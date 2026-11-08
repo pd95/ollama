@@ -98,6 +98,8 @@ func TestAudio(t *testing.T) {
 		"audio-transcription",
 		"audio-response",
 		"openai-audio-transcription",
+		"openai-audio-translation",
+		"openai-audio-timestamps",
 		"openai-chat-audio",
 	)
 }
