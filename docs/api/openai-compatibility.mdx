@@ -396,12 +396,16 @@ Transcribes speech with models that accept audio input.
   - [ ] `srt`, `vtt`
 - [x] `temperature` (default `0`)
 - [x] `stream` (server-sent `transcript.text.delta` and `transcript.text.done` events)
-- [ ] `timestamp_granularities`
+- [x] `timestamp_granularities[]` (`segment`, or experimental `word` timestamps with native Qwen3-ASR and ForcedAligner; requires `verbose_json` and non-streaming output)
 
 #### Notes
 
 - Audio longer than the model takes at once (30 seconds for current models) is split at pauses and transcribed piece by piece. Streaming sends each piece as it finishes.
 - Each model gets the transcription instructions its publisher documents.
+
+For experimental word timestamps, configure `OLLAMA_ALIGNMENT_MODEL` on the server
+or pass the Ollama extension `alignment_model` in the request. Word mode accepts
+complete English/German WAVs up to 60 seconds.
 
 ### `/v1/audio/translations`
 

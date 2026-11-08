@@ -1,0 +1,226 @@
+//go:build integration
+
+package integration
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/mlxrunner/model/audio"
+	"github.com/ollama/ollama/openai"
+)
+
+func init() {
+	registerIntegrationCases(integrationTestCase("openai-audio-timestamps", "", runOpenAIAudioTimestamps))
+}
+
+func requireInstalledAudioPair(ctx context.Context, client *api.Client, asr, aligner string) error {
+	if strings.TrimSpace(asr) == "" {
+		return fmt.Errorf("OLLAMA_TEST_MODEL must select an installed ASR model")
+	}
+	for _, item := range []struct{ name, capability string }{{asr, "completion"}, {aligner, "alignment"}} {
+		shown, err := client.Show(ctx, &api.ShowRequest{Name: item.name})
+		if err != nil {
+			return fmt.Errorf("selected model %s must already be installed: %w", item.name, err)
+		}
+		audio, task := false, false
+		for _, cap := range shown.Capabilities {
+			audio = audio || string(cap) == "audio"
+			task = task || string(cap) == item.capability
+		}
+		if !audio || !task {
+			return fmt.Errorf("model %s needs audio and %s capabilities", item.name, item.capability)
+		}
+	}
+	return nil
+}
+
+func runOpenAIAudioTimestamps(t *testing.T) {
+	aligner := strings.TrimSpace(os.Getenv("OLLAMA_TEST_ALIGNMENT_MODEL"))
+	if aligner == "" {
+		t.Skip("set OLLAMA_TEST_MODEL and OLLAMA_TEST_ALIGNMENT_MODEL to installed models")
+	}
+	if strings.TrimSpace(testModel) == "" {
+		t.Fatal("OLLAMA_TEST_MODEL must select an installed ASR model")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	client, endpoint, cleanup := InitServerConnection(ctx, t)
+	defer cleanup()
+	if err := requireInstalledAudioPair(ctx, client, testModel, aligner); err != nil {
+		t.Fatal(err)
+	}
+	clip := decodeTestAudio(t)
+	baseline := postAudio(ctx, t, endpoint, "transcriptions", map[string]string{"model": testModel, "language": "en", "temperature": "0"}, clip)
+	requireWords(t, strings.ToLower(baseline.Text), "sky", "blue")
+	for _, tc := range []struct {
+		name          string
+		granularities []string
+		language      string
+		silence       bool
+	}{
+		{"words", []string{"word"}, "en", false},
+		{"words and segments", []string{"word", "segment"}, "en", false},
+		{"segments", []string{"segment"}, "en", false},
+		{"automatic", []string{"word"}, "", false},
+		{"silence", []string{"word"}, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := url.Values{"model": {testModel}, "temperature": {"0"}, "response_format": {"verbose_json"}, "timestamp_granularities[]": tc.granularities}
+			wantsWords, wantsSegments := false, false
+			for _, g := range tc.granularities {
+				wantsWords = wantsWords || g == "word"
+				wantsSegments = wantsSegments || g == "segment"
+			}
+			if wantsWords {
+				fields.Set("alignment_model", aligner)
+			}
+			if tc.language != "" {
+				fields.Set("language", tc.language)
+			}
+			wav := clip
+			if tc.silence {
+				// Match the existing one-second native API silence control.
+				wav = audio.EncodeWAV(make([]float32, 16000), 16000)
+			}
+			raw := postAudioFields(ctx, t, endpoint, "transcriptions", fields, wav)
+			var members map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &members); err != nil {
+				t.Fatal(err)
+			}
+			var result openai.TranscriptionTimestampResponse
+			if err := json.Unmarshal(raw, &result); err != nil {
+				t.Fatal(err)
+			}
+			_, hasWords := members["words"]
+			_, hasSegments := members["segments"]
+			if hasWords != wantsWords || hasSegments != wantsSegments {
+				t.Fatalf("unexpected response members: %s", raw)
+			}
+			if tc.silence {
+				if result.Text != "" || result.Words == nil || len(result.Words) != 0 {
+					t.Fatalf("expected empty transcription and word array: %s", raw)
+				}
+			} else {
+				if result.Text != baseline.Text {
+					t.Fatalf("timestamp request changed text: %q versus %q", result.Text, baseline.Text)
+				}
+				if wantsWords && len(result.Words) == 0 {
+					t.Fatal("speech has no word entries")
+				}
+			}
+			if wantsWords {
+				if err := validAudioWordIntervals(result.Words, result.Duration); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if wantsSegments && (result.Segments == nil || len(*result.Segments) == 0) {
+				t.Fatal("missing segments")
+			}
+		})
+	}
+}
+
+func validAudioWordIntervals(words []openai.TranscriptionWord, duration float64) error {
+	if math.IsNaN(duration) || math.IsInf(duration, 0) || duration <= 0 {
+		return fmt.Errorf("invalid recording duration")
+	}
+	previous := 0.0
+	for _, w := range words {
+		if strings.TrimSpace(w.Word) == "" || math.IsNaN(w.Start) || math.IsNaN(w.End) || math.IsInf(w.Start, 0) || math.IsInf(w.End, 0) || w.Start < previous || w.End < w.Start || w.End > duration {
+			return fmt.Errorf("invalid word interval: %+v", w)
+		}
+		previous = w.End
+	}
+	return nil
+}
+
+func TestAudioTimestampHelpers(t *testing.T) {
+	t.Run("repeated fields and raw members", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Error(err)
+				w.WriteHeader(400)
+				return
+			}
+			defer r.MultipartForm.RemoveAll()
+			values := r.MultipartForm.Value["timestamp_granularities[]"]
+			if len(values) != 2 || values[0] != "word" || values[1] != "segment" {
+				t.Errorf("lost repeated granularities: %v", values)
+			}
+			_, _ = w.Write([]byte(`{"words":[],"segments":[]}`))
+		}))
+		defer server.Close()
+		raw := postAudioFields(t.Context(), t, strings.TrimPrefix(server.URL, "http://"), "transcriptions", url.Values{"timestamp_granularities[]": {"word", "segment"}}, []byte("fixture"))
+		if string(raw) != `{"words":[],"segments":[]}` {
+			t.Fatal("raw response changed")
+		}
+	})
+	t.Run("missing selected model never pulls", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			if r.URL.Path != "/api/show" {
+				t.Errorf("unexpected request %s", r.URL.Path)
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"missing"}`))
+		}))
+		defer server.Close()
+		endpoint, _ := url.Parse(server.URL)
+		client := api.NewClient(endpoint, http.DefaultClient)
+		if requireInstalledAudioPair(t.Context(), client, "asr", "aligner") == nil || calls.Load() != 1 {
+			t.Fatal("missing model must fail after Show only")
+		}
+		if requireInstalledAudioPair(t.Context(), client, "", "aligner") == nil || calls.Load() != 1 {
+			t.Fatal("missing ASR selection must fail before requests")
+		}
+	})
+	t.Run("intervals", func(t *testing.T) {
+		if err := validAudioWordIntervals([]openai.TranscriptionWord{{Word: "a", Start: 0, End: 0}, {Word: "b", Start: .1, End: .5}}, 1); err != nil {
+			t.Fatal(err)
+		}
+		for _, words := range [][]openai.TranscriptionWord{
+			{{Word: "a", Start: .2, End: .1}}, {{Word: "a", Start: 0, End: 2}}, {{Word: "a", Start: 0, End: math.NaN()}}, {{Word: "", Start: 0, End: .1}}, {{Word: "a", Start: 0, End: .5}, {Word: "b", Start: .4, End: .6}},
+		} {
+			if validAudioWordIntervals(words, 1) == nil {
+				t.Fatalf("invalid intervals accepted: %+v", words)
+			}
+		}
+	})
+	t.Run("missing aligner and incompatible capabilities", func(t *testing.T) {
+		for _, missing := range []bool{true, false} {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.URL.Path != "/api/show" {
+					t.Errorf("unexpected request %s", r.URL.Path)
+				}
+				if calls.Load() == 2 && missing {
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte(`{"error":"missing"}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"capabilities":["completion","audio"]}`))
+			}))
+			endpoint, _ := url.Parse(server.URL)
+			client := api.NewClient(endpoint, http.DefaultClient)
+			err := requireInstalledAudioPair(t.Context(), client, "asr", "aligner")
+			server.Close()
+			if err == nil || calls.Load() != 2 {
+				t.Fatalf("invalid aligner must fail after Show only: %v, %d requests", err, calls.Load())
+			}
+		}
+	})
+}
