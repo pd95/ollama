@@ -2,7 +2,6 @@ package kokoro
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/ollama/ollama/mlx"
 	"github.com/ollama/ollama/mlxrunner/model"
@@ -60,11 +59,15 @@ type waveformGenerator struct {
 }
 
 func periodicHann() *mlx.Array {
-	values := make([]float32, 20)
-	for i := range values {
-		values[i] = float32(.5 * (1 - math.Cos(2*math.Pi*float64(i)/20)))
-	}
-	return mlx.FromValues(values, 20)
+	// Original torch.hann_window(20), CPU float32. Preserve its coefficients
+	// exactly: float64 cosine followed by a cast changes learned phase inputs.
+	return mlx.FromValues([]float32{
+		0, .024471759796142578, .09549152851104736, .20610737800598145,
+		.34549152851104736, .5, .6545085310935974, .7938926219940186,
+		.9045085310935974, .9755282998085022, 1, .9755282402038574,
+		.9045084714889526, .793892502784729, .6545085906982422, .5,
+		.3454914391040802, .2061072587966919, .09549140930175781, .024471759796142578,
+	}, 20)
 }
 
 func loadGenerator(w *weights) waveformGenerator {
@@ -100,7 +103,16 @@ func sourceSpectrum(excitation, window *mlx.Array) (*mlx.Array, *mlx.Array) {
 	frames := 1 + (x.Dim(0)-20)/5
 	framed := x.AsStrided([]int{frames, 20}, []int{5, 1}, 0)
 	transformed := mlx.RFFT(mlx.Mul(framed, window), 20, -1)
-	return transformed.Abs(), mlx.Atan2(mlx.Imag(transformed), mlx.Real(transformed))
+	// Real-input FFT endpoints are real. The original backend supplies +0
+	// imaginary parts there; GPU signed zeros otherwise choose -pi instead
+	// of +pi at negative real endpoints, altering the learned phase input.
+	imag := mlx.Imag(transformed)
+	imag = mlx.Concatenate([]*mlx.Array{
+		mlx.Zeros(mlx.DTypeFloat32, frames, 1),
+		imag.Slice(mlx.Slice(), mlx.Slice(1, 10)),
+		mlx.Zeros(mlx.DTypeFloat32, frames, 1),
+	}, 1)
+	return transformed.Abs(), mlx.Atan2(imag, mlx.Real(transformed))
 }
 
 // inverseSpectrum receives the generator's sin-bounded phase. Its adjacent
