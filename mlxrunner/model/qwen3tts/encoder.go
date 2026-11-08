@@ -138,9 +138,8 @@ var encoderELU = mlx.Compile1("QwenSpeechEncoderELU", func(x *mlx.Array) *mlx.Ar
 }, mlx.Shapeless())
 
 var encoderGELU = mlx.Compile1("QwenSpeechEncoderGELU", func(x *mlx.Array) *mlx.Array {
-	x3 := x.Power(mlx.FromValue(3))
-	inner := mlx.Mul(mlx.FromValue(float32(math.Sqrt(2/math.Pi))), mlx.Add(x, mlx.Mul(mlx.FromValue(float32(.044715)), x3)))
-	return mlx.Mul(mlx.Mul(mlx.FromValue(float32(.5)), x), mlx.Add(mlx.FromValue(float32(1)), inner.Tanh()))
+	// Original Mimi encoder config selects erf GELU, without tanh approximation.
+	return mlx.Div(mlx.Mul(x, mlx.Add(mlx.FromValue(float32(1)), mlx.Erf(mlx.Div(x, mlx.FromValue(float32(math.Sqrt2)))))), mlx.FromValue(float32(2)))
 }, mlx.Shapeless())
 
 func (e *speechEncoder) seanet(x *mlx.Array) *mlx.Array {
