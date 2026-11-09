@@ -34,6 +34,7 @@ type Archive struct {
 	storages     map[string]*storage
 	viewBytes    int64
 	exportValues int
+	tensorBytes  int64
 	Root         any
 	Tensors      map[string]*Tensor
 }
@@ -172,11 +173,14 @@ func readMember(member *zip.File) ([]byte, error) {
 
 func (a *Archive) export(value any, name string, active map[*dictionary]bool, depth int) (any, error) {
 	a.exportValues++
-	if depth > 32 || len(name) > 1024 || len(a.Tensors) >= maxMembers || a.exportValues > maxValues {
+	if depth > 32 || len(name) > 1024 || a.exportValues > maxValues {
 		return nil, fmt.Errorf("PyTorch tensor tree exceeds bounds")
 	}
 	switch value := value.(type) {
 	case *Tensor:
+		if len(a.Tensors) >= maxMembers || value.Size > maxArchiveBytes-a.tensorBytes {
+			return nil, fmt.Errorf("PyTorch logical tensor inventory exceeds bounds")
+		}
 		if name == "" {
 			name = "tensor"
 		}
@@ -184,6 +188,7 @@ func (a *Archive) export(value any, name string, active map[*dictionary]bool, de
 			return nil, fmt.Errorf("PyTorch tensor namespace collision: %s", name)
 		}
 		a.Tensors[name] = value
+		a.tensorBytes += value.Size
 		return value, nil
 	case *dictionary:
 		if active[value] {

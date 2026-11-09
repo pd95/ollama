@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -254,6 +255,26 @@ func TestTensorExtentBounds(t *testing.T) {
 		if _, err := a.newTensor(s, tc.offset, tc.shape, tc.stride); err == nil {
 			t.Errorf("invalid extent accepted: %+v", tc)
 		}
+	}
+}
+
+func TestLogicalTensorInventoryBounds(t *testing.T) {
+	// Shared storage must not multiply into an unbounded logical output.
+	large := &Tensor{Size: maxArchiveBytes / 2}
+	a := &Archive{Tensors: make(map[string]*Tensor)}
+	root := &dictionary{items: map[string]any{"a": large, "b": large, "c": large}}
+	if _, err := a.export(root, "", make(map[*dictionary]bool), 0); err == nil || !strings.Contains(err.Error(), "logical tensor") {
+		t.Fatalf("aliased logical expansion accepted: %v", err)
+	}
+	// Exactly the tensor-count limit remains valid regardless of where an
+	// optional null field occurs in dictionary iteration order.
+	root = &dictionary{items: map[string]any{"unused": nil}}
+	for i := range maxMembers {
+		root.items[fmt.Sprint(i)] = &Tensor{Size: 4}
+	}
+	a = &Archive{Tensors: make(map[string]*Tensor)}
+	if _, err := a.export(root, "", make(map[*dictionary]bool), 0); err != nil || len(a.Tensors) != maxMembers {
+		t.Fatalf("exact tensor-count boundary: %d, %v", len(a.Tensors), err)
 	}
 }
 
