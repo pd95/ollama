@@ -407,6 +407,71 @@ For experimental word timestamps, configure `OLLAMA_ALIGNMENT_MODEL` on the serv
 or pass the Ollama extension `alignment_model` in the request. Word mode accepts
 complete English/German WAVs up to 60 seconds.
 
+#### Native Qwen3-ASR and word timestamps
+
+This fork imports the original `Qwen/Qwen3-ASR-0.6B`, `Qwen/Qwen3-ASR-1.7B` and
+`Qwen/Qwen3-ForcedAligner-0.6B` checkpoints in an MLX-enabled build on Apple
+Silicon. Original BF16 weights remain unchanged on disk; native execution
+promotes them to F32. The ASR models transcribe audio; ForcedAligner supplies
+timestamps for text and is not a replacement transcription model.
+
+Create persistent Modelfiles pointing at each downloaded original snapshot,
+using the same local-directory import pattern as
+[speech models](/capabilities/speech#original-mlx-checkpoints):
+
+```shell
+ollama create --experimental qwen3-asr:0.6b -f ./Modelfile.qwen3-asr-0.6b
+ollama create --experimental qwen3-asr:1.7b -f ./Modelfile.qwen3-asr-1.7b
+ollama create --experimental qwen3-forced-aligner:0.6b -f ./Modelfile.qwen3-forced-aligner-0.6b
+```
+
+Each Modelfile contains `FROM <original-snapshot-directory>` for its respective
+repository. No Python conversion or temporary prepared directory is required.
+These are original floating-point imports, not newly qualified quantizations.
+
+Native ASR is qualified for English/German complete WAVs, with automatic
+language detection when `language` is omitted. It supports up to 60 seconds
+per generation; longer ordinary uploads use the existing clip segmentation,
+whose cross-boundary recognition quality is not qualified. It does not support
+the translation endpoint. `prompt` supplies the ASR system context; `stream=true`
+sends completed clip text after upload and inference, not live incoming audio.
+
+Word timestamps use the standard
+[OpenAI timestamp parameter and word shape](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create).
+An installed native ForcedAligner is additionally required. Set
+`OLLAMA_ALIGNMENT_MODEL=qwen3-forced-aligner:0.6b` when starting the server, or
+use `alignment_model` as an optional Ollama request extension:
+
+```shell
+curl http://localhost:11434/v1/audio/transcriptions \
+  -F model=qwen3-asr:1.7b \
+  -F file=@recording.wav \
+  -F language=de \
+  -F response_format=verbose_json \
+  -F 'timestamp_granularities[]=word' \
+  -F alignment_model=qwen3-forced-aligner:0.6b
+```
+
+Word mode requires one complete WAV, at most 60 seconds and 32 MiB, with
+`response_format=verbose_json` and `stream=false` (the default). It does not
+segment longer files. Repeat `timestamp_granularities[]` with `segment` to
+include both word and coarse clip segments. The server does not download or
+discover an aligner automatically; `alignment_model` without word mode is
+rejected.
+
+The `words` entries contain `word`, `start` and `end`; times are seconds from
+the recording's start. Words use the provider's normalized text, which can omit
+punctuation and combining marks. The full ASR `text` is retained. Invalid or
+out-of-recording alignment fails the request; the server does not substitute
+an untimed success. Provider agreement does not establish human-annotated
+recognition or alignment accuracy.
+
+`/api/experimental/audio/sessions` is a separate custom, default-disabled
+protocol, enabled only by `OLLAMA_EXPERIMENT=asr-streaming`. It is not an OpenAI
+Realtime endpoint. The closed live-caption commitment experiment does not
+establish reliable continuous word commitment; ordinary transcription and
+complete-file timestamps remain separate.
+
 ### `/v1/audio/translations`
 
 > Note: Added in Ollama v0.40.12

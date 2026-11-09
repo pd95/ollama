@@ -18,7 +18,11 @@ English or German, clips of up to 60 seconds, text of up to 64 KiB, 1–1,024
 normalized units and at most 8,192 expanded tokens. It rejects ordinary ASR
 media preparation. The importer preserves the pinned aligner wrapper's
 Transformers 4.57.6 regex patch without changing ASR/TTS tokenization. The
-imported model advertises `alignment,audio`; no public alignment route exists.
+imported model advertises `alignment,audio`. There is no standalone public
+supplied-text alignment route. The existing `/v1/audio/transcriptions` endpoint
+can use this model after ASR to return complete-file word timestamps; see
+`docs/api/openai-compatibility.mdx` for its standard timestamp fields and optional
+Ollama `alignment_model` extension.
 Use the outer stream native Go driver in `tools/align/main.go` for supplied
 pairs.
 
