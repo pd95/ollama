@@ -27,30 +27,64 @@ var originalTurboConfig []byte
 //go:embed chatterbox_turbo_original_shapes.json.gz
 var originalTurboShapes []byte
 
+//go:embed chatterbox_v3_original_config.json
+var originalV3Config []byte
+
+//go:embed chatterbox_v3_original_shapes.json.gz
+var originalV3Shapes []byte
+
 var (
 	originalTurboWeightFiles = []string{"t3_turbo_v1.safetensors", "ve.safetensors", "s3gen_meanflow.safetensors", "conds.pt"}
 	originalTurboConfigFiles = []string{"tokenizer_config.json", "vocab.json", "merges.txt"}
+	originalV3WeightFiles    = []string{"t3_mtl23ls_v3.safetensors", "ve.safetensors", "s3gen_v3.safetensors"}
+	originalV3ConfigFiles    = []string{"grapheme_mtl_merged_expanded_v1.json", "Cangjie5_TC.json"}
 )
+
+type originalChatterboxVariant struct {
+	turbo           bool
+	weights, assets []string
+	config, shapes  []byte
+}
 
 func originalTurboSource(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, "t3_turbo_v1.safetensors"))
 	return err == nil
 }
 
-func validateOriginalTurboFiles(dir string) error {
-	if _, err := os.Stat(filepath.Join(dir, "config.json")); !os.IsNotExist(err) {
-		return fmt.Errorf("original Turbo files must not be mixed with a native config.json")
+func originalV3Source(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "t3_mtl23ls_v3.safetensors"))
+	return err == nil
+}
+
+func originalChatterboxSource(dir string) bool {
+	return originalTurboSource(dir) || originalV3Source(dir)
+}
+
+func originalChatterboxVariantForDir(dir string) (*originalChatterboxVariant, error) {
+	turbo, v3 := originalTurboSource(dir), originalV3Source(dir)
+	if !turbo && !v3 {
+		return nil, nil
 	}
-	for _, name := range append(slices.Clone(originalTurboWeightFiles), originalTurboConfigFiles...) {
+	if turbo && v3 {
+		return nil, fmt.Errorf("ambiguous original Chatterbox v3/Turbo directory")
+	}
+	v := &originalChatterboxVariant{weights: originalV3WeightFiles, assets: originalV3ConfigFiles, config: originalV3Config, shapes: originalV3Shapes}
+	if turbo {
+		v = &originalChatterboxVariant{turbo: true, weights: originalTurboWeightFiles, assets: originalTurboConfigFiles, config: originalTurboConfig, shapes: originalTurboShapes}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.json")); !os.IsNotExist(err) {
+		return nil, fmt.Errorf("original Chatterbox files must not be mixed with a native config.json")
+	}
+	for _, name := range append(slices.Clone(v.weights), v.assets...) {
 		info, err := os.Stat(filepath.Join(dir, name))
 		if err != nil || !info.Mode().IsRegular() {
-			return fmt.Errorf("original Turbo requires regular file %s", name)
+			return nil, fmt.Errorf("original Chatterbox requires regular file %s", name)
 		}
 		if info.Size() <= 0 || info.Size() > 6<<30 || (filepath.Ext(name) != ".safetensors" && info.Size() > 64<<20) {
-			return fmt.Errorf("original Turbo file %s exceeds supported size", name)
+			return nil, fmt.Errorf("original Chatterbox file %s exceeds supported size", name)
 		}
 	}
-	return nil
+	return v, nil
 }
 
 type originalChatterboxTensor struct {
@@ -76,18 +110,19 @@ func (t originalChatterboxTensor) size() int64 {
 // The returned cleanup is always safe to call, including on failure.
 func normalizeOriginalChatterbox(ctx context.Context, dir string) (string, func(), error) {
 	noop := func() {}
-	if !originalTurboSource(dir) {
-		return dir, noop, nil
-	}
-	if err := validateOriginalTurboFiles(dir); err != nil {
+	variant, err := originalChatterboxVariantForDir(dir)
+	if err != nil {
 		return "", noop, err
+	}
+	if variant == nil {
+		return dir, noop, nil
 	}
 	if err := checkContext(ctx); err != nil {
 		return "", noop, err
 	}
 	sources := newSourceFiles(ctx, dir)
 	defer sources.close()
-	groups, err := planOriginalTurbo(ctx, sources)
+	groups, err := planOriginalChatterbox(ctx, sources, *variant)
 	if err != nil {
 		return "", noop, err
 	}
@@ -97,25 +132,28 @@ func normalizeOriginalChatterbox(ctx context.Context, dir string) (string, func(
 	}
 	cleanup := func() { _ = os.RemoveAll(stage) }
 	fail := func(err error) (string, func(), error) { cleanup(); return "", noop, err }
-	for _, sub := range []string{"reference_encoder", "s3_tokenizer"} {
-		if err := os.Mkdir(filepath.Join(stage, sub), 0o700); err != nil {
+	for file, tensors := range groups {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(stage, file)), 0o700); err != nil {
 			return fail(err)
 		}
-	}
-	for file, tensors := range groups {
 		if err := writeOriginalChatterboxFile(ctx, filepath.Join(stage, file), tensors); err != nil {
-			return fail(fmt.Errorf("normalize original Turbo %s: %w", file, err))
+			return fail(fmt.Errorf("normalize original Chatterbox %s: %w", file, err))
 		}
 	}
 	configs := map[string][]byte{
-		"config.json":                   originalTurboConfig,
-		"reference_encoder/config.json": []byte(`{"model_type":"chatterbox_campplus","version":"1.0","sample_rate":16000,"mel_bins":80,"embedding_dim":192}`),
-		"s3_tokenizer/config.json":      []byte(`{"model_type":"s3_tokenizer_v2","version":"2.0","sample_rate":16000,"token_rate":25,"codebook_size":6561}`),
+		"config.json":              variant.config,
+		"s3_tokenizer/config.json": []byte(`{"model_type":"s3_tokenizer_v2","version":"2.0","sample_rate":16000,"token_rate":25,"codebook_size":6561}`),
 	}
-	for _, name := range originalTurboConfigFiles {
+	if variant.turbo {
+		configs["reference_encoder/config.json"] = []byte(`{"model_type":"chatterbox_campplus","version":"1.0","sample_rate":16000,"mel_bins":80,"embedding_dim":192}`)
+	}
+	for _, name := range variant.assets {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			return fail(err)
+		}
+		if name == "grapheme_mtl_merged_expanded_v1.json" {
+			name = "tokenizer.json"
 		}
 		configs[name] = data
 	}
@@ -127,8 +165,8 @@ func normalizeOriginalChatterbox(ctx context.Context, dir string) (string, func(
 	return stage, cleanup, nil
 }
 
-func planOriginalTurbo(ctx context.Context, sources *sourceFiles) (map[string][]originalChatterboxTensor, error) {
-	r, err := gzip.NewReader(bytes.NewReader(originalTurboShapes))
+func planOriginalChatterbox(ctx context.Context, sources *sourceFiles, variant originalChatterboxVariant) (map[string][]originalChatterboxTensor, error) {
+	r, err := gzip.NewReader(bytes.NewReader(variant.shapes))
 	if err != nil {
 		return nil, err
 	}
@@ -142,20 +180,20 @@ func planOriginalTurbo(ctx context.Context, sources *sourceFiles) (map[string][]
 	add := func(group string, item originalChatterboxTensor) error {
 		shape, ok := expected[group][item.name]
 		if !ok || !slices.Equal(shape, item.shape) || seen[group][item.name] {
-			return fmt.Errorf("unsupported original Turbo %s tensor %s shape %v", group, item.name, item.shape)
+			return fmt.Errorf("unsupported original Chatterbox %s tensor %s shape %v", group, item.name, item.shape)
 		}
 		seen[group][item.name] = true
 		groups[group] = append(groups[group], item)
 		return nil
 	}
-	for _, file := range originalTurboWeightFiles[:3] {
+	for _, file := range variant.weights[:3] {
 		reader, err := sources.extractor(file)
 		if err != nil {
 			return nil, err
 		}
 		names := reader.ListTensors()
 		if len(names) == 0 || len(names) > 4096 {
-			return nil, fmt.Errorf("unsupported original Turbo tensor count in %s", file)
+			return nil, fmt.Errorf("unsupported original Chatterbox tensor count in %s", file)
 		}
 		for _, name := range names {
 			if err := checkContext(ctx); err != nil {
@@ -167,7 +205,7 @@ func planOriginalTurbo(ctx context.Context, sources *sourceFiles) (map[string][]
 			}
 			if strings.HasSuffix(name, ".num_batches_tracked") {
 				if tensor.Dtype != "I64" || len(tensor.Shape) != 0 {
-					return nil, fmt.Errorf("invalid original Turbo training counter %s", name)
+					return nil, fmt.Errorf("invalid original Chatterbox training counter %s", name)
 				}
 				continue
 			}
@@ -177,7 +215,7 @@ func planOriginalTurbo(ctx context.Context, sources *sourceFiles) (map[string][]
 			group, local := "main", name
 			component := "s3gen"
 			switch file {
-			case "t3_turbo_v1.safetensors":
+			case variant.weights[0]:
 				component = "t3"
 			case "ve.safetensors":
 				component = "ve"
@@ -215,7 +253,7 @@ func planOriginalTurbo(ctx context.Context, sources *sourceFiles) (map[string][]
 				local = strings.TrimSuffix(local, ".parametrizations.weight.original0") + ".weight"
 			}
 			if err != nil {
-				return nil, fmt.Errorf("incomplete original Turbo parameter pair %s: %w", name, err)
+				return nil, fmt.Errorf("incomplete original Chatterbox parameter pair %s: %w", name, err)
 			}
 			if err := validateOriginalChatterboxFloat(item.source); err != nil {
 				return nil, err
@@ -252,7 +290,11 @@ func planOriginalTurbo(ctx context.Context, sources *sourceFiles) (map[string][]
 					layout.Name = "mel_filters"
 				}
 			default:
-				layout, err = originalTurboTensorLayout(component, local, len(item.source.Shape))
+				if variant.turbo {
+					layout, err = originalTurboTensorLayout(component, local, len(item.source.Shape))
+				} else {
+					layout, err = originalV3TensorLayout(component, local, len(item.source.Shape))
+				}
 				if err != nil {
 					return nil, err
 				}
@@ -266,15 +308,20 @@ func planOriginalTurbo(ctx context.Context, sources *sourceFiles) (map[string][]
 			}
 		}
 	}
-	for _, tensor := range originalTurboTables() {
-		if err := add("main", tensor); err != nil {
-			return nil, err
+	if variant.turbo {
+		for _, tensor := range originalTurboTables() {
+			if err := add("main", tensor); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for group := range expected {
 		if len(seen[group]) != len(expected[group]) {
-			return nil, fmt.Errorf("incomplete original Turbo %s inventory: got %d of %d", group, len(seen[group]), len(expected[group]))
+			return nil, fmt.Errorf("incomplete original Chatterbox %s inventory: got %d of %d", group, len(seen[group]), len(expected[group]))
 		}
+	}
+	if !variant.turbo {
+		return map[string][]originalChatterboxTensor{"model.safetensors": append(groups["main"], groups["camp"]...), "s3_tokenizer/model.safetensors": groups["s3"]}, nil
 	}
 	conditions, err := originalTurboConditions(ctx, sources)
 	if err != nil {

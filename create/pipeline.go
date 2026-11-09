@@ -67,8 +67,8 @@ func Create(ctx context.Context, modelName, modelDir string, opts PipelineOption
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
-	if originalTurboSource(modelDir) && opts.Quantize != "" {
-		return fmt.Errorf("original Turbo requires source F32 precision")
+	if originalChatterboxSource(modelDir) && opts.Quantize != "" {
+		return fmt.Errorf("original Chatterbox requires source F32 precision")
 	}
 	modelDir, cleanupSource, err := normalizeOriginalChatterbox(ctx, modelDir)
 	if err != nil {

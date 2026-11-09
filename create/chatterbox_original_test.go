@@ -104,7 +104,7 @@ func TestOriginalTurboSourceRouting(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if IsSafetensorsModelDir(dir) || validateOriginalTurboFiles(dir) == nil {
+	if _, err := originalChatterboxVariantForDir(dir); IsSafetensorsModelDir(dir) || err == nil {
 		t.Fatal("accepted ambiguous original/native layout")
 	}
 }

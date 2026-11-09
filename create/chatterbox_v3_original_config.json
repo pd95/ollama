@@ -1,0 +1,26 @@
+{
+  "model_type": "chatterbox",
+  "version": "1.0",
+  "t3_model": "v3",
+  "multilingual": true,
+  "vocab_size": 2454,
+  "text_preprocessing": "NFKD,fullcase",
+  "t3_config": {
+    "text_tokens_dict_size": 2454,
+    "start_text_token": 255,
+    "stop_text_token": 0,
+    "max_text_tokens": 2048,
+    "speech_tokens_dict_size": 8194,
+    "start_speech_token": 6561,
+    "stop_speech_token": 6562,
+    "max_speech_tokens": 4096,
+    "llama_config_name": "Llama_520M",
+    "input_pos_emb": "learned",
+    "speech_cond_prompt_len": 150,
+    "encoder_type": "voice_encoder",
+    "speaker_embed_size": 256,
+    "use_perceiver_resampler": true,
+    "emotion_adv": true
+  },
+  "vocoder_profile": "provider-v3"
+}
