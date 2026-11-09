@@ -1,6 +1,7 @@
 package architectures
 
 import (
+	_ "github.com/ollama/ollama/mlxrunner/model/chatterbox"
 	_ "github.com/ollama/ollama/mlxrunner/model/clef"
 	_ "github.com/ollama/ollama/mlxrunner/model/cohere2_moe"
 	_ "github.com/ollama/ollama/mlxrunner/model/d1"
@@ -21,11 +22,14 @@ import (
 
 	_ "github.com/ollama/ollama/mlxrunner/model/gptoss"
 
+	_ "github.com/ollama/ollama/mlxrunner/model/kokoro"
 	_ "github.com/ollama/ollama/mlxrunner/model/nemotron_h"
 	_ "github.com/ollama/ollama/mlxrunner/model/phonon"
 	_ "github.com/ollama/ollama/mlxrunner/model/qwen3"
 	_ "github.com/ollama/ollama/mlxrunner/model/qwen3_5"
 	_ "github.com/ollama/ollama/mlxrunner/model/qwen3_5_moe"
+	_ "github.com/ollama/ollama/mlxrunner/model/qwen3tts"
 	_ "github.com/ollama/ollama/mlxrunner/model/qwen4_exp"
 	_ "github.com/ollama/ollama/mlxrunner/model/strands"
+	_ "github.com/ollama/ollama/mlxrunner/model/voxtraltts"
 )

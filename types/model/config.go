@@ -24,9 +24,13 @@ type ConfigV2 struct {
 	EmbedLen     int      `json:"embedding_length,omitempty"`
 	// Voices names the speech voices a model takes that are not stored as
 	// voice tensors.
-	Voices   []string `json:"voices,omitempty"`
-	BaseName string   `json:"base_name,omitempty"`
-	Draft    *Draft   `json:"draft,omitempty"`
+	Voices []string `json:"voices,omitempty"`
+	// Languages and VoiceLanguages describe supported speech languages and
+	// their preset associations. Absence means unspecified, not English-only.
+	Languages      []string            `json:"languages,omitempty"`
+	VoiceLanguages map[string][]string `json:"voice_languages,omitempty"`
+	BaseName       string              `json:"base_name,omitempty"`
+	Draft          *Draft              `json:"draft,omitempty"`
 }
 
 // AddCapabilities preserves inherited and inferred capabilities.

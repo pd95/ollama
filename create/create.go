@@ -53,12 +53,28 @@ func IsSafetensorsLLMModel(modelName string) bool {
 
 // IsSafetensorsModelDir checks for a supported model config and safetensors weights.
 func IsSafetensorsModelDir(dir string) bool {
+	if originalChatterboxSource(dir) {
+		_, err := originalChatterboxVariantForDir(dir)
+		return err == nil
+	}
 	if _, err := os.Stat(filepath.Join(dir, "config.json")); err != nil {
 		if !os.IsNotExist(err) {
 			return false
 		}
 		if _, err := os.Stat(filepath.Join(dir, "rl_agent_config.json")); err != nil {
-			return false
+			if !officialVoxtralLayout(dir) {
+				return false
+			}
+			if _, _, err := readOfficialVoxtralConfig(dir); err != nil {
+				return false
+			}
+		}
+	}
+
+	// Original Kokoro has a narrowly validated config and a .pth state dict.
+	if info, err := os.Stat(filepath.Join(dir, "kokoro-v1_0.pth")); err == nil && info.Mode().IsRegular() {
+		if cfg, _, err := readSourceModelConfig(dir); err == nil && cfg.Architecture() == kokoroArchitecture {
+			return true
 		}
 	}
 
@@ -389,6 +405,27 @@ func readSourceModelConfig(modelDir string) (sourceModelConfig, json.RawMessage,
 	configPath := filepath.Join(modelDir, "config.json")
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
+		if originalChatterboxSource(modelDir) {
+			variant, err := originalChatterboxVariantForDir(modelDir)
+			if err != nil {
+				return sourceModelConfig{}, nil, err
+			}
+			var data []byte
+			if variant.turbo {
+				data, err = normalizeChatterboxTurboConfig(variant.config)
+			} else {
+				data, err = normalizeChatterboxConfig(variant.config)
+			}
+			if err != nil {
+				return sourceModelConfig{}, nil, err
+			}
+			var cfg sourceModelConfig
+			err = json.Unmarshal(data, &cfg)
+			return cfg, data, err
+		}
+		if officialVoxtralLayout(modelDir) {
+			return readOfficialVoxtralConfig(modelDir)
+		}
 		return readLayaConfig(modelDir)
 	}
 	if err != nil {
@@ -400,6 +437,46 @@ func readSourceModelConfig(modelDir string) (sourceModelConfig, json.RawMessage,
 		return sourceModelConfig{}, nil, fmt.Errorf("parse %s: %w", configPath, err)
 	}
 
+	if cfg.Architecture() == "chatterbox_turbo" || cfg.Architecture() == chatterboxTurboArchitecture {
+		data, err = normalizeChatterboxTurboConfig(data)
+		if err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+	}
+	if cfg.Architecture() == "chatterbox" || cfg.Architecture() == chatterboxArchitecture {
+		data, err = normalizeChatterboxConfig(data)
+		if err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+	}
+	if cfg.Architecture() == "voxtral_tts" || cfg.Architecture() == voxtralTTSArchitecture {
+		normalized, err := normalizeVoxtralTTSConfig(data)
+		if err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+		data = normalized
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+	}
+	if cfg.Architecture() == "" || cfg.Architecture() == "kokoro" || cfg.Architecture() == kokoroArchitecture {
+		normalized, recognized, err := normalizeKokoroConfig(data)
+		if err != nil {
+			return sourceModelConfig{}, nil, err
+		}
+		if recognized {
+			data = normalized
+			if err := json.Unmarshal(data, &cfg); err != nil {
+				return sourceModelConfig{}, nil, err
+			}
+		}
+	}
 	return cfg, data, nil
 }
 
@@ -515,6 +592,11 @@ func (cfg sourceModelConfig) HFFP8WeightBlockSize() (rows, cols int32, ok bool) 
 type tensorImportTransformFactory func(rawConfig json.RawMessage) (quantizePolicy, error)
 
 var tensorImportTransformRegistry = map[string]tensorImportTransformFactory{
+	qwen3TTSArchitecture:                    newQwen3TTSImportTransform,
+	chatterboxArchitecture:                  newChatterboxImportTransform,
+	chatterboxTurboArchitecture:             newChatterboxTurboImportTransform,
+	voxtralTTSArchitecture:                  newVoxtralTTSImportTransform,
+	kokoroArchitecture:                      newKokoroImportTransform,
 	"Qwen3_5Model":                          newPplxImportTransform,
 	"KevForDecision":                        newQwen35DecisionImportTransform,
 	"StrandsDeciderForDecision":             newQwen35DecisionImportTransform,

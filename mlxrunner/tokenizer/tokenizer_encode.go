@@ -202,7 +202,9 @@ func (t *Tokenizer) encodeChunkInto(s string, ids []int32) []int32 {
 	// SentencePiece: replace space with ▁
 	// BPE: convert bytes using precomputed table (GPT-2 byte-level encoding)
 	var encoded string
-	if t.typ == TokenizerSentencePiece {
+	if t.typ == TokenizerUnicodeBPE {
+		encoded = s
+	} else if t.typ == TokenizerSentencePiece {
 		encoded = strings.ReplaceAll(s, " ", "▁")
 	} else {
 		var sb strings.Builder

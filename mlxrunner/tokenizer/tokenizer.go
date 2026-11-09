@@ -13,6 +13,7 @@ type TokenizerType int
 const (
 	TokenizerBPE           TokenizerType = iota // GPT-2 style byte-level BPE
 	TokenizerSentencePiece                      // SentencePiece with ▁ for spaces
+	TokenizerUnicodeBPE                         // Character BPE with a Whitespace pretokenizer
 )
 
 // Vocabulary holds the tokenizer vocabulary and merges
@@ -39,9 +40,11 @@ type Tokenizer struct {
 	specialTokenMatcher    addedTokenMatcher
 	normalizedTokenMatcher addedTokenMatcher
 	typ                    TokenizerType // Algorithm type
+	unknownToken           int32         // Unicode BPE's optional unknown token; -1 means discard.
 	normalizeNFC           bool
 	normalizeSpaces        bool
 	ignoreMerges           bool
+	mergeByTokenRank       bool // Tekken ranks byte strings, rather than declared pairs.
 	metaspace              *metaspace
 }
 

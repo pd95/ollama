@@ -1,0 +1,148 @@
+{
+  "reference": "Hugging Face tokenizers 0.23.3 Whitespace; captured in the pinned MLX-Audio reference environment",
+  "cases": [
+    {
+      "input": "Hello.",
+      "pieces": [
+        "Hello",
+        "."
+      ]
+    },
+    {
+      "input": "Guten Tag.",
+      "pieces": [
+        "Guten",
+        "Tag",
+        "."
+      ]
+    },
+    {
+      "input": "Grüße aus Köln!",
+      "pieces": [
+        "Grüße",
+        "aus",
+        "Köln",
+        "!"
+      ]
+    },
+    {
+      "input": "Café vs Café",
+      "pieces": [
+        "Café",
+        "vs",
+        "Café"
+      ]
+    },
+    {
+      "input": "I can't... really!",
+      "pieces": [
+        "I",
+        "can",
+        "'",
+        "t",
+        "...",
+        "really",
+        "!"
+      ]
+    },
+    {
+      "input": "First: second; third — fourth",
+      "pieces": [
+        "First",
+        ":",
+        "second",
+        ";",
+        "third",
+        "—",
+        "fourth"
+      ]
+    },
+    {
+      "input": "“Quoted” and ‘apostrophe’",
+      "pieces": [
+        "“",
+        "Quoted",
+        "”",
+        "and",
+        "‘",
+        "apostrophe",
+        "’"
+      ]
+    },
+    {
+      "input": "Pay $12.50 for 42 apples.",
+      "pieces": [
+        "Pay",
+        "$",
+        "12",
+        ".",
+        "50",
+        "for",
+        "42",
+        "apples",
+        "."
+      ]
+    },
+    {
+      "input": "Emoji 👋🏽 hello",
+      "pieces": [
+        "Emoji",
+        "👋🏽",
+        "hello"
+      ]
+    },
+    {
+      "input": "HTTPServer42_XML",
+      "pieces": [
+        "HTTPServer42_XML"
+      ]
+    },
+    {
+      "input": "A BC",
+      "pieces": [
+        "A",
+        "B",
+        "C"
+      ]
+    },
+    {
+      "input": "x²y Ⅷ",
+      "pieces": [
+        "x",
+        "²",
+        "y",
+        "Ⅷ"
+      ]
+    },
+    {
+      "input": "देवनागरी हिन्दी",
+      "pieces": [
+        "देवनागरी",
+        "हिन्दी"
+      ]
+    },
+    {
+      "input": "a‌b‍c",
+      "pieces": [
+        "a‌b‍c"
+      ]
+    },
+    {
+      "input": "aͅ",
+      "pieces": [
+        "aͅ"
+      ]
+    },
+    {
+      "input": "[START] is literal text",
+      "pieces": [
+        "[",
+        "START",
+        "]",
+        "is",
+        "literal",
+        "text"
+      ]
+    }
+  ]
+}

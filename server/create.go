@@ -788,7 +788,9 @@ func detectModelTypeFromFiles(files map[string]string) (string, error) {
 }
 
 func detectModelTypeFromFile(filePath, digest string) (string, error) {
-	if strings.HasSuffix(filePath, ".safetensors") {
+	// The shared import pipeline validates the original Kokoro config and
+	// bounded tensor archive; other PyTorch checkpoints keep existing routing.
+	if strings.HasSuffix(filePath, ".safetensors") || filePath == "kokoro-v1_0.pth" {
 		return "safetensors", nil
 	}
 	if strings.HasSuffix(filePath, ".gguf") {

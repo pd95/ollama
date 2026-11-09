@@ -51,7 +51,7 @@ func (ManifestBlobStore) WriteBlob(r io.Reader, mediaType, name string) (LayerIn
 // WriteBlobs executes a plan's blobs: for each blob it resolves the tensors'
 // sources, produces the blob bytes, and stores the result.
 func WriteBlobs(ctx context.Context, specs []BlobSpec, modelDir string, store BlobStore) ([]LayerInfo, error) {
-	src := newSourceFiles(modelDir)
+	src := newSourceFiles(ctx, modelDir)
 	defer src.close()
 
 	layers := make([]LayerInfo, 0, len(specs))
@@ -187,15 +187,17 @@ func blobNeedsMLX(spec BlobSpec) bool {
 	return false
 }
 
-// sourceFiles opens and caches the source safetensors files so each shard is
+// sourceFiles opens and caches supported source tensor files so each shard is
 // opened once across all the blobs that read from it.
 type sourceFiles struct {
-	dir   string
-	cache map[string]*safetensors.TensorExtractor
+	cache    map[string]tensorSource
+	openFile func(string) (tensorSource, error)
 }
 
-func newSourceFiles(dir string) *sourceFiles {
-	return &sourceFiles{dir: dir, cache: make(map[string]*safetensors.TensorExtractor)}
+func newSourceFiles(ctx context.Context, dir string) *sourceFiles {
+	return &sourceFiles{cache: make(map[string]tensorSource), openFile: func(file string) (tensorSource, error) {
+		return openTensorSource(ctx, filepath.Join(dir, file))
+	}}
 }
 
 func (s *sourceFiles) resolve(sources []SourceTensor) ([]*safetensors.TensorData, error) {
@@ -214,11 +216,11 @@ func (s *sourceFiles) resolve(sources []SourceTensor) ([]*safetensors.TensorData
 	return out, nil
 }
 
-func (s *sourceFiles) extractor(file string) (*safetensors.TensorExtractor, error) {
+func (s *sourceFiles) extractor(file string) (tensorSource, error) {
 	if ext, ok := s.cache[file]; ok {
 		return ext, nil
 	}
-	ext, err := safetensors.OpenForExtraction(filepath.Join(s.dir, file))
+	ext, err := s.openFile(file)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", file, err)
 	}

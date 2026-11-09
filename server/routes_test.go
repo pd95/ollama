@@ -1375,6 +1375,7 @@ func TestGetModelInfo_ManifestVoices(t *testing.T) {
 	config.Name = "config.json"
 	createSafetensorsTestModel(t, "show-manifest-voices", model.ConfigV2{
 		ModelFormat: "safetensors", Capabilities: []string{"completion", "speech"}, Voices: []string{"default", "male-french"},
+		Languages: []string{"en", "fr"}, VoiceLanguages: map[string][]string{"default": {"en"}, "male-french": {"fr"}},
 	}, []manifest.Layer{config})
 
 	resp, err := GetModelInfo(api.ShowRequest{Model: "show-manifest-voices"})
@@ -1383,6 +1384,9 @@ func TestGetModelInfo_ManifestVoices(t *testing.T) {
 	}
 	if !slices.Equal(resp.Voices, []string{"default", "male-french"}) {
 		t.Fatalf("voices %v, want default and male-french", resp.Voices)
+	}
+	if !slices.Equal(resp.Languages, []string{"en", "fr"}) || !slices.Equal(resp.VoiceLanguages["male-french"], []string{"fr"}) {
+		t.Fatalf("speech language metadata lost: %+v", resp)
 	}
 }
 

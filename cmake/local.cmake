@@ -639,6 +639,19 @@ endfunction()
 
 find_program(GO_EXECUTABLE go)
 
+# Speech ports and embedded dictionaries are not external Go modules. Stage
+# their notices explicitly so CLI, app and runtime archives carry attribution.
+add_custom_target(ollama-speech-notices
+    COMMAND ${CMAKE_COMMAND}
+        "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        "-DOUTPUT_DIR=${OLLAMA_PAYLOAD_INSTALL_PREFIX}/${OLLAMA_LIB_DIR}"
+        -P "${CMAKE_SOURCE_DIR}/cmake/generate_speech_notices.cmake"
+    BYPRODUCTS
+        "${OLLAMA_PAYLOAD_INSTALL_PREFIX}/${OLLAMA_LIB_DIR}/SPEECH_LICENSE"
+        "${OLLAMA_PAYLOAD_INSTALL_PREFIX}/${OLLAMA_LIB_DIR}/SPEECH_NOTICE"
+    COMMENT "Collecting native speech attribution"
+    VERBATIM)
+
 if(GO_EXECUTABLE)
     if(NOT DEFINED OLLAMA_GO_LICENSE_TARGETS)
         execute_process(
@@ -729,6 +742,7 @@ if(OLLAMA_HAVE_LLAMA_SERVER)
             COMMENT "Building Ollama Go binary"
             VERBATIM)
     endif()
+    add_dependencies(ollama-go ollama-speech-notices)
 
     set(_cpu_args)
     if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -19,17 +20,56 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ollama/ollama/envconfig"
+	"github.com/ollama/ollama/llm"
+	"github.com/ollama/ollama/mlxrunner/model/audio"
 	"github.com/ollama/ollama/readline"
 )
 
+type speechOptions struct {
+	Instructions   string
+	Language       string
+	Seed           *uint64
+	Speed          *float64
+	ReferenceAudio *llm.ReferenceAudio
+	ReferenceText  string
+}
+
+// readSpeechReference bounds the client-side file read and sends bytes rather
+// than a filename that might identify an unrelated file on the server.
+func readSpeechReference(path string) (*llm.ReferenceAudio, error) {
+	if path == "" {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, llm.MaxSpeechRequestBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if err := audio.ValidateReferenceWAV(data); err != nil {
+		return nil, err
+	}
+	return &llm.ReferenceAudio{Format: "wav", Data: data}, nil
+}
+
 // runSpeech reads text aloud: piped input as it arrives followed by any
 // text arguments, the text arguments alone, or each line typed at the prompt.
-func runSpeech(ctx context.Context, model, voice, text string, input io.Reader, interactive bool) error {
+func runSpeech(ctx context.Context, model, voice, text string, input io.Reader, interactive bool, options ...speechOptions) error {
 	if input != nil {
-		return speak(ctx, model, voice, io.MultiReader(input, strings.NewReader(" "+text)))
+		buffered := bufio.NewReader(input)
+		if _, err := buffered.Peek(1); err == nil {
+			return speak(ctx, model, voice, io.MultiReader(buffered, strings.NewReader(" "+text)), options...)
+		} else if !errors.Is(err, io.EOF) {
+			return err
+		}
+		// Empty redirected stdin supplies no incremental text. In particular,
+		// headless callers using /dev/null still have a complete text argument.
 	}
 	if text != "" || !interactive {
-		return speak(ctx, model, voice, strings.NewReader(text))
+		return speakInput(ctx, model, voice, nil, text, options...)
 	}
 	if _, err := player(model, ""); err != nil {
 		return err
@@ -72,7 +112,7 @@ func runSpeech(ctx context.Context, model, voice, text string, input io.Reader, 
 		}
 		// Ctrl+C stops speaking and returns to the prompt.
 		speakCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
-		if err := speak(speakCtx, model, voice, strings.NewReader(text)); err != nil && speakCtx.Err() == nil {
+		if err := speakInput(speakCtx, model, voice, nil, text, options...); err != nil && speakCtx.Err() == nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
 		stop()
@@ -83,7 +123,13 @@ func runSpeech(ctx context.Context, model, voice, text string, input io.Reader, 
 // model piped into a speech model is heard while it is still writing. When
 // stdout is not a terminal it writes one WAV instead, for example
 // `ollama run model "text" > speech.wav` on a machine without speakers.
-func speak(ctx context.Context, model, voice string, r io.Reader) error {
+func speak(ctx context.Context, model, voice string, r io.Reader, options ...speechOptions) error {
+	return speakInput(ctx, model, voice, r, "", options...)
+}
+
+// A nil reader denotes complete command/interactive text. It must not acquire
+// extra request boundaries from the incremental-input latency policy.
+func speakInput(ctx context.Context, model, voice string, r io.Reader, text string, options ...speechOptions) error {
 	toTerminal := term.IsTerminal(int(os.Stdout.Fd()))
 	if toTerminal {
 		if _, err := player(model, ""); err != nil {
@@ -101,8 +147,12 @@ func speak(ctx context.Context, model, voice string, r io.Reader) error {
 	audio := make(chan result, 1)
 	go func() {
 		defer close(audio)
-		for piece := range speechPieces(ctx, r) {
-			wav, err := synthesize(ctx, model, voice, piece)
+		pieces := completeSpeechPieces(ctx, text)
+		if r != nil {
+			pieces = speechPieces(ctx, r)
+		}
+		for piece := range pieces {
+			wav, err := synthesize(ctx, model, voice, piece, options...)
 			select {
 			case audio <- result{wav, err}:
 			case <-ctx.Done():
@@ -141,6 +191,29 @@ func speak(ctx context.Context, model, voice string, r io.Reader) error {
 	setWAVSizes(out)
 	_, err := os.Stdout.Write(out)
 	return err
+}
+
+func completeSpeechPieces(ctx context.Context, text string) <-chan string {
+	pieces := make(chan string)
+	go func() {
+		defer close(pieces)
+		text = strings.TrimSpace(text)
+		chunks := []string{text}
+		if utf8.RuneCountInString(text) > maxSpeechInput {
+			chunks = speechChunks(text, maxSpeechInput)
+		}
+		for _, chunk := range chunks {
+			if chunk == "" {
+				continue
+			}
+			select {
+			case pieces <- chunk:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return pieces
 }
 
 // minSpeechPiece is how much text speechPieces gathers before it sends a
@@ -235,8 +308,29 @@ func lastSentenceEnd(s string) int {
 	return -1
 }
 
-func synthesize(ctx context.Context, model, voice, text string) ([]byte, error) {
-	body, err := json.Marshal(map[string]string{"model": model, "voice": voice, "input": text, "response_format": "wav"})
+func synthesize(ctx context.Context, model, voice, text string, options ...speechOptions) ([]byte, error) {
+	values := map[string]any{"model": model, "voice": voice, "input": text, "response_format": "wav"}
+	if len(options) > 0 {
+		if options[0].ReferenceAudio != nil {
+			values["reference_audio"] = options[0].ReferenceAudio
+		}
+		if options[0].ReferenceText != "" {
+			values["reference_text"] = options[0].ReferenceText
+		}
+		if options[0].Speed != nil {
+			values["speed"] = *options[0].Speed
+		}
+		if options[0].Instructions != "" {
+			values["instructions"] = options[0].Instructions
+		}
+		if options[0].Language != "" {
+			values["language"] = options[0].Language
+		}
+		if options[0].Seed != nil {
+			values["seed"] = *options[0].Seed
+		}
+	}
+	body, err := json.Marshal(values)
 	if err != nil {
 		return nil, err
 	}

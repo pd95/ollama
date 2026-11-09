@@ -982,8 +982,10 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("ask") {
 		return fmt.Errorf("%s is not a decision model, so it can't answer --ask questions", name)
 	}
-	if cmd.Flags().Changed("voice") && !speech {
-		return fmt.Errorf("%s is not a speech model, so it can't use --voice", name)
+	for _, flag := range []string{"voice", "language", "seed", "instructions", "speed", "reference-audio", "reference-text"} {
+		if cmd.Flags().Changed(flag) && !speech {
+			return fmt.Errorf("%s is not a speech model, so it can't use --%s", name, flag)
+		}
 	}
 
 	// Check if this is an embedding model
@@ -1018,7 +1020,49 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		if stdinPiped {
 			input = os.Stdin
 		}
-		return runSpeech(cmd.Context(), name, voice, opts.Prompt, input, interactive)
+		language, err := cmd.Flags().GetString("language")
+		if err != nil {
+			return err
+		}
+		instructions, err := cmd.Flags().GetString("instructions")
+		if err != nil {
+			return err
+		}
+		var speed *float64
+		if cmd.Flags().Changed("speed") {
+			value, err := cmd.Flags().GetFloat64("speed")
+			if err != nil {
+				return err
+			}
+			speed = &value
+		}
+		var seed *uint64
+		if cmd.Flags().Changed("seed") {
+			value, err := cmd.Flags().GetUint64("seed")
+			if err != nil {
+				return err
+			}
+			seed = &value
+		}
+		referencePath, err := cmd.Flags().GetString("reference-audio")
+		if err != nil {
+			return err
+		}
+		referenceText, err := cmd.Flags().GetString("reference-text")
+		if err != nil {
+			return err
+		}
+		if referencePath != "" && voice != "" {
+			return errors.New("--reference-audio cannot be combined with --voice")
+		}
+		if referenceText != "" && referencePath == "" {
+			return errors.New("--reference-text requires --reference-audio")
+		}
+		reference, err := readSpeechReference(referencePath)
+		if err != nil {
+			return err
+		}
+		return runSpeech(cmd.Context(), name, voice, opts.Prompt, input, interactive, speechOptions{Language: language, Seed: seed, Instructions: instructions, Speed: speed, ReferenceAudio: reference, ReferenceText: referenceText})
 	}
 
 	if slices.Contains(info.Capabilities, model.CapabilityImage) {
@@ -1515,10 +1559,19 @@ func showInfo(resp *api.ShowResponse, verbose bool, w io.Writer) error {
 		})
 	}
 
+	if len(resp.Languages) > 0 {
+		tableRender("Languages", func() [][]string {
+			return [][]string{{"", strings.Join(resp.Languages, ", ")}}
+		})
+	}
 	if len(resp.Voices) > 0 {
 		tableRender("Voices", func() (rows [][]string) {
 			for _, voice := range resp.Voices {
-				rows = append(rows, []string{"", voice})
+				row := []string{"", voice}
+				if len(resp.VoiceLanguages) > 0 {
+					row = append(row, strings.Join(resp.VoiceLanguages[voice], ", "))
+				}
+				rows = append(rows, row)
 			}
 			return
 		})
@@ -2634,7 +2687,13 @@ func NewCLI() *cobra.Command {
 	runCmd.Flags().Bool("hidethinking", false, "Hide thinking output (if provided)")
 	runCmd.Flags().Bool("truncate", false, "For embedding models: truncate inputs exceeding context length (default: true). Set --truncate=false to error instead")
 	runCmd.Flags().Int("dimensions", 0, "Truncate output embeddings to specified dimension (embedding models only)")
+	runCmd.Flags().String("reference-audio", "", "Reference mono PCM16 WAV for voice cloning (supported speech models only)")
+	runCmd.Flags().String("reference-text", "", "Transcript of reference speech (voice cloning only)")
+	runCmd.Flags().Float64("speed", 1, "Speech speed (supported speech models only)")
 	runCmd.Flags().String("voice", "", "Voice to speak with (speech models only)")
+	runCmd.Flags().String("instructions", "", "Speech style instructions (supported speech models only)")
+	runCmd.Flags().String("language", "", "Speech language (supported speech models only)")
+	runCmd.Flags().Uint64("seed", 0, "Speech sampling seed (supported speech models only)")
 	var asked []askedQuestion
 	runCmd.Flags().Var(questionFlag{"ask", &asked}, "ask", "Ask a decision model a question, answered yes or no unless --choice or --level follow")
 	runCmd.Flags().Var(questionFlag{"choice", &asked}, "choice", `Add a label for the preceding --ask to choose from, e.g. billing="Payments and refunds"`)

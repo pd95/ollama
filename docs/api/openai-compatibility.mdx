@@ -319,26 +319,65 @@ curl -X POST http://localhost:11434/v1/chat/completions \
 
 > Note: Added in Ollama v0.40.8
 
-Generates audio with [speech models](/capabilities/speech). The response streams while audio is generated.
+Generates audio with [speech models](/capabilities/speech). Upstream
+[Phonon support](https://github.com/ollama/ollama/pull/19166) introduced this
+endpoint, CLI playback and streaming audio. This fork extends that infrastructure
+to native MLX Qwen3-TTS, Kokoro, Voxtral TTS and Chatterbox models.
 
-#### Supported request fields
+#### Standard request fields
 
-- [x] `model`
-- [x] `input` (up to 4,096 characters)
-- [x] `voice` (one of the voices `ollama show` lists, in any case and with or without accents, such as `Freya`; omit it for the model's `default` voice)
-- [x] `response_format`
-  - [x] `wav` (default)
-  - [x] `pcm`
-  - [ ] `mp3`, `opus`, `aac`, `flac`
-- [x] `speed` (`1` only)
-- [x] `stream_format` (`audio` only)
-- [ ] `instructions`
+- [x] `model` (an installed speech model)
+- [x] `input` (1–4,096 characters)
+- [x] `voice` (a model-specific string; required reference-conditioned models use `reference_audio` instead)
+- [x] `response_format`: `wav` (default) or `pcm`
+- [x] `speed` (default `1`; model-specific limits below)
+- [x] `instructions` (Qwen3-TTS 1.7B CustomVoice only; at most 1,024 characters)
+- [x] `stream_format`: `audio` only
 
-#### Notes
+| Model | Voice / conditioning | Speed | Instructions |
+| --- | --- | --- | --- |
+| Phonon | Named preset or its default voice | `1` | Unsupported |
+| Qwen3-TTS CustomVoice 0.6B / 1.7B | Preset; omission selects `Ryan` | `1` | 1.7B only |
+| Qwen3-TTS Base 0.6B / 1.7B | Reference audio and matching transcript required; omit `voice` | `1` | Unsupported |
+| Kokoro 82M | English preset; omission selects `af_heart` | `0.5`–`2` | Unsupported |
+| Voxtral TTS | Preset matching the language; default `casual_male` for English | `1` | Unsupported |
+| Chatterbox multilingual v3 | Reference audio required; omit `voice` | `1` | Unsupported |
+| Chatterbox Turbo | `default` preset, or reference audio with `voice` omitted | `1` | Unsupported |
 
-- Audio is 16-bit, mono, 24 kHz. `pcm` returns raw little-endian samples with no header.
-- The default `response_format` is `wav`, not `mp3`.
-- Unsupported values return a `400` error instead of being ignored.
+Use `ollama show <model>` or `/api/show` to discover `voices`, `languages` and
+`voice_languages`. A preset name from another model is not interchangeable.
+Voxtral's requested language must match its voice. Kokoro supports English;
+Chatterbox v3 currently supports English/German and Turbo supports English.
+
+#### Ollama extensions
+
+- `language`: output language, where supported by the model.
+- `seed`: unsigned sampling seed for the added native MLX models. It does not
+  imply identical random draws or audio across different runtimes.
+- `reference_audio`: `{ "format": "wav", "data": "<base64-encoded complete WAV>" }`.
+  Reference WAVs must be mono PCM16, 16–48 kHz, at most 15 seconds. Turbo requires
+  more than 5 seconds; v3 requires at least 0.1 seconds. Reference audio cannot
+  be combined with `voice`.
+- `reference_text`: matching reference transcript, required by Qwen3-TTS Base,
+  at most 4,096 characters. Chatterbox rejects this field.
+
+The entire JSON request, including base64 audio, is limited to 4 MiB. The CLI
+reads local reference files; the server accepts audio bytes, never a local path.
+These reference fields do not implement OpenAI's stored custom-voice resources.
+
+#### Compatibility boundaries
+
+Audio is 16-bit mono at 24 kHz; `pcm` is little-endian samples without a header.
+Responses stream audio bytes, not SSE. WAV/PCM-only output, the WAV default and
+audio-only streaming originated with upstream Phonon support. `mp3`, `opus`,
+`aac`, `flac`, `stream_format: "sse"` and voice-ID objects are unsupported.
+Unsupported options return `400` rather than being silently ignored.
+
+This is a supported subset of the
+[OpenAI speech API](https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create),
+with explicit Ollama extensions. OpenAI's default format, voice forms, available
+formats and instruction limit differ. Speech streaming does not establish
+OpenAI Realtime API compatibility.
 
 ### `/v1/audio/transcriptions`
 

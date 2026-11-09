@@ -8,6 +8,26 @@ import (
 	"unsafe"
 )
 
+// Linspace constructs num evenly spaced values, including both endpoints.
+func Linspace(start, stop float64, num int, dtype DType) *Array {
+	out := New("LINSPACE")
+	mlxCheck(C.mlx_linspace(&out.ctx, C.double(start), C.double(stop), C.int(num), C.mlx_dtype(dtype), DefaultStream().ctx))
+	return out
+}
+
+// Round rounds to the nearest integer with ties to even.
+func Round(a *Array) *Array {
+	out := New("ROUND")
+	mlxCheck(C.mlx_round(&out.ctx, a.ctx, 0, DefaultStream().ctx))
+	return out
+}
+
+func Log10(a *Array) *Array {
+	out := New("LOG10")
+	mlxCheck(C.mlx_log10(&out.ctx, a.ctx, DefaultStream().ctx))
+	return out
+}
+
 // Nvfp4MaxProduct is the product of the maximum E4M3 and E2M1 values. Every
 // globalScale below is in MLX's representation: a checkpoint's multiplier m
 // (ModelOpt's weight_scale_2) is held as m*Nvfp4MaxProduct, so Nvfp4MaxProduct
@@ -233,6 +253,16 @@ func Conv1d(x, weight *Array, bias *Array, stride, padding, dilation, groups int
 	return out
 }
 
+// ConvTranspose1d applies a transposed convolution in NLC/OKI layout.
+func ConvTranspose1d(x, weight, bias *Array, stride, padding, dilation, outputPadding, groups int32) *Array {
+	out := New("CONV_TRANSPOSE1D")
+	mlxCheck(C.mlx_conv_transpose1d(&out.ctx, x.ctx, weight.ctx, C.int(stride), C.int(padding), C.int(dilation), C.int(outputPadding), C.int(groups), DefaultStream().ctx))
+	if bias != nil {
+		out = Add(out, bias)
+	}
+	return out
+}
+
 func Contiguous(a *Array, allowColMajor bool) *Array {
 	out := New("CONTIGUOUS")
 	mlxCheck(C.mlx_contiguous(&out.ctx, a.ctx, C.bool(allowColMajor), DefaultStream().ctx))
@@ -402,6 +432,24 @@ func RSqrt(a *Array) *Array {
 	return out
 }
 
+// SumAxes reduces several dimensions in the same MLX operation.
+func SumAxes(a *Array, axes []int, keepDims bool) *Array {
+	values := make([]C.int, len(axes))
+	for i, axis := range axes {
+		values[i] = C.int(axis)
+	}
+	out := New("SUM_AXES")
+	mlxCheck(C.mlx_sum_axes(&out.ctx, a.ctx, unsafe.SliceData(values), C.size_t(len(values)), C.bool(keepDims), DefaultStream().ctx))
+	return out
+}
+
+// Variance returns population variance along one dimension.
+func Variance(a *Array, axis int, keepDims bool) *Array {
+	out := New("VARIANCE")
+	mlxCheck(C.mlx_var_axis(&out.ctx, a.ctx, C.int(axis), C.bool(keepDims), 0, DefaultStream().ctx))
+	return out
+}
+
 func Mean(a *Array, axis int, keepDims bool) *Array {
 	out := New("MEAN_AXIS")
 	mlxCheck(C.mlx_mean_axis(&out.ctx, a.ctx, C.int(axis), C.bool(keepDims), DefaultStream().ctx))
@@ -568,6 +616,50 @@ func Sin(a *Array) *Array {
 func Cos(a *Array) *Array {
 	out := New("COS")
 	mlxCheck(C.mlx_cos(&out.ctx, a.ctx, DefaultStream().ctx))
+	return out
+}
+
+// RFFT computes a real-input FFT with backward normalization (no forward scaling).
+func RFFT(a *Array, n, axis int) *Array {
+	out := New("RFFT")
+	mlxCheck(C.mlx_fft_rfft(&out.ctx, a.ctx, C.int(n), C.int(axis), C.MLX_FFT_NORM_BACKWARD, DefaultStream().ctx))
+	return out
+}
+
+// IRFFT inverts RFFT, including the 1/n inverse scaling.
+func IRFFT(a *Array, n, axis int) *Array {
+	out := New("IRFFT")
+	mlxCheck(C.mlx_fft_irfft(&out.ctx, a.ctx, C.int(n), C.int(axis), C.MLX_FFT_NORM_BACKWARD, DefaultStream().ctx))
+	return out
+}
+
+func FFT(a *Array, n, axis int) *Array {
+	out := New("FFT")
+	mlxCheck(C.mlx_fft_fft(&out.ctx, a.ctx, C.int(n), C.int(axis), C.MLX_FFT_NORM_BACKWARD, DefaultStream().ctx))
+	return out
+}
+
+func IFFT(a *Array, n, axis int) *Array {
+	out := New("IFFT")
+	mlxCheck(C.mlx_fft_ifft(&out.ctx, a.ctx, C.int(n), C.int(axis), C.MLX_FFT_NORM_BACKWARD, DefaultStream().ctx))
+	return out
+}
+
+func Real(a *Array) *Array {
+	out := New("REAL")
+	mlxCheck(C.mlx_real(&out.ctx, a.ctx, DefaultStream().ctx))
+	return out
+}
+
+func Imag(a *Array) *Array {
+	out := New("IMAG")
+	mlxCheck(C.mlx_imag(&out.ctx, a.ctx, DefaultStream().ctx))
+	return out
+}
+
+func Atan2(y, x *Array) *Array {
+	out := New("ATAN2")
+	mlxCheck(C.mlx_arctan2(&out.ctx, y.ctx, x.ctx, DefaultStream().ctx))
 	return out
 }
 
@@ -765,4 +857,29 @@ func EnableCompile() {
 
 func DisableCompile() {
 	mlxCheck(C.mlx_disable_compile())
+}
+
+// RFFTCPU retains the CPU FFT arithmetic used by NumPy-based audio frontends.
+func RFFTCPU(a *Array, n, axis int) *Array {
+	dev := mlxCheck(C.mlx_device_new_type(C.MLX_CPU, 0))
+	defer freeDevice(dev)
+	stream := mlxCheck(C.mlx_stream_new())
+	defer freeStream(stream)
+	mlxCheck(C.mlx_get_default_stream(&stream, dev))
+	out := New("RFFTCPU")
+	mlxCheck(C.mlx_fft_rfft(&out.ctx, a.ctx, C.int(n), C.int(axis), C.MLX_FFT_NORM_BACKWARD, stream))
+	return out
+}
+
+// MatmulCPU uses the host BLAS for reference frontends whose reductions were
+// performed on the CPU. It does not change the global inference device.
+func MatmulCPU(a, b *Array) *Array {
+	dev := mlxCheck(C.mlx_device_new_type(C.MLX_CPU, 0))
+	defer freeDevice(dev)
+	stream := mlxCheck(C.mlx_stream_new())
+	defer freeStream(stream)
+	mlxCheck(C.mlx_get_default_stream(&stream, dev))
+	out := New("MATMULCPU")
+	mlxCheck(C.mlx_matmul(&out.ctx, a.ctx, b.ctx, stream))
+	return out
 }

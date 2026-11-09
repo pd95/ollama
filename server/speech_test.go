@@ -33,9 +33,16 @@ func TestSpeechValidation(t *testing.T) {
 		`{"input":"hello"}`,
 		`{"model":"test","input":"hello","response_format":"mp3"}`,
 		`{"model":"test","input":"hello","speed":0}`,
-		`{"model":"test","input":"hello","speed":2}`,
+		`{"model":"test","input":"hello","speed":4.1}`,
 		`{"model":"test","input":"hello","stream_format":"sse"}`,
-		`{"model":"test","input":"hello","instructions":"whisper"}`,
+		`{"model":"test","input":"hello","reference_text":"orphan transcript"}`,
+		`{"model":"test","input":"hello","reference_audio":{"format":"wav","data":"bad base64!"}}`,
+		`{"model":"test","input":"hello","reference_audio":{"format":"wav","data":"UkZGRg=="}}`,
+		`{"model":"test","input":"hello","reference_audio":{"format":"mp3","data":""}}`,
+		`{"model":"test","input":"hello","voice":"Ryan","reference_audio":{"format":"wav","data":""}}`,
+		`{"model":"test","input":"hello","reference_text":"` + strings.Repeat("é", 4097) + `"}`,
+		`{"model":"test","input":"hello","ignored":"` + strings.Repeat("x", llm.MaxSpeechRequestBytes) + `"}`,
+		`{"model":"test","input":"hello","instructions":"` + strings.Repeat("é", 1025) + `"}`,
 		`{"model":"test","input":"` + strings.Repeat("é", 4097) + `"}`,
 	} {
 		t.Run(body[:min(len(body), 90)], func(t *testing.T) {

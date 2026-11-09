@@ -1,6 +1,7 @@
 package create
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,18 +9,16 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-
-	"github.com/ollama/ollama/fs/safetensors"
 )
 
 // SourceTensor describes one tensor found in a source model: its on-disk type
-// and shape and which safetensors file holds it. It carries no weight data —
+// and shape and which source tensor file holds it. It carries no weight data —
 // only what the header and shard index reveal.
 type SourceTensor struct {
 	Name  string
 	Dtype string
 	Shape []int32
-	File  string // safetensors file basename, relative to the model directory
+	File  string // supported source file, relative to the model directory
 }
 
 // Inventory is the immutable result of reading a source model: every tensor
@@ -59,7 +58,7 @@ func ReadInventory(dir string) (Inventory, error) {
 
 	tensors := make(map[string]SourceTensor)
 	for _, file := range files {
-		ext, err := safetensors.OpenForExtraction(filepath.Join(dir, file))
+		ext, err := openTensorSource(context.Background(), filepath.Join(dir, file))
 		if err != nil {
 			if len(index) > 0 {
 				return Inventory{}, fmt.Errorf("source model is incomplete: open indexed shard %s: %w", file, err)
@@ -117,6 +116,13 @@ func ReadInventory(dir string) (Inventory, error) {
 // SafetensorsWeightFiles returns the source shards and supported sidecars for
 // transfer. Importing a sidecar still requires its model-specific importer.
 func SafetensorsWeightFiles(dir string) ([]string, error) {
+	if originalChatterboxSource(dir) {
+		variant, err := originalChatterboxVariantForDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		return slices.Clone(variant.weights), nil
+	}
 	_, files, err := safetensorsWeightFiles(dir)
 	if err != nil {
 		return nil, err
@@ -128,10 +134,24 @@ func SafetensorsWeightFiles(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(filepath.Join(dir, "config.json")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "config.json")); err == nil || officialVoxtralLayout(dir) {
 		cfg, _, err := readSourceModelConfig(dir)
 		if err != nil {
 			return nil, err
+		}
+		if cfg.Architecture() == kokoroArchitecture {
+			voices, err := kokoroVoiceFiles(dir)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, voices...)
+		}
+		if cfg.Architecture() == voxtralTTSArchitecture {
+			voices, err := voxtralVoiceFiles(dir)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, voices...)
 		}
 		if cfg.Architecture() == gradiumPhononArchitecture {
 			files, err = appendWeightSidecar(dir, files, "default-voice.safetensors", "Phonon")
@@ -154,6 +174,33 @@ func SafetensorsWeightFiles(dir string) ([]string, error) {
 		return nil, err
 	} else if codecDir != "" {
 		file, err := lfm3CodecFile(dir, codecDir, "model.safetensors")
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	if cfg, _, err := readSourceModelConfig(dir); err == nil && cfg.Architecture() == chatterboxTurboArchitecture {
+		for _, name := range []string{"conds.safetensors", "s3_tokenizer/model.safetensors", "reference_encoder/model.safetensors"} {
+			file, err := chatterboxAsset(dir, name)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, file)
+		}
+	}
+	if isChatterbox, err := chatterboxSource(dir); err != nil {
+		return nil, err
+	} else if isChatterbox {
+		file, err := chatterboxAsset(dir, "s3_tokenizer/model.safetensors")
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	if isTTS, err := qwen3TTSSource(dir); err != nil {
+		return nil, err
+	} else if isTTS {
+		file, err := qwen3TTSAsset(dir, "speech_tokenizer/model.safetensors")
 		if err != nil {
 			return nil, err
 		}
@@ -195,6 +242,13 @@ func appendWeightSidecar(dir string, files []string, name, modelName string) ([]
 // SafetensorsConfigFiles lists source metadata for remote transfer and local
 // JSON import. Auxiliary checkpoint subfolders are excluded.
 func SafetensorsConfigFiles(dir string) ([]string, error) {
+	if originalChatterboxSource(dir) {
+		variant, err := originalChatterboxVariantForDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		return slices.Clone(variant.assets), nil
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -231,6 +285,40 @@ func SafetensorsConfigFiles(dir string) ([]string, error) {
 			return nil, err
 		}
 		names = append(names, name)
+	}
+	if cfg, _, err := readSourceModelConfig(dir); err == nil && cfg.Architecture() == chatterboxTurboArchitecture {
+		for _, name := range []string{"s3_tokenizer/config.json", "reference_encoder/config.json"} {
+			file, err := chatterboxAsset(dir, name)
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, file)
+		}
+	}
+	if isChatterbox, err := chatterboxSource(dir); err != nil {
+		return nil, err
+	} else if isChatterbox {
+		file, err := chatterboxAsset(dir, "s3_tokenizer/config.json")
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, file)
+	}
+	if isTTS, err := qwen3TTSSource(dir); err != nil {
+		return nil, err
+	} else if isTTS {
+		name, err := qwen3TTSAsset(dir, "speech_tokenizer/config.json")
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+		if _, err := os.Stat(filepath.Join(dir, "tokenizer.json")); os.IsNotExist(err) {
+			name, err := qwen3TTSAsset(dir, "merges.txt")
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, name)
+		}
 	}
 	hasSidecar, err := hasPplxSidecar(dir)
 	if err != nil {
@@ -300,6 +388,44 @@ func inventoryShardFiles(dir string, index map[string]string) ([]string, error) 
 		return sortedKeys(files), nil
 	}
 
+	if officialVoxtralLayout(dir) {
+		if _, _, err := readOfficialVoxtralConfig(dir); err != nil {
+			return nil, err
+		}
+		others, err := filepath.Glob(filepath.Join(dir, "model*.safetensors"))
+		if err != nil {
+			return nil, err
+		}
+		if len(others) > 0 {
+			return nil, fmt.Errorf("ambiguous official Voxtral consolidated/model weights")
+		}
+		info, err := os.Stat(filepath.Join(dir, "consolidated.safetensors"))
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("official Voxtral requires consolidated.safetensors")
+		}
+		return []string{"consolidated.safetensors"}, nil
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "config.json")); err == nil {
+		cfg, _, err := readSourceModelConfig(dir)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.Architecture() == kokoroArchitecture {
+			file, err := speechTensorFile(dir, "kokoro-v1_0", ".safetensors", ".pth")
+			if err != nil {
+				return nil, fmt.Errorf("Kokoro model weights: %w", err)
+			}
+			other, err := filepath.Glob(filepath.Join(dir, "model*.safetensors"))
+			if err != nil {
+				return nil, err
+			}
+			if len(other) != 0 {
+				return nil, fmt.Errorf("ambiguous Kokoro model weights")
+			}
+			return []string{file}, nil
+		}
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err

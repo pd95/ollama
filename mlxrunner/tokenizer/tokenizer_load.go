@@ -16,10 +16,15 @@ type addedToken struct {
 
 type tokenizerJSONData struct {
 	Model struct {
-		Type         string           `json:"type"` // "BPE"
-		IgnoreMerges bool             `json:"ignore_merges"`
-		Vocab        map[string]int32 `json:"vocab"`
-		Merges       json.RawMessage  `json:"merges"` // Can be []string or [][]string (BPE only)
+		Type             string           `json:"type"` // "BPE"
+		IgnoreMerges     bool             `json:"ignore_merges"`
+		Vocab            map[string]int32 `json:"vocab"`
+		Merges           json.RawMessage  `json:"merges"` // Can be []string or [][]string (BPE only)
+		UnknownToken     *string          `json:"unk_token"`
+		FuseUnknown      bool             `json:"fuse_unk"`
+		ContinuingPrefix string           `json:"continuing_subword_prefix"`
+		EndSuffix        string           `json:"end_of_word_suffix"`
+		Dropout          *float64         `json:"dropout"`
 	} `json:"model"`
 	PreTokenizer json.RawMessage `json:"pre_tokenizer"`
 	Normalizer   struct {
@@ -221,6 +226,20 @@ func loadFromTokenizerJSON(data []byte, addedTokenIDLimit int32) (*Tokenizer, er
 		t.pretokenizer, err = loadPretokenizers(raw.PreTokenizer)
 		if err != nil {
 			return nil, err
+		}
+		if len(t.pretokenizer) == 1 && t.pretokenizer[0].unicodeWhitespace {
+			if raw.Model.FuseUnknown || raw.Model.ContinuingPrefix != "" || raw.Model.EndSuffix != "" || raw.Model.Dropout != nil && *raw.Model.Dropout != 0 || len(raw.Decoder) > 0 && string(raw.Decoder) != "null" {
+				return nil, fmt.Errorf("unsupported Unicode BPE options")
+			}
+			t.typ = TokenizerUnicodeBPE
+			t.unknownToken = -1
+			if raw.Model.UnknownToken != nil {
+				id, ok := t.vocab.Reverse[*raw.Model.UnknownToken]
+				if !ok {
+					return nil, fmt.Errorf("Unicode BPE unknown token is absent from vocabulary")
+				}
+				t.unknownToken = id
+			}
 		}
 	}
 

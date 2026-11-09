@@ -88,15 +88,22 @@ func (t *Tokenizer) encodeBPEMerge(encoded string, ids []int32) []int32 {
 		}
 
 		leftToken, rightToken := nodes[left].token, nodes[right].token
-		rank, ok := t.vocab.Merges[leftToken+" "+rightToken]
-		if !ok {
-			return bpePair{}, false
+		var rank int
+		if !t.mergeByTokenRank {
+			var ok bool
+			rank, ok = t.vocab.Merges[leftToken+" "+rightToken]
+			if !ok {
+				return bpePair{}, false
+			}
 		}
-
 		// Merged tokens remain contiguous spans of the encoded input.
 		value := encoded[nodes[left].start : nodes[right].start+len(rightToken)]
-		if _, ok := t.vocab.Reverse[value]; !ok {
+		id, exists := t.vocab.Reverse[value]
+		if !exists {
 			return bpePair{}, false
+		}
+		if t.mergeByTokenRank {
+			rank = int(id)
 		}
 
 		return bpePair{
@@ -160,6 +167,12 @@ func (t *Tokenizer) encodeBPEMerge(encoded string, ids []int32) []int32 {
 }
 
 func (t *Tokenizer) appendByteFallback(ids []int32, token string) []int32 {
+	if t.typ == TokenizerUnicodeBPE {
+		if t.unknownToken >= 0 {
+			return append(ids, t.unknownToken)
+		}
+		return ids
+	}
 	if t.typ == TokenizerBPE {
 		for _, r := range token {
 			if b, ok := decodeByteLevelRune(r); ok {
