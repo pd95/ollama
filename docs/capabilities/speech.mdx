@@ -5,6 +5,11 @@ description: Turn text into spoken audio with text-to-speech models.
 
 Speech models read text aloud. Ollama streams the audio as it is generated, so playback can start before the whole text has been spoken.
 
+The speech API and CLI were introduced by upstream
+[Phonon support](https://github.com/ollama/ollama/pull/19166). This fork adds
+native MLX model implementations, original-checkpoint import, model-specific
+voices/options and reference conditioning on that existing infrastructure.
+
 ## Setup
 
 Start [Ollama](/quickstart) v0.40.9 or later, then download [Phonon](https://ollama.com/library/phonon):
@@ -14,6 +19,42 @@ ollama pull phonon
 ```
 
 Phonon uses Gradium's 31M English checkpoint and comes with Gradium's English voices, such as `Zoey`, `Easton`, and `Freya`. Without a voice, it speaks with the checkpoint's own voice, `default`. `ollama show phonon` lists every voice. Voice names work in any case and with or without accents.
+
+### Original MLX checkpoints
+
+An MLX-enabled build of this fork on Apple Silicon also imports the following
+original floating-point checkpoints. These are local imports; weights and
+voices are not bundled. Prequantized community conversions are outside this
+publication's advertised checkpoint matrix.
+
+| Suggested local tag | Original Hugging Face repository | Required companion assets |
+| --- | --- | --- |
+| `qwen3-tts:0.6b` / `qwen3-tts:1.7b` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` / `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Nested `speech_tokenizer` and text tokenizer |
+| `qwen3-tts-base:0.6b` / `qwen3-tts-base:1.7b` | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` / `Qwen/Qwen3-TTS-12Hz-1.7B-Base` | Nested `speech_tokenizer` and text tokenizer |
+| `kokoro:82m` | `hexgrad/Kokoro-82M` | `kokoro-v1_0.pth`, config and English `.pt` voices including `af_heart` |
+| `voxtral-tts:4b` | `mistralai/Voxtral-4B-TTS-2603` | Main safetensors, configuration/tokenizer and original preset voice files |
+| `chatterbox:multilingual` | `ResembleAI/chatterbox` | Selected `t3_mtl23ls_v3.safetensors`, `s3gen_v3.safetensors`, `ve.safetensors`, `grapheme_mtl_merged_expanded_v1.json`, `Cangjie5_TC.json` |
+| `chatterbox:turbo` | `ResembleAI/chatterbox-turbo` | `t3_turbo_v1.safetensors`, `s3gen_meanflow.safetensors`, `ve.safetensors`, `conds.pt` and tokenizer files |
+
+Create a persistent `Modelfile` pointing at the downloaded original snapshot.
+For example, if a complete Kokoro snapshot is in `./Kokoro-82M`:
+
+```text Modelfile
+FROM ./Kokoro-82M
+```
+
+```shell
+ollama create --experimental kokoro:82m -f ./Modelfile
+ollama run kokoro:82m --voice af_heart --speed 1.2 "Hello from the original model."
+```
+
+Use the same `FROM <snapshot-directory>` pattern for each tag in the table;
+the directory can be an existing HF cache snapshot. Keep companion files in
+that snapshot. The importer handles archive decoding, tensor layouts and
+configuration in Go, without Python or a prepared conversion directory.
+Original Chatterbox v3's activation profile is selected automatically. Its
+selected v3 files are distinct from the provider wrapper's default v2/PT assets.
+Imported Ollama models are self-contained after creation.
 
 ## Speak from the terminal
 
@@ -34,6 +75,21 @@ ollama run gemma4 --hidethinking "Tell me a fun fact about owls in two sentences
 ```
 
 Piped text is spoken as it arrives, so a chat model's answer starts playing after its first sentence or two.
+
+With an imported MLX model, choose options its validator supports:
+
+```shell
+ollama run qwen3-tts:1.7b --voice Ryan --language en --instructions "Speak calmly." "Hello."
+ollama run qwen3-tts-base:0.6b --language en --reference-audio reference.wav --reference-text "The words spoken in the reference." "New words in that voice."
+ollama run chatterbox:multilingual --language de --reference-audio reference.wav "Guten Morgen."
+ollama run chatterbox:turbo --voice default --language en "Hello."
+```
+
+Give complete text as a command argument when it is already available. Live
+pipes use incremental request boundaries and can sound different. Reference
+audio and preset voice selection are mutually exclusive. Reference WAVs must
+be complete mono PCM16 at 16–48 kHz, at most 15 seconds; Turbo cloning requires
+more than 5 seconds. See [model-specific options](/api/openai-compatibility#v1audiospeech).
 
 Run `ollama run phonon` without any text to type lines at a `>>>` prompt. Each line is spoken when you press Enter. Press Ctrl+C to stop speaking, and type `/bye` or press Ctrl+D to exit.
 
@@ -121,8 +177,13 @@ curl -sN http://localhost:11434/v1/audio/speech \
 ### Limits
 
 - `input` can be up to 4,096 characters per request. `ollama run` splits longer text at paragraph and sentence breaks for you.
-- Prices, numbers, symbols, email addresses, and URLs are spelled out before speaking, so `$4.59` is read as "4 dollars and 59 cents". Times and numeric dates are read as written, so write dates out (`October 23`, not `10/23`) for a natural reading. Emoji, bullet characters, and markdown markers such as `*` and `#` are skipped.
+- Phonon spells out prices, numbers, symbols, email addresses and URLs before speaking, so `$4.59` is read as "4 dollars and 59 cents". Its times and numeric dates are read as written; write dates out (`October 23`, not `10/23`) for a natural reading. Other model frontends have their own normalization rules.
 - Options the model doesn't support, such as other formats, speeds, or `instructions`, return a `400` error instead of being ignored. An unknown voice returns a `400` error that lists the available voices.
 - Speech models only generate speech: chat, completion, and embedding requests to them return a `400` error.
 
 `ollama show phonon` and `/api/show` list the model's capabilities as `speech`, and its voices (`voices` in `/api/show`). See [OpenAI compatibility](/api/openai-compatibility) for every supported field.
+
+Direct import and passing API/CLI checks do not establish complete equivalence
+to each provider's Python wrapper or perceptual quality. The native Chatterbox
+paths return decoder audio without the provider wrapper's Perth watermark
+stage. Numerical and listening review remain separate from API compatibility.
