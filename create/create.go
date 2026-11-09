@@ -53,6 +53,9 @@ func IsSafetensorsLLMModel(modelName string) bool {
 
 // IsSafetensorsModelDir checks for a supported model config and safetensors weights.
 func IsSafetensorsModelDir(dir string) bool {
+	if originalTurboSource(dir) {
+		return validateOriginalTurboFiles(dir) == nil
+	}
 	if _, err := os.Stat(filepath.Join(dir, "config.json")); err != nil {
 		if !os.IsNotExist(err) {
 			return false
@@ -401,6 +404,18 @@ func readSourceModelConfig(modelDir string) (sourceModelConfig, json.RawMessage,
 	configPath := filepath.Join(modelDir, "config.json")
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
+		if originalTurboSource(modelDir) {
+			if err := validateOriginalTurboFiles(modelDir); err != nil {
+				return sourceModelConfig{}, nil, err
+			}
+			data, err := normalizeChatterboxTurboConfig(originalTurboConfig)
+			if err != nil {
+				return sourceModelConfig{}, nil, err
+			}
+			var cfg sourceModelConfig
+			err = json.Unmarshal(data, &cfg)
+			return cfg, data, err
+		}
 		if officialVoxtralLayout(modelDir) {
 			return readOfficialVoxtralConfig(modelDir)
 		}

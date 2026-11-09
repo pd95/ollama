@@ -116,6 +116,12 @@ func ReadInventory(dir string) (Inventory, error) {
 // SafetensorsWeightFiles returns the source shards and supported sidecars for
 // transfer. Importing a sidecar still requires its model-specific importer.
 func SafetensorsWeightFiles(dir string) ([]string, error) {
+	if originalTurboSource(dir) {
+		if err := validateOriginalTurboFiles(dir); err != nil {
+			return nil, err
+		}
+		return slices.Clone(originalTurboWeightFiles), nil
+	}
 	_, files, err := safetensorsWeightFiles(dir)
 	if err != nil {
 		return nil, err
@@ -235,6 +241,12 @@ func appendWeightSidecar(dir string, files []string, name, modelName string) ([]
 // SafetensorsConfigFiles lists source metadata for remote transfer and local
 // JSON import. Auxiliary checkpoint subfolders are excluded.
 func SafetensorsConfigFiles(dir string) ([]string, error) {
+	if originalTurboSource(dir) {
+		if err := validateOriginalTurboFiles(dir); err != nil {
+			return nil, err
+		}
+		return slices.Clone(originalTurboConfigFiles), nil
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
