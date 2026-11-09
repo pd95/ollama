@@ -177,8 +177,7 @@ func originalTurboTables() []originalChatterboxTensor {
 	for row := range 9999 {
 		pos := row - 4999
 		for k := range 256 {
-			exponent := float32(2*k) * float32(-math.Log(10000)/512)
-			freq := float32(math.Exp(float64(exponent)))
+			freq := math.Float32frombits(originalTurboFrequencyBits[k])
 			angle := float32(pos) * freq
 			put(position, row*512+2*k, float32(math.Sin(float64(angle))))
 			put(position, row*512+2*k+1, float32(math.Cos(float64(angle))))

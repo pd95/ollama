@@ -110,6 +110,14 @@ func TestOriginalTurboSourceRouting(t *testing.T) {
 }
 
 func TestOriginalTurboGeometryAndTables(t *testing.T) {
+	for k, bits := range originalTurboFrequencyBits {
+		frequency := float64(math.Float32frombits(bits))
+		exponent := float32(2*k) * float32(-math.Log(10000)/512)
+		mathematical := math.Exp(float64(exponent))
+		if math.Abs(frequency-mathematical) > 2e-7*mathematical {
+			t.Fatalf("invalid fixed provider frequency %d", k)
+		}
+	}
 	r, err := gzip.NewReader(bytes.NewReader(originalTurboShapes))
 	if err != nil {
 		t.Fatal(err)
