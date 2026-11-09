@@ -3,6 +3,7 @@ package torch
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -275,6 +276,26 @@ func TestLogicalTensorInventoryBounds(t *testing.T) {
 	a = &Archive{Tensors: make(map[string]*Tensor)}
 	if _, err := a.export(root, "", make(map[*dictionary]bool), 0); err != nil || len(a.Tensors) != maxMembers {
 		t.Fatalf("exact tensor-count boundary: %d, %v", len(a.Tensors), err)
+	}
+}
+
+func TestArchiveReadCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	a, err := OpenContext(ctx, "testdata/synthetic-protocol2.pt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	view := a.Tensors["view"]
+	if _, err := view.ReadAt(make([]byte, 4), 0); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if _, err := view.ReadAt(make([]byte, 4), 0); err != context.Canceled {
+		t.Fatalf("cached storage read after cancellation: %v", err)
+	}
+	if _, err := OpenContext(ctx, "testdata/synthetic-protocol2.pt"); err != context.Canceled {
+		t.Fatalf("open after cancellation: %v", err)
 	}
 }
 

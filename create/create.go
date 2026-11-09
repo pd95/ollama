@@ -67,6 +67,13 @@ func IsSafetensorsModelDir(dir string) bool {
 		}
 	}
 
+	// Original Kokoro has a narrowly validated config and a .pth state dict.
+	if info, err := os.Stat(filepath.Join(dir, "kokoro-v1_0.pth")); err == nil && info.Mode().IsRegular() {
+		if cfg, _, err := readSourceModelConfig(dir); err == nil && cfg.Architecture() == kokoroArchitecture {
+			return true
+		}
+	}
+
 	// Must have at least one .safetensors file
 	entries, err := os.ReadDir(dir)
 	if err != nil {

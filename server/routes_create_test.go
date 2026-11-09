@@ -2060,6 +2060,18 @@ func TestCreateNemotronHDefaultsKeepExplicitRendererParser(t *testing.T) {
 	}
 }
 
+func TestOriginalKokoroArchiveRouting(t *testing.T) {
+	kind, err := detectModelTypeFromFile("kokoro-v1_0.pth", "unused-by-declared-source-format")
+	if err != nil || kind != "safetensors" {
+		t.Fatalf("original Kokoro routing: %s %v", kind, err)
+	}
+	for _, name := range []string{"weights.pth", "nested/kokoro-v1_0.pth", "voice.pt"} {
+		if kind, err := detectModelTypeFromFile(name, "invalid-digest"); err == nil || kind == "safetensors" {
+			t.Fatalf("unrelated PyTorch source routed as supported: %s %s %v", name, kind, err)
+		}
+	}
+}
+
 func TestDetectModelTypeFromFiles(t *testing.T) {
 	t.Run("gguf file", func(t *testing.T) {
 		_, digest := createBinFile(t, nil, nil)

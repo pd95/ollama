@@ -1,6 +1,7 @@
 package create
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -10,7 +11,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ollama/ollama/fs/safetensors"
 	kokoroconfig "github.com/ollama/ollama/mlxrunner/model/kokoro/config"
 	"github.com/ollama/ollama/types/model"
 )
@@ -43,18 +43,26 @@ func normalizeKokoroConfig(raw json.RawMessage) (json.RawMessage, bool, error) {
 func kokoroVoiceFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(dir, "voices"))
 	if err != nil {
-		return nil, fmt.Errorf("Kokoro requires English safetensors voice packs: %w", err)
+		return nil, fmt.Errorf("Kokoro requires English voice packs: %w", err)
 	}
-	var files []string
+	voices := make(map[string]string)
 	for _, entry := range entries {
-		name, ok := strings.CutSuffix(entry.Name(), ".safetensors")
-		if !ok || !englishKokoroVoice.MatchString(name) || entry.IsDir() {
+		ext := filepath.Ext(entry.Name())
+		name := strings.TrimSuffix(entry.Name(), ext)
+		if (ext != ".safetensors" && ext != ".pt") || !englishKokoroVoice.MatchString(name) || entry.IsDir() {
 			continue
 		}
-		files = append(files, "voices/"+entry.Name())
+		if previous, ok := voices[name]; ok {
+			return nil, fmt.Errorf("ambiguous Kokoro voice %s: %s and %s", name, previous, entry.Name())
+		}
+		voices[name] = "voices/" + entry.Name()
 	}
-	if !slices.Contains(files, "voices/af_heart.safetensors") {
-		return nil, fmt.Errorf("Kokoro requires voices/af_heart.safetensors")
+	if voices["af_heart"] == "" {
+		return nil, fmt.Errorf("Kokoro requires voices/af_heart.pt or voices/af_heart.safetensors")
+	}
+	files := make([]string, 0, len(voices))
+	for _, name := range voices {
+		files = append(files, name)
 	}
 	slices.Sort(files)
 	return files, nil
@@ -64,6 +72,11 @@ func prepareKokoroInventory(inv Inventory) (Inventory, error) {
 	if inv.Config.Architecture() != kokoroArchitecture {
 		return inv, nil
 	}
+	var err error
+	inv, err = prepareOriginalKokoroInventory(inv)
+	if err != nil {
+		return Inventory{}, err
+	}
 	files, err := kokoroVoiceFiles(inv.Dir)
 	if err != nil {
 		return Inventory{}, err
@@ -71,16 +84,20 @@ func prepareKokoroInventory(inv Inventory) (Inventory, error) {
 	inv.Tensors = maps.Clone(inv.Tensors)
 	var voices []string
 	for _, file := range files {
-		reader, err := safetensors.OpenForExtraction(filepath.Join(inv.Dir, file))
+		reader, err := openTensorSource(context.Background(), filepath.Join(inv.Dir, file))
 		if err != nil {
 			return Inventory{}, err
 		}
+		tensorName := "voice"
+		if filepath.Ext(file) == ".pt" {
+			tensorName = "tensor"
+		}
 		names := reader.ListTensors()
-		if !slices.Equal(names, []string{"voice"}) {
+		if !slices.Equal(names, []string{tensorName}) {
 			reader.Close()
 			return Inventory{}, fmt.Errorf("Kokoro %s must contain only voice", file)
 		}
-		tensor, err := reader.GetTensor("voice")
+		tensor, err := reader.GetTensor(tensorName)
 		if err != nil {
 			reader.Close()
 			return Inventory{}, err
@@ -89,13 +106,13 @@ func prepareKokoroInventory(inv Inventory) (Inventory, error) {
 			reader.Close()
 			return Inventory{}, fmt.Errorf("unsupported Kokoro voice %s: %s %v", file, tensor.Dtype, tensor.Shape)
 		}
-		name := strings.TrimSuffix(filepath.Base(file), ".safetensors")
+		name := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
 		key := "voices." + name
 		if inv.Has(key) {
 			reader.Close()
 			return Inventory{}, fmt.Errorf("Kokoro tensor collision: %s", key)
 		}
-		inv.Tensors[key] = SourceTensor{Name: "voice", Dtype: tensor.Dtype, Shape: tensor.Shape, File: file}
+		inv.Tensors[key] = SourceTensor{Name: tensorName, Dtype: tensor.Dtype, Shape: tensor.Shape, File: file}
 		voices = append(voices, name)
 		reader.Close()
 	}

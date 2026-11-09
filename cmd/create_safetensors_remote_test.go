@@ -17,6 +17,37 @@ import (
 	"github.com/ollama/ollama/api"
 )
 
+func TestPrepareRemoteOriginalKokoroFiles(t *testing.T) {
+	dir := t.TempDir()
+	config, err := os.ReadFile("../create/testdata/kokoro-config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "voices"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{
+		"config.json":        config,
+		"kokoro-v1_0.pth":    []byte("raw source upload"),
+		"voices/af_heart.pt": []byte("raw original voice"),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := prepareRemoteSourceFiles(t.Context(), dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, file := range files {
+		names = append(names, file.logical)
+	}
+	if !slices.Equal(names, []string{"config.json", "kokoro-v1_0.pth", "voices/af_heart.pt"}) {
+		t.Fatalf("original archive transfer files: %v", names)
+	}
+}
+
 func TestPrepareRemoteSourceFilesSelectsJSONAndSafetensors(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string]string{

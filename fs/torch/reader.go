@@ -5,6 +5,7 @@ package torch
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -28,15 +29,16 @@ const (
 // Archive retains the source file for streaming tensor reads. Opening reads
 // only ZIP/pickle metadata. The caller must Close it after consuming tensors.
 type Archive struct {
-	file         *os.File
-	mu           sync.Mutex
-	closed       bool
-	storages     map[string]*storage
-	viewBytes    int64
-	exportValues int
-	tensorBytes  int64
-	Root         any
-	Tensors      map[string]*Tensor
+	checkCanceled func() error
+	file          *os.File
+	mu            sync.Mutex
+	closed        bool
+	storages      map[string]*storage
+	viewBytes     int64
+	exportValues  int
+	tensorBytes   int64
+	Root          any
+	Tensors       map[string]*Tensor
 }
 
 type storage struct {
@@ -61,7 +63,16 @@ type Tensor struct {
 	contiguous bool
 }
 
-func Open(filename string) (_ *Archive, err error) {
+func Open(filename string) (*Archive, error) {
+	return OpenContext(context.Background(), filename)
+}
+
+// OpenContext binds subsequent storage validation/reads to ctx. Cancellation
+// is checked between bounded storage chunks as well as before opening metadata.
+func OpenContext(ctx context.Context, filename string) (_ *Archive, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -85,11 +96,14 @@ func Open(filename string) (_ *Archive, err error) {
 	if len(z.File) == 0 || len(z.File) > maxMembers {
 		return nil, fmt.Errorf("PyTorch archive member count exceeds bounds")
 	}
-	a := &Archive{file: f, storages: make(map[string]*storage)}
+	a := &Archive{checkCanceled: ctx.Err, file: f, storages: make(map[string]*storage)}
 	root := ""
 	members := make(map[string]*zip.File)
 	var total uint64
 	for _, member := range z.File {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		name := member.Name
 		prefix, suffix, ok := strings.Cut(name, "/")
 		if !ok || prefix == "" || prefix == "." || prefix == ".." || suffix == "" || path.Clean(name) != name || strings.Contains(name, "\\") || strings.HasPrefix(name, "/") {
@@ -150,6 +164,9 @@ func Open(filename string) (_ *Archive, err error) {
 	value, err := decodePickle(metadata, a)
 	if err != nil {
 		return nil, fmt.Errorf("PyTorch tensor metadata: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	a.Tensors = make(map[string]*Tensor)
 	a.Root, err = a.export(value, "", make(map[*dictionary]bool), 0)
@@ -250,6 +267,9 @@ func (a *Archive) checkStorage(s *storage, cache bool) error {
 	if a.closed {
 		return fmt.Errorf("PyTorch archive is closed")
 	}
+	if err := a.checkCanceled(); err != nil {
+		return err
+	}
 	if s.checked && (!cache || s.data != nil) {
 		return nil
 	}
@@ -264,6 +284,9 @@ func (a *Archive) checkStorage(s *storage, cache bool) error {
 	buffer := make([]byte, 32<<10)
 	var checksum uint32
 	for offset := int64(0); offset < size; {
+		if err := a.checkCanceled(); err != nil {
+			return err
+		}
 		next := min(int64(len(buffer)), size-offset)
 		chunk := buffer[:next]
 		if _, err := a.file.ReadAt(chunk, s.offset+offset); err != nil {

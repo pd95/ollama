@@ -1,7 +1,9 @@
 package create
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -9,7 +11,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ollama/ollama/fs/safetensors"
 	voxtralconfig "github.com/ollama/ollama/mlxrunner/model/voxtraltts/config"
 	"github.com/ollama/ollama/mlxrunner/tokenizer"
 	"github.com/ollama/ollama/types/model"
@@ -34,13 +35,12 @@ func normalizeVoxtralTTSConfig(raw []byte) ([]byte, error) {
 func voxtralVoiceFiles(dir string) ([]string, error) {
 	var files []string
 	for _, name := range voxtralconfig.VoiceNames() {
-		path := "voice_embedding/" + name + ".safetensors"
-		info, err := os.Stat(filepath.Join(dir, path))
-		if os.IsNotExist(err) && !officialVoxtralLayout(dir) && !slices.Contains(voxtralEnglishGermanVoices, name) {
+		path, err := speechTensorFile(dir, "voice_embedding/"+name, ".safetensors", ".pt")
+		if errors.Is(err, os.ErrNotExist) && !officialVoxtralLayout(dir) && !slices.Contains(voxtralEnglishGermanVoices, name) {
 			continue
 		}
-		if err != nil || !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("Voxtral TTS requires %s (official .pt voices need the bounded import preparation step)", path)
+		if err != nil {
+			return nil, fmt.Errorf("Voxtral TTS voice %s: %w", name, err)
 		}
 		files = append(files, path)
 	}
@@ -99,7 +99,7 @@ func prepareVoxtralTTSInventory(inv Inventory) (Inventory, *validatedTokenizerSo
 	inv.Tensors = maps.Clone(inv.Tensors)
 	voices := map[string]int{}
 	for _, file := range files {
-		name := strings.TrimSuffix(filepath.Base(file), ".safetensors")
+		name := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
 		count := metadata.Audio.Voices[name]
 		if count < 1 || count > 512 {
 			return Inventory{}, nil, fmt.Errorf("Voxtral TTS voice %s has invalid prompt length", name)
@@ -107,15 +107,19 @@ func prepareVoxtralTTSInventory(inv Inventory) (Inventory, *validatedTokenizerSo
 		if _, ok := cfg.Multimodal.Codec.Voices[name]; !ok {
 			return Inventory{}, nil, fmt.Errorf("Voxtral TTS voice %s absent from configuration", name)
 		}
-		reader, err := safetensors.OpenForExtraction(filepath.Join(inv.Dir, file))
+		reader, err := openTensorSource(context.Background(), filepath.Join(inv.Dir, file))
 		if err != nil {
 			return Inventory{}, nil, err
 		}
-		if !slices.Equal(reader.ListTensors(), []string{"embedding"}) {
+		tensorName := "embedding"
+		if filepath.Ext(file) == ".pt" && slices.Equal(reader.ListTensors(), []string{"tensor"}) {
+			tensorName = "tensor"
+		}
+		if !slices.Equal(reader.ListTensors(), []string{tensorName}) {
 			reader.Close()
 			return Inventory{}, nil, fmt.Errorf("invalid Voxtral TTS voice %s", name)
 		}
-		tensor, err := reader.GetTensor("embedding")
+		tensor, err := reader.GetTensor(tensorName)
 		reader.Close()
 		if err != nil {
 			return Inventory{}, nil, err
@@ -127,7 +131,7 @@ func prepareVoxtralTTSInventory(inv Inventory) (Inventory, *validatedTokenizerSo
 		if inv.Has(key) {
 			return Inventory{}, nil, fmt.Errorf("Voxtral TTS tensor collision: %s", key)
 		}
-		inv.Tensors[key] = SourceTensor{Name: "embedding", Dtype: tensor.Dtype, Shape: tensor.Shape, File: file}
+		inv.Tensors[key] = SourceTensor{Name: tensorName, Dtype: tensor.Dtype, Shape: tensor.Shape, File: file}
 		voices[name] = count
 	}
 	var fields map[string]json.RawMessage

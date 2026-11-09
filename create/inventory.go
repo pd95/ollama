@@ -1,6 +1,7 @@
 package create
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,18 +9,16 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-
-	"github.com/ollama/ollama/fs/safetensors"
 )
 
 // SourceTensor describes one tensor found in a source model: its on-disk type
-// and shape and which safetensors file holds it. It carries no weight data —
+// and shape and which source tensor file holds it. It carries no weight data —
 // only what the header and shard index reveal.
 type SourceTensor struct {
 	Name  string
 	Dtype string
 	Shape []int32
-	File  string // safetensors file basename, relative to the model directory
+	File  string // supported source file, relative to the model directory
 }
 
 // Inventory is the immutable result of reading a source model: every tensor
@@ -59,7 +58,7 @@ func ReadInventory(dir string) (Inventory, error) {
 
 	tensors := make(map[string]SourceTensor)
 	for _, file := range files {
-		ext, err := safetensors.OpenForExtraction(filepath.Join(dir, file))
+		ext, err := openTensorSource(context.Background(), filepath.Join(dir, file))
 		if err != nil {
 			if len(index) > 0 {
 				return Inventory{}, fmt.Errorf("source model is incomplete: open indexed shard %s: %w", file, err)
@@ -399,9 +398,9 @@ func inventoryShardFiles(dir string, index map[string]string) ([]string, error) 
 			return nil, err
 		}
 		if cfg.Architecture() == kokoroArchitecture {
-			file := "kokoro-v1_0.safetensors"
-			if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
-				return nil, fmt.Errorf("Kokoro requires %s: %w", file, err)
+			file, err := speechTensorFile(dir, "kokoro-v1_0", ".safetensors", ".pth")
+			if err != nil {
+				return nil, fmt.Errorf("Kokoro model weights: %w", err)
 			}
 			other, err := filepath.Glob(filepath.Join(dir, "model*.safetensors"))
 			if err != nil {
