@@ -21,3 +21,10 @@ func decodeMP3Context(ctx context.Context, _ []byte, _, _ int) ([]float32, int, 
 func decodeMP3ContextDuration(ctx context.Context, data []byte, maxInputBytes, maxSamples, _ int) ([]float32, int, error) {
 	return decodeMP3Context(ctx, data, maxInputBytes, maxSamples)
 }
+
+func openMP3Stream(ctx context.Context, _ string) (SampleStream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("MP3 decoding requires cgo")
+}

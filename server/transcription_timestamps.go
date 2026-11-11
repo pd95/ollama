@@ -184,20 +184,46 @@ func (s *Server) transcribeWithTimestamps(ctx context.Context, form audioTextFor
 	if err := ctx.Err(); err != nil {
 		return response, err
 	}
-	wav, err := os.ReadFile(form.timestampUpload)
+	// Preserve the exact existing short-WAV input, including PCM precision.
+	// All larger uploads and compressed inputs remain file-backed.
+	var original []byte
+	if stat, err := os.Stat(form.timestampUpload); err == nil && stat.Size() <= 32<<20 {
+		file, err := os.Open(form.timestampUpload)
+		if err != nil {
+			return response, err
+		}
+		var magic [12]byte
+		_, readErr := file.Read(magic[:])
+		_ = file.Close()
+		if readErr == nil && string(magic[:4]) == "RIFF" && string(magic[8:]) == "WAVE" {
+			original, err = os.ReadFile(form.timestampUpload)
+			if err != nil {
+				return response, err
+			}
+		}
+	}
+	if original != nil {
+		pcm, rate, err := audio.DecodeLimitContext(ctx, original, 60)
+		if err == nil {
+			return s.transcribeTimestampClip(ctx, form, asr, aligner, original, time.Duration(len(pcm))*time.Second/time.Duration(rate))
+		}
+		if ctx.Err() != nil {
+			return response, ctx.Err()
+		}
+	}
+	stream, err := audio.OpenSampleStream(ctx, form.timestampUpload)
 	if err != nil {
-		return response, err
+		return response, timestampFailure(400, err.Error())
 	}
-	if len(wav) > maxTimestampUploadBytes {
-		return response, timestampUploadTooLarge()
-	}
-	if len(wav) < 12 || string(wav[:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {
-		return response, timestampFailure(400, "word timestamps currently require a WAV file")
-	}
-	duration, err := timestampWAVDuration(ctx, wav)
-	if err != nil {
-		return response, err
-	}
+	defer stream.Close()
+	return timestampRecording(ctx, stream, original, form.segmentTimestamps, func(ctx context.Context, wav []byte, duration time.Duration) (openai.TranscriptionTimestampResponse, error) {
+		return s.transcribeTimestampClip(ctx, form, asr, aligner, wav, duration)
+	})
+}
+
+func (s *Server) transcribeTimestampClip(ctx context.Context, form audioTextForm, asr, aligner *Model, wav []byte, duration time.Duration) (openai.TranscriptionTimestampResponse, error) {
+	response := openai.TranscriptionTimestampResponse{Task: "transcribe", Words: make([]openai.TranscriptionWord, 0)}
+	var err error
 	response.Duration = duration.Seconds()
 	request := form.request
 	request.Audio = wav
@@ -263,17 +289,6 @@ func (s *Server) transcribeWithTimestamps(ctx context.Context, form audioTextFor
 	}
 	response.Words = words
 	return response, nil
-}
-
-func timestampWAVDuration(ctx context.Context, wav []byte) (time.Duration, error) {
-	pcm, rate, err := audio.DecodeLimitContext(ctx, wav, 60)
-	if err != nil {
-		return 0, timestampFailure(400, err.Error())
-	}
-	if len(pcm) > 60*rate {
-		return 0, timestampFailure(400, "word timestamps currently accept recordings up to 60 seconds")
-	}
-	return time.Duration(len(pcm)) * time.Second / time.Duration(rate), nil
 }
 
 func timestampWords(text string, units []qwen3asr.AlignmentUnit, result *qwen3asr.AlignmentResult, duration float64) ([]openai.TranscriptionWord, error) {

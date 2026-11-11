@@ -53,6 +53,11 @@ func (s *Server) TranslationHandler(c *gin.Context) {
 // generation's output stays bounded.
 func (s *Server) audioTextHandler(c *gin.Context, task renderers.AudioTask) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAudioUploadBytes)
+	defer func() {
+		if c.Request.MultipartForm != nil {
+			_ = c.Request.MultipartForm.RemoveAll()
+		}
+	}()
 	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
 		if tooLarge := new(http.MaxBytesError); errors.As(err, &tooLarge) {
 			openAIError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("audio uploads are limited to %d MB", maxAudioUploadBytes>>20))

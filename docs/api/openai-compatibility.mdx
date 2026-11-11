@@ -405,7 +405,7 @@ Transcribes speech with models that accept audio input.
 
 For experimental word timestamps, configure `OLLAMA_ALIGNMENT_MODEL` on the server
 or pass the Ollama extension `alignment_model` in the request. Word mode accepts
-complete English/German WAVs up to 60 seconds.
+complete English/German WAV or MP3 recordings up to two hours and 512 MiB per request.
 
 #### Native Qwen3-ASR and word timestamps
 
@@ -452,16 +452,34 @@ curl http://localhost:11434/v1/audio/transcriptions \
   -F alignment_model=qwen3-forced-aligner:0.6b
 ```
 
-Word mode requires one complete WAV, at most 60 seconds and 32 MiB, with
-`response_format=verbose_json` and `stream=false` (the default). It does not
-segment longer files. Repeat `timestamp_granularities[]` with `segment` to
-include both word and coarse clip segments. The server does not download or
+Word mode accepts a complete WAV or MP3 upload, up to two hours of decoded audio
+and 512 MiB per request, with `response_format=verbose_json` and `stream=false`
+(the default). WAV recordings up to 60 seconds retain the existing single-clip
+behavior. Longer recordings use 30-second ownership intervals with two seconds
+of overlapping audio context on each side. MP3 decoding is native; FFmpeg and
+Python are not server dependencies. Unsupported/corrupt audio fails the request.
+
+Decoded audio is read incrementally from the temporary upload file. The rolling
+buffer retains at most 60 seconds plus one source sample; only a bounded window
+is resampled and passed to the ASR/aligner at a time. Text/word output grows with
+recording length, within the two-hour cap. Upload files and decoders are closed
+on success, cancellation or error; scheduler leases remain held until positive
+native cleanup. A cancelled request returns no partial successful transcript.
+
+Words crossing a chunk cut are aligned with surrounding context and assigned
+by their interval midpoint. All times include the window's global sample offset.
+Matching boundary words with intersecting intervals are emitted once; repeated
+words at disjoint times are retained. Conflicting overlapping words fail with
+HTTP 422 rather than fabricating/clamping timestamps. These controls do not
+guarantee recognition or alignment accuracy at every boundary. Repeat `timestamp_granularities[]` with `segment` to
+include both word and globally offset segments for retained chunk text. The server does not download or
 discover an aligner automatically; `alignment_model` without word mode is
 rejected.
 
 The `words` entries contain `word`, `start` and `end`; times are seconds from
 the recording's start. Words use the provider's normalized text, which can omit
-punctuation and combining marks. The full ASR `text` is retained. Invalid or
+punctuation and combining marks. Short-clip ASR `text` is retained exactly. Long-recording text is assembled from
+owned word spans in the punctuated chunk transcripts. Invalid or
 out-of-recording alignment fails the request; the server does not substitute
 an untimed success. Provider agreement does not establish human-annotated
 recognition or alignment accuracy.

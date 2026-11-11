@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -130,6 +132,75 @@ func runOpenAIAudioTimestamps(t *testing.T) {
 			}
 		})
 	}
+	t.Run("long WAV and MP3", func(t *testing.T) {
+		samples, rate, err := audio.Decode(clip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pcm := make([]float32, 95*rate)
+		// The first sentence crosses the30-second ownership seam. Later sentences
+		// prove offsets beyond the old60-second limit without repeating context.
+		for _, start := range []float64{28.5, 63, 90} {
+			copy(pcm[int(start*float64(rate)):], samples)
+		}
+		wav := audio.EncodeWAV(pcm, rate)
+		encoder, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(encoder, "ffmpeg", "-nostdin", "-v", "error", "-f", "wav", "-i", "pipe:0", "-f", "mp3", "-codec:a", "libmp3lame", "-b:a", "64k", "pipe:1")
+		cmd.Stdin = bytes.NewReader(wav)
+		mp3, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("fixed MP3 regression fixture generation requires ffmpeg: %v", err)
+		}
+		for _, input := range []struct {
+			name string
+			data []byte
+		}{{"WAV", wav}, {"MP3", mp3}} {
+			t.Run(input.name, func(t *testing.T) {
+				raw := postAudioFields(ctx, t, endpoint, "transcriptions", url.Values{"model": {testModel}, "alignment_model": {aligner}, "language": {"en"}, "temperature": {"0"}, "response_format": {"verbose_json"}, "timestamp_granularities[]": {"word", "segment"}}, input.data)
+				var result openai.TranscriptionTimestampResponse
+				if err := json.Unmarshal(raw, &result); err != nil {
+					t.Fatal(err)
+				}
+				if result.Duration < 95 || result.Duration > 96 {
+					t.Fatalf("lost recording duration: %g", result.Duration)
+				}
+				if err := validAudioWordIntervals(result.Words, result.Duration); err != nil {
+					t.Fatal(err)
+				}
+				for _, word := range []string{"why", "sky", "blue"} {
+					count := 0
+					for _, w := range result.Words {
+						if strings.EqualFold(w.Word, word) {
+							count++
+						}
+					}
+					if count != 3 {
+						t.Fatalf("boundary omission/duplication: word %s count%d, response %s", word, count, raw)
+					}
+				}
+				for _, start := range []float64{28.5, 63, 90} {
+					found := false
+					for _, w := range result.Words {
+						if w.Start >= start-1 && w.Start < start+5 && strings.EqualFold(w.Word, "blue") {
+							found = true
+						}
+					}
+					if !found {
+						t.Fatalf("no globally offset blue near%gs: %s", start, raw)
+					}
+				}
+				if result.Segments == nil || len(*result.Segments) < 3 {
+					t.Fatalf("missing chunk segments %s", raw)
+				}
+				for i, seg := range *result.Segments {
+					if seg.ID != i || seg.Start < 0 || seg.End < seg.Start || seg.End > result.Duration {
+						t.Fatalf("invalid global segment %+v", seg)
+					}
+				}
+			})
+		}
+	})
 }
 
 func validAudioWordIntervals(words []openai.TranscriptionWord, duration float64) error {

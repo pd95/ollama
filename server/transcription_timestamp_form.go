@@ -14,10 +14,10 @@ import (
 	"golang.org/x/text/language"
 )
 
-const maxTimestampUploadBytes = 32 << 20
+const maxTimestampUploadBytes = maxAudioUploadBytes
 
 func timestampUploadTooLarge() error {
-	return &api.StatusError{StatusCode: http.StatusRequestEntityTooLarge, ErrorMessage: "word timestamps accept WAV uploads up to 32 MiB"}
+	return &api.StatusError{StatusCode: http.StatusRequestEntityTooLarge, ErrorMessage: "word timestamps accept WAV or MP3 uploads up to 512 MiB"}
 }
 
 func (f *audioTextForm) parseTimestampOptions(r *http.Request, task renderers.AudioTask) error {
@@ -52,7 +52,7 @@ func (f *audioTextForm) parseTimestampOptions(r *http.Request, task renderers.Au
 }
 
 func spoolTimestampUpload(ctx context.Context, source io.Reader) (path string, err error) {
-	file, err := os.CreateTemp("", "ollama-word-timestamps-*.wav")
+	file, err := os.CreateTemp("", "ollama-word-timestamps-*")
 	if err != nil {
 		return "", err
 	}

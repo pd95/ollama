@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"unsafe"
 )
@@ -107,4 +108,62 @@ func decodeMP3ContextDuration(ctx context.Context, data []byte, maxInputBytes, m
 		return nil, 0, errors.New("MP3 audio contains no decodable samples")
 	}
 	return samples, rate, nil
+}
+
+// mp3Stream owns its native decoder and stdio file until Close. No compressed
+// recording or complete decoded waveform is copied into Go or C memory.
+type mp3Stream struct {
+	ctx     context.Context //nolint:containedctx // Decoder lifetime belongs to one request.
+	decoder *C.ollama_miniaudio_mp3_decoder
+	rate    int
+}
+
+func openMP3Stream(ctx context.Context, path string) (SampleStream, error) {
+	name := C.CString(path)
+	defer C.free(unsafe.Pointer(name))
+	var channels, rate C.uint32_t
+	decoder := C.ollama_miniaudio_mp3_init_file(name, &channels, &rate)
+	if decoder == nil {
+		return nil, errors.New("failed to decode MP3 audio")
+	}
+	s := &mp3Stream{ctx: ctx, decoder: decoder, rate: int(rate)}
+	if channels == 0 || channels > 8 || rate < 8000 || rate > 192000 {
+		_ = s.Close()
+		return nil, errors.New("unsupported MP3 channels or sample rate")
+	}
+	return s, nil
+}
+func (s *mp3Stream) SampleRate() int { return s.rate }
+func (s *mp3Stream) Close() error {
+	if s.decoder != nil {
+		C.ollama_miniaudio_mp3_uninit(s.decoder)
+		s.decoder = nil
+	}
+	return nil
+}
+
+func (s *mp3Stream) Read(p []float32) (int, error) {
+	if err := s.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if s.decoder == nil {
+		return 0, errors.New("MP3 decoder is closed")
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	want := min(len(p), 4096)
+	var n C.uint64_t
+	if C.ollama_miniaudio_mp3_read(s.decoder, unsafe.Pointer(&p[0]), C.uint64_t(want), &n) != 0 {
+		return 0, errors.New("failed while decoding MP3 audio")
+	}
+	for _, v := range p[:int(n)] {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return 0, errors.New("MP3 contains a non-finite sample")
+		}
+	}
+	if n == 0 {
+		return 0, io.EOF
+	}
+	return int(n), nil
 }
