@@ -20,7 +20,7 @@ const (
 
 type timestampClipFunc func(context.Context, []byte, time.Duration) (openai.TranscriptionTimestampResponse, error)
 
-// timestampRecording owns a rolling source buffer. At most60 seconds plus one
+// timestampRecording owns a rolling source buffer. At most 60 seconds plus one
 // source frame are buffered, independent of recording duration. Each native
 // ASR->align stage drains before another stage acquires a scheduler lease.
 func timestampRecording(ctx context.Context, source audio.SampleStream, original []byte, segments bool, transcribe timestampClipFunc) (openai.TranscriptionTimestampResponse, error) {
@@ -54,6 +54,9 @@ func timestampRecording(ctx context.Context, source audio.SampleStream, original
 				return timestampFailure(400, "word timestamps accept recordings up to 2 hours")
 			}
 			if err != nil && !errors.Is(err, io.EOF) {
+				if errors.Is(err, audio.ErrInvalidData) {
+					return timestampFailure(400, err.Error())
+				}
 				return err
 			}
 			eof = errors.Is(err, io.EOF)
@@ -87,6 +90,8 @@ func timestampRecording(ctx context.Context, source audio.SampleStream, original
 		}
 		return transcribe(ctx, wav, time.Duration(count)*time.Second/time.Duration(rate))
 	}
+	var deferred []openai.TranscriptionWord
+	var fallbackLanguage string
 	for core := 0; ; core += timestampCoreSeconds * rate {
 		if err := ctx.Err(); err != nil {
 			return out, err
@@ -114,13 +119,20 @@ func timestampRecording(ctx context.Context, source audio.SampleStream, original
 		}
 		final := eof && total <= core+timestampCoreSeconds*rate
 		coreEnd := min(total, core+timestampCoreSeconds*rate)
-		if err := appendTimestampWindow(&out, clip, float64(start)/float64(rate), float64(core)/float64(rate), float64(coreEnd)/float64(rate), final); err != nil {
+		if err := appendTimestampWindow(&out, clip, float64(start)/float64(rate), float64(core)/float64(rate), float64(coreEnd)/float64(rate), final, deferred); err != nil {
 			return out, err
 		}
+		if fallbackLanguage == "" {
+			fallbackLanguage = clip.Language
+		}
+		deferred = timestampDeferredWords(clip, float64(start)/float64(rate), float64(coreEnd)/float64(rate), final)
 		out.Duration = float64(total) / float64(rate)
 		if final {
 			break
 		}
+	}
+	if out.Language == "" {
+		out.Language = fallbackLanguage
 	}
 	return out, nil
 }
@@ -128,12 +140,15 @@ func timestampRecording(ctx context.Context, source audio.SampleStream, original
 // Ownership is decided by aligned word midpoints in nonoverlapping cores, not
 // by matching arbitrary transcript suffixes. Context on both sides lets words
 // crossing a cut be recognized and aligned whole. Times are never clamped.
-func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip openai.TranscriptionTimestampResponse, offset, coreStart, coreEnd float64, final bool) error {
+func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip openai.TranscriptionTimestampResponse, offset, coreStart, coreEnd float64, final bool, deferred []openai.TranscriptionWord) error {
+	if clip.Text == "" {
+		if len(deferred) > 0 {
+			return timestampFailure(422, "deferred boundary words disappeared in the next window")
+		}
+		return nil
+	}
 	if out.Language == "" {
 		out.Language = clip.Language
-	}
-	if clip.Text == "" {
-		return nil
 	}
 	name := "English"
 	if clip.Language == "german" {
@@ -143,12 +158,19 @@ func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip open
 	if err != nil || len(units) != len(clip.Words) {
 		return timestampFailure(502, "chunk alignment does not cover transcript")
 	}
+	firstDeferred, err := timestampDeferredMatch(deferred, clip.Words, offset)
+	if err != nil {
+		return err
+	}
 	// Join at a shared time-local word, using one window's actual alignment
 	// for the transition. This avoids mixing two independently jittered word
 	// intervals on opposite sides of an artificial core cut.
 	anchor, err := timestampWindowAnchor(out, clip, offset, coreStart)
 	if err != nil {
 		return err
+	}
+	if firstDeferred >= 0 && firstDeferred <= anchor {
+		return timestampFailure(422, "deferred word conflicts with committed boundary")
 	}
 	first, last := -1, -1
 	firstOutput := len(out.Words)
@@ -159,7 +181,7 @@ func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip open
 		if math.IsNaN(middle) || math.IsInf(middle, 0) || word.End < word.Start {
 			return timestampFailure(502, "invalid chunk word interval")
 		}
-		if (anchor >= 0 && i <= anchor || anchor < 0 && middle < coreStart) || middle >= coreEnd && !(final && middle == coreEnd) {
+		if (anchor >= 0 && i <= anchor || anchor < 0 && firstDeferred >= 0 && i < firstDeferred || anchor < 0 && firstDeferred < 0 && middle < coreStart) || middle >= coreEnd && !(final && middle == coreEnd) {
 			continue
 		}
 		if len(out.Words) > 0 {
@@ -252,4 +274,46 @@ func timestampWindowAnchor(out *openai.TranscriptionTimestampResponse, clip open
 		seg.End = out.Words[len(out.Words)-1].End
 	}
 	return anchor, nil
+}
+
+// Keep only the bounded right-context tail until the next window accounts for
+// it. A shifted midpoint must not make a word fall through both ownership cores.
+func timestampDeferredWords(clip openai.TranscriptionTimestampResponse, offset, cut float64, final bool) []openai.TranscriptionWord {
+	if final {
+		return nil
+	}
+	var words []openai.TranscriptionWord
+	for _, word := range clip.Words {
+		word.Start += offset
+		word.End += offset
+		if (word.Start+word.End)/2 >= cut {
+			words = append(words, word)
+		}
+	}
+	return words
+}
+
+func timestampDeferredMatch(deferred, current []openai.TranscriptionWord, offset float64) (int, error) {
+	first, previous := -1, -1
+	for _, old := range deferred {
+		match := -1
+		for i, word := range current {
+			word.Start += offset
+			word.End += offset
+			if strings.EqualFold(old.Word, word.Word) && old.Start < word.End && word.Start < old.End {
+				if match >= 0 {
+					return -1, timestampFailure(422, "ambiguous deferred word at chunk boundary")
+				}
+				match = i
+			}
+		}
+		if match < 0 || match <= previous {
+			return -1, timestampFailure(422, "unresolved deferred word at chunk boundary")
+		}
+		if first < 0 {
+			first = match
+		}
+		previous = match
+	}
+	return first, nil
 }

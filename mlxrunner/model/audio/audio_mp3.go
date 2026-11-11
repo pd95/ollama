@@ -124,12 +124,12 @@ func openMP3Stream(ctx context.Context, path string) (SampleStream, error) {
 	var channels, rate C.uint32_t
 	decoder := C.ollama_miniaudio_mp3_init_file(name, &channels, &rate)
 	if decoder == nil {
-		return nil, errors.New("failed to decode MP3 audio")
+		return nil, invalidStreamData("failed to decode MP3 audio")
 	}
 	s := &mp3Stream{ctx: ctx, decoder: decoder, rate: int(rate)}
 	if channels == 0 || channels > 8 || rate < 8000 || rate > 192000 {
 		_ = s.Close()
-		return nil, errors.New("unsupported MP3 channels or sample rate")
+		return nil, invalidStreamData("unsupported MP3 channels or sample rate")
 	}
 	return s, nil
 }
@@ -155,11 +155,11 @@ func (s *mp3Stream) Read(p []float32) (int, error) {
 	want := min(len(p), 4096)
 	var n C.uint64_t
 	if C.ollama_miniaudio_mp3_read(s.decoder, unsafe.Pointer(&p[0]), C.uint64_t(want), &n) != 0 {
-		return 0, errors.New("failed while decoding MP3 audio")
+		return 0, invalidStreamData("failed while decoding MP3 audio")
 	}
 	for _, v := range p[:int(n)] {
 		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-			return 0, errors.New("MP3 contains a non-finite sample")
+			return 0, invalidStreamData("MP3 contains a non-finite sample")
 		}
 	}
 	if n == 0 {

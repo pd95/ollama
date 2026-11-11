@@ -10,8 +10,14 @@ import (
 	"os"
 )
 
+// ErrInvalidData identifies unsupported or malformed encoded audio and samples,
+// separately from caller cancellation and file-system I/O failures.
+var ErrInvalidData = errors.New("invalid audio data")
+
+func invalidStreamData(message string) error { return fmt.Errorf("%w: %s", ErrInvalidData, message) }
+
 // SampleStream decodes mono samples incrementally at the source rate. The
-// caller owns Close, including on cancellation. Read returns at most4096 frames.
+// caller owns Close, including on cancellation. Read returns at most 4096 frames.
 type SampleStream interface {
 	Read([]float32) (int, error)
 	SampleRate() int
@@ -30,6 +36,10 @@ func OpenSampleStream(ctx context.Context, path string) (SampleStream, error) {
 	}
 	var header [12]byte
 	n, err := f.ReadAt(header[:], 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		_ = f.Close()
+		return nil, err
+	}
 	if n >= 3 && isMP3(header[:n]) {
 		_ = f.Close()
 		return openMP3Stream(ctx, path)
@@ -74,12 +84,12 @@ func openWAVStream(ctx context.Context, f *os.File) (SampleStream, error) {
 		}
 		size := int64(binary.LittleEndian.Uint32(chunk[4:]))
 		if size > stat.Size()-offset-8 {
-			return nil, errors.New("wav: truncated chunk")
+			return nil, invalidStreamData("wav: truncated chunk")
 		}
 		switch string(chunk[:4]) {
 		case "fmt ":
 			if size < 16 {
-				return nil, errors.New("wav: fmt chunk too short")
+				return nil, invalidStreamData("wav: fmt chunk too short")
 			}
 			format = make([]byte, min(size, 40))
 			if _, err := f.ReadAt(format, offset+8); err != nil {
@@ -91,7 +101,7 @@ func openWAVStream(ctx context.Context, f *os.File) (SampleStream, error) {
 		offset += 8 + size + size%2
 	}
 	if len(format) < 16 || dataOffset == 0 {
-		return nil, errors.New("wav: missing fmt or data chunk")
+		return nil, invalidStreamData("wav: missing fmt or data chunk")
 	}
 	code := binary.LittleEndian.Uint16(format)
 	if code == 0xfffe && len(format) >= 26 {
@@ -101,14 +111,14 @@ func openWAVStream(ctx context.Context, f *os.File) (SampleStream, error) {
 	rate := int(binary.LittleEndian.Uint32(format[4:]))
 	bits := int(binary.LittleEndian.Uint16(format[14:]))
 	if channels < 1 || channels > 32 || rate < 1 || rate > maxSampleRate {
-		return nil, errors.New("wav: unsupported channels or sample rate")
+		return nil, invalidStreamData("wav: unsupported channels or sample rate")
 	}
 	if !(code == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32) || code == 3 && bits == 32) {
-		return nil, errors.New("wav: unsupported sample format")
+		return nil, invalidStreamData("wav: unsupported sample format")
 	}
 	stride := channels * (bits / 8)
 	if dataSize%int64(stride) != 0 {
-		return nil, errors.New("wav: partial PCM frame")
+		return nil, invalidStreamData("wav: partial PCM frame")
 	}
 	header := WAVHeader(rate, 0)
 	binary.LittleEndian.PutUint16(header[20:], code)
@@ -134,18 +144,21 @@ func (s *wavStream) Read(p []float32) (int, error) {
 		return 0, io.EOF
 	}
 	if n%s.stride != 0 {
-		return 0, errors.New("wav: partial PCM frame")
+		return 0, invalidStreamData("wav: partial PCM frame")
 	}
 	copy(s.bytes, s.header)
 	binary.LittleEndian.PutUint32(s.bytes[4:], uint32(n+36))
 	binary.LittleEndian.PutUint32(s.bytes[40:], uint32(n))
 	samples, _, err := decodeWAVContext(s.ctx, s.bytes[:44+n], 4096)
 	if err != nil {
-		return 0, err
+		if s.ctx.Err() != nil {
+			return 0, s.ctx.Err()
+		}
+		return 0, fmt.Errorf("%w: %v", ErrInvalidData, err)
 	}
 	for _, v := range samples {
 		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-			return 0, errors.New("wav: non-finite sample")
+			return 0, invalidStreamData("wav: non-finite sample")
 		}
 	}
 	return copy(p, samples), nil

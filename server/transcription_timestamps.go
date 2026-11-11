@@ -213,7 +213,10 @@ func (s *Server) transcribeWithTimestamps(ctx context.Context, form audioTextFor
 	}
 	stream, err := audio.OpenSampleStream(ctx, form.timestampUpload)
 	if err != nil {
-		return response, timestampFailure(400, err.Error())
+		if errors.Is(err, audio.ErrUnrecognized) || errors.Is(err, audio.ErrInvalidData) {
+			return response, timestampFailure(400, err.Error())
+		}
+		return response, err
 	}
 	defer stream.Close()
 	return timestampRecording(ctx, stream, original, form.segmentTimestamps, func(ctx context.Context, wav []byte, duration time.Duration) (openai.TranscriptionTimestampResponse, error) {

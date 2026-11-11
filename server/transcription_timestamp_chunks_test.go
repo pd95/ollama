@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -75,14 +77,14 @@ func TestTimestampShortPreservesWAVAndText(t *testing.T) {
 func TestTimestampBoundaryOwnership(t *testing.T) {
 	out := openai.TranscriptionTimestampResponse{Words: []openai.TranscriptionWord{}}
 	first := openai.TranscriptionTimestampResponse{Text: "One boundary!", Language: "english", Words: []openai.TranscriptionWord{{Word: "One", Start: 28, End: 29}, {Word: "boundary", Start: 29.7, End: 30.5}}}
-	if err := appendTimestampWindow(&out, first, 0, 0, 30, false); err != nil {
+	if err := appendTimestampWindow(&out, first, 0, 0, 30, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(out.Words) != 1 {
 		t.Fatal("crossing word must belong to next core by midpoint")
 	}
 	next := openai.TranscriptionTimestampResponse{Text: "boundary! Next.", Language: "english", Words: []openai.TranscriptionWord{{Word: "boundary", Start: 1.7, End: 2.5}, {Word: "Next", Start: 3, End: 4}}}
-	if err := appendTimestampWindow(&out, next, 28, 30, 60, false); err != nil {
+	if err := appendTimestampWindow(&out, next, 28, 30, 60, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(out.Words) != 3 || out.Words[1].Start != 29.7 || strings.Count(strings.ToLower(out.Text), "boundary") != 1 {
@@ -98,7 +100,7 @@ func TestTimestampBoundaryDedupAndConflicts(t *testing.T) {
 			text = "other"
 		}
 		in := openai.TranscriptionTimestampResponse{Text: text, Words: []openai.TranscriptionWord{{Word: text, Start: 1.9, End: 2.5}}}
-		err := appendTimestampWindow(&out, in, 28, 30, 60, false)
+		err := appendTimestampWindow(&out, in, 28, 30, 60, false, nil)
 		if same && (err != nil || len(out.Words) != 1) {
 			t.Fatalf("same interval not deduplicated: %v", err)
 		}
@@ -107,7 +109,7 @@ func TestTimestampBoundaryDedupAndConflicts(t *testing.T) {
 		}
 	}
 	out := openai.TranscriptionTimestampResponse{Words: []openai.TranscriptionWord{{Word: "go", Start: 29, End: 29.5}}}
-	if err := appendTimestampWindow(&out, openai.TranscriptionTimestampResponse{Text: "go go", Words: []openai.TranscriptionWord{{Word: "go", Start: 2, End: 2.3}, {Word: "go", Start: 2.4, End: 2.8}}}, 28, 30, 60, false); err != nil || len(out.Words) != 3 {
+	if err := appendTimestampWindow(&out, openai.TranscriptionTimestampResponse{Text: "go go", Words: []openai.TranscriptionWord{{Word: "go", Start: 2, End: 2.3}, {Word: "go", Start: 2.4, End: 2.8}}}, 28, 30, 60, false, nil); err != nil || len(out.Words) != 3 {
 		t.Fatalf("legitimate repetitions lost: %v", err)
 	}
 }
@@ -156,7 +158,7 @@ func TestTimestampMP3LongDecoder(t *testing.T) {
 func TestTimestampBoundaryUsesOneAlignment(t *testing.T) {
 	out := openai.TranscriptionTimestampResponse{Text: "Why sky", Words: []openai.TranscriptionWord{{Word: "Why", Start: 29, End: 29.5}, {Word: "sky", Start: 29.6, End: 30.08}}}
 	clip := openai.TranscriptionTimestampResponse{Text: "Why sky blue?", Words: []openai.TranscriptionWord{{Word: "Why", Start: .99, End: 1.52}, {Word: "sky", Start: 1.59, End: 2.05}, {Word: "blue", Start: 2.06, End: 2.5}}}
-	if err := appendTimestampWindow(&out, clip, 28, 30, 60, false); err != nil {
+	if err := appendTimestampWindow(&out, clip, 28, 30, 60, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(out.Words) != 3 || out.Words[1].End != 30.05 || out.Words[2].Start != 30.06 || out.Text != "Why sky blue?" {
@@ -170,5 +172,80 @@ func TestTimestampLongSilenceMetadata(t *testing.T) {
 	})
 	if err != nil || result.Duration != 61 || result.Language != "english" || result.Words == nil || len(result.Words) != 0 || result.Segments == nil || len(*result.Segments) != 0 {
 		t.Fatalf("long silence metadata %+v %v", result, err)
+	}
+}
+
+func TestTimestampRecordingDeferredWordShift(t *testing.T) {
+	calls := 0
+	out, err := timestampRecording(t.Context(), &timestampTestSamples{remaining: 65 * 16000}, nil, false, func(context.Context, []byte, time.Duration) (openai.TranscriptionTimestampResponse, error) {
+		calls++
+		switch calls {
+		case 1:
+			return openai.TranscriptionTimestampResponse{Text: "One boundary", Language: "english", Words: []openai.TranscriptionWord{{Word: "One", Start: 27, End: 27.5}, {Word: "boundary", Start: 29.8, End: 30.4}}}, nil
+		case 2:
+			return openai.TranscriptionTimestampResponse{Text: "boundary Next", Language: "english", Words: []openai.TranscriptionWord{{Word: "boundary", Start: 1.5, End: 2.1}, {Word: "Next", Start: 3, End: 4}}}, nil
+		default:
+			return openai.TranscriptionTimestampResponse{Language: "english", Words: []openai.TranscriptionWord{}}, nil
+		}
+	})
+	if err != nil || len(out.Words) != 3 || out.Text != "One boundary Next" {
+		t.Fatalf("deferred boundary lost: %+v %v", out, err)
+	}
+}
+
+func TestTimestampDeferredAmbiguityFails(t *testing.T) {
+	deferred := []openai.TranscriptionWord{{Word: "boundary", Start: 29.8, End: 30.4}}
+	for _, clip := range []openai.TranscriptionTimestampResponse{
+		{},
+		{Text: "different Next", Words: []openai.TranscriptionWord{{Word: "different", Start: 1.5, End: 2.1}, {Word: "Next", Start: 3, End: 4}}},
+		{Text: "boundary boundary", Words: []openai.TranscriptionWord{{Word: "boundary", Start: 1.8, End: 2.1}, {Word: "boundary", Start: 2.2, End: 2.3}}},
+	} {
+		out := openai.TranscriptionTimestampResponse{Text: "One", Words: []openai.TranscriptionWord{{Word: "One", Start: 27, End: 27.5}}}
+		err := appendTimestampWindow(&out, clip, 28, 30, 60, false, deferred)
+		if audioTextErrorStatus(err, 500) != 422 {
+			t.Fatalf("unresolved deferred word succeeded: %+v %v", out, err)
+		}
+	}
+}
+
+func TestTimestampSilenceBeforeDetectedSpeech(t *testing.T) {
+	calls := 0
+	out, err := timestampRecording(t.Context(), &timestampTestSamples{remaining: 65 * 16000}, nil, false, func(context.Context, []byte, time.Duration) (openai.TranscriptionTimestampResponse, error) {
+		calls++
+		if calls == 2 {
+			return openai.TranscriptionTimestampResponse{Text: "Hallo", Language: "german", Words: []openai.TranscriptionWord{{Word: "Hallo", Start: 3, End: 4}}}, nil
+		}
+		return openai.TranscriptionTimestampResponse{Language: "english", Words: []openai.TranscriptionWord{}}, nil
+	})
+	if err != nil || out.Language != "german" {
+		t.Fatalf("silence chose language: %+v %v", out, err)
+	}
+}
+
+func TestTimestampInvalidStreamDataStatus(t *testing.T) {
+	pcm := make([]float32, 65*16000)
+	pcm[0] = float32(math.NaN())
+	wav, err := audio.EncodeFloatWAVContext(t.Context(), pcm, 16000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "input.wav")
+	if err := os.WriteFile(path, wav, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{}
+	_, err = s.transcribeWithTimestamps(t.Context(), audioTextForm{timestampUpload: path}, nil, nil)
+	if audioTextErrorStatus(err, 500) != 400 {
+		t.Fatalf("bad samples classified as server failure: %v", err)
+	}
+	_, err = s.transcribeWithTimestamps(t.Context(), audioTextForm{timestampUpload: path + "-missing"}, nil, nil)
+	if audioTextErrorStatus(err, 500) != 500 || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("file IO failure reclassified: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = s.transcribeWithTimestamps(ctx, audioTextForm{timestampUpload: path}, nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation reclassified: %v", err)
 	}
 }

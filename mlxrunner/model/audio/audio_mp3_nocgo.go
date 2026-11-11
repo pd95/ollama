@@ -26,5 +26,5 @@ func openMP3Stream(ctx context.Context, _ string) (SampleStream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return nil, errors.New("MP3 decoding requires cgo")
+	return nil, invalidStreamData("MP3 decoding requires cgo")
 }
