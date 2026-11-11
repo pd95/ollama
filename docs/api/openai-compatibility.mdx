@@ -396,7 +396,7 @@ Transcribes speech with models that accept audio input.
   - [ ] `srt`, `vtt`
 - [x] `temperature` (default `0`)
 - [x] `stream` (server-sent `transcript.text.delta` and `transcript.text.done` events)
-- [x] `timestamp_granularities[]` (`segment`, or experimental `word` timestamps with native Qwen3-ASR and ForcedAligner; requires `verbose_json` and non-streaming output)
+- [x] `timestamp_granularities[]` (`segment`, or experimental `word` timestamps with native Qwen3-ASR and ForcedAligner; requires `verbose_json`; word mode also supports complete-file streaming)
 
 #### Notes
 
@@ -453,8 +453,7 @@ curl http://localhost:11434/v1/audio/transcriptions \
 ```
 
 Word mode accepts a complete WAV or MP3 upload, up to two hours of decoded audio
-and 512 MiB per request, with `response_format=verbose_json` and `stream=false`
-(the default). WAV recordings up to 60 seconds retain the existing single-clip
+and 512 MiB per request, with `response_format=verbose_json`. Output defaults to non-streaming JSON. WAV recordings up to 60 seconds retain the existing single-clip
 behavior. Longer recordings use 30-second ownership intervals with two seconds
 of overlapping audio context on each side. MP3 decoding is native; FFmpeg and
 Python are not server dependencies. Unsupported/corrupt audio fails the request.
@@ -488,6 +487,28 @@ owned word spans in the punctuated chunk transcripts. Invalid or
 out-of-recording alignment fails the request; the server does not substitute
 an untimed success. Provider agreement does not establish human-annotated
 recognition or alignment accuracy.
+
+For complete-file word streaming, add `-F stream=true` and use `curl -N`.
+Upload finishes before SSE begins. A bounded preparation pass decodes and discards
+samples to determine the exact duration, then reopens the upload for inference.
+`transcript.progress` reports stage, `scanned_seconds`, and `processed_seconds`;
+`total_seconds` and `percent` appear after preparation. Updates repeat every five
+seconds during long waits. Percentage measures completed audio, not remaining time.
+
+Finalized `transcript.text.delta` events preserve punctuation and spacing.
+`transcript.words.delta` carries `word_offset`, `words` and optional `segments`
+with stable IDs. Append words at the supplied offset and concatenate text deltas
+verbatim. Blocks near a boundary wait until future windows cannot revise them.
+Successful `transcript.text.done` includes `text` and `result`, the full verbose
+JSON object. Progress, word events and the final `result` member are Ollama fork
+extensions; extension-aware SSE clients are needed for aligned batches.
+
+Pre-admission failures retain normal HTTP errors. Once SSE starts, failure emits
+`type: "error"`, OpenAI-shaped `error` details, `status`, and `complete:false`;
+no successful done follows. Disconnect or EOF without done means incomplete,
+even if prefix batches arrived. Disconnects and write timeouts cancel work while
+retaining capacity until native cleanup. Segment-only streaming remains rejected.
+This processes uploaded recordings, not live microphone input.
 
 `/api/experimental/audio/sessions` is a separate custom, default-disabled
 protocol, enabled only by `OLLAMA_EXPERIMENT=asr-streaming`. It is not an OpenAI
