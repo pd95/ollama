@@ -294,3 +294,48 @@ func TestTimestampOwnedPrefixBeforeCommittedAnchorFails(t *testing.T) {
 		t.Fatalf("new owned prefix silently lost: %+v %v", out, err)
 	}
 }
+
+func TestTimestampFuturePreviewMayBeRevised(t *testing.T) {
+	out := openai.TranscriptionTimestampResponse{Text: "One", Words: []openai.TranscriptionWord{{Word: "One", Start: 27, End: 27.5}}}
+	deferred := []openai.TranscriptionWord{{Word: "blue", Start: 31.7, End: 32}}
+	clip := openai.TranscriptionTimestampResponse{Text: "blue", Language: "english", Words: []openai.TranscriptionWord{{Word: "blue", Start: 5.6, End: 6.1}}}
+	if err := appendTimestampWindow(&out, clip, 28, 30, 60, false, deferred); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Words) != 2 || out.Text != "One blue" {
+		t.Fatalf("owned revised preview lost: %+v", out)
+	}
+}
+
+func TestTimestampFuturePreviewMayBecomeSilenceOrRepetitions(t *testing.T) {
+	deferred := []openai.TranscriptionWord{{Word: "blue", Start: 31.7, End: 32.1}}
+	for _, clip := range []openai.TranscriptionTimestampResponse{
+		{},
+		{Text: "blue blue", Words: []openai.TranscriptionWord{{Word: "blue", Start: 3.7, End: 3.8}, {Word: "blue", Start: 3.9, End: 4.1}}},
+	} {
+		out := openai.TranscriptionTimestampResponse{Text: "One", Words: []openai.TranscriptionWord{{Word: "One", Start: 27, End: 27.5}}}
+		if err := appendTimestampWindow(&out, clip, 28, 30, 60, false, deferred); err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Words) != 1+len(clip.Words) {
+			t.Fatalf("revised repetitions lost: %+v", out)
+		}
+	}
+}
+
+func TestTimestampMillisecondGlobalCoordinates(t *testing.T) {
+	a := timestampGlobalWord(openai.TranscriptionWord{Word: "point", Start: 30.24, End: 30.24}, 0)
+	b := timestampGlobalWord(openai.TranscriptionWord{Word: "point", Start: 2.24, End: 2.24}, 28)
+	if a != b || !timestampWordCorresponds(a, b) {
+		t.Fatalf("same millisecond differs: %+v %+v", a, b)
+	}
+	c := timestampGlobalWord(openai.TranscriptionWord{Word: "point", Start: 2.241, End: 2.241}, 28)
+	if timestampWordCorresponds(a, c) {
+		t.Fatal("distinct milliseconds merged")
+	}
+	left := timestampGlobalWord(openai.TranscriptionWord{Word: "left", Start: 29, End: 30.24}, 0)
+	right := timestampGlobalWord(openai.TranscriptionWord{Word: "right", Start: 2.24, End: 3}, 28)
+	if left.End != right.Start || timestampWordCorresponds(left, right) {
+		t.Fatal("touching positive intervals merged")
+	}
+}

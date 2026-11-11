@@ -142,10 +142,8 @@ func timestampRecording(ctx context.Context, source audio.SampleStream, original
 // crossing a cut be recognized and aligned whole. Times are never clamped.
 func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip openai.TranscriptionTimestampResponse, offset, coreStart, coreEnd float64, final bool, deferred []openai.TranscriptionWord) error {
 	if clip.Text == "" {
-		if len(deferred) > 0 {
-			return timestampFailure(422, "deferred boundary words disappeared in the next window")
-		}
-		return nil
+		_, err := timestampDeferredMatch(deferred, nil, offset, coreStart)
+		return err
 	}
 	if out.Language == "" {
 		out.Language = clip.Language
@@ -158,7 +156,7 @@ func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip open
 	if err != nil || len(units) != len(clip.Words) {
 		return timestampFailure(502, "chunk alignment does not cover transcript")
 	}
-	firstDeferred, err := timestampDeferredMatch(deferred, clip.Words, offset)
+	firstDeferred, err := timestampDeferredMatch(deferred, clip.Words, offset, coreStart)
 	if err != nil {
 		return err
 	}
@@ -175,9 +173,8 @@ func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip open
 	first, last := -1, -1
 	firstOutput := len(out.Words)
 	for i, word := range clip.Words {
-		word.Start += offset
-		word.End += offset
-		middle := (word.Start + word.End) / 2
+		word = timestampGlobalWord(word, offset)
+		middle := timestampWordMidpoint(word)
 		if math.IsNaN(middle) || math.IsInf(middle, 0) || word.End < word.Start {
 			return timestampFailure(502, "invalid chunk word interval")
 		}
@@ -253,9 +250,7 @@ func timestampWindowAnchor(out *openai.TranscriptionTimestampResponse, clip open
 	last := out.Words[len(out.Words)-1]
 	anchor := -1
 	global := func(w openai.TranscriptionWord) openai.TranscriptionWord {
-		w.Start += offset
-		w.End += offset
-		return w
+		return timestampGlobalWord(w, offset)
 	}
 	for i, word := range clip.Words {
 		word = global(word)
@@ -303,31 +298,51 @@ func timestampDeferredWords(clip openai.TranscriptionTimestampResponse, offset, 
 	}
 	var words []openai.TranscriptionWord
 	for _, word := range clip.Words {
-		word.Start += offset
-		word.End += offset
-		if (word.Start+word.End)/2 >= cut {
+		word = timestampGlobalWord(word, offset)
+		if timestampWordMidpoint(word) >= cut {
 			words = append(words, word)
 		}
 	}
 	return words
 }
 
-func timestampDeferredMatch(deferred, current []openai.TranscriptionWord, offset float64) (int, error) {
+// A right-context transcript is a preview, not committed output. Only deferred
+// events that the next midpoint filter could discard need recovery. Predictions
+// wholly in the next core may be revised by that window's complete audio.
+func timestampDeferredMatch(deferred, current []openai.TranscriptionWord, offset, cut float64) (int, error) {
 	first, previous := -1, -1
 	for _, old := range deferred {
-		match := -1
-		for i, word := range current {
-			word.Start += offset
-			word.End += offset
-			if strings.EqualFold(old.Word, word.Word) && timestampWordCorresponds(old, word) {
-				if match >= 0 {
-					return -1, timestampFailure(422, "ambiguous deferred word at chunk boundary")
-				}
+		match, count := -1, 0
+		recovery, conflict := false, false
+		crossing := old.Start < cut && old.End >= cut || old.Start == cut && old.End == cut
+		for i, local := range current {
+			word := timestampGlobalWord(local, offset)
+			if !timestampWordCorresponds(old, word) {
+				continue
+			}
+			before := timestampWordMidpoint(word) < cut
+			if strings.EqualFold(old.Word, word.Word) {
 				match = i
+				count++
+				recovery = recovery || before
+			} else if before {
+				conflict = true
 			}
 		}
-		if match < 0 || match <= previous {
-			return -1, timestampFailure(422, "unresolved deferred word at chunk boundary")
+		// Wholly-future previews may change, disappear or split into repetitions.
+		// Only crossing-cut evidence or an event that would be filtered needs a join.
+		if !crossing && !recovery && !conflict {
+			continue
+		}
+		if conflict || count != 1 {
+			return -1, timestampFailure(422, "unresolved or ambiguous deferred word at chunk boundary")
+		}
+		word := timestampGlobalWord(current[match], offset)
+		if timestampWordMidpoint(word) >= cut {
+			continue
+		}
+		if match <= previous {
+			return -1, timestampFailure(422, "unordered deferred words at chunk boundary")
 		}
 		if first < 0 {
 			first = match
@@ -348,4 +363,18 @@ func timestampWordCorresponds(a, b openai.TranscriptionWord) bool {
 		return a.Start <= b.Start && b.Start <= a.End
 	}
 	return a.Start < b.End && b.Start < a.End
+}
+
+// The aligner emits integer milliseconds. Convert the local prediction and the
+// absolute sample-derived window offset to that exact grid before adding, so
+// equal points and touching intervals cannot differ by floating-point roundoff.
+func timestampGlobalWord(word openai.TranscriptionWord, offset float64) openai.TranscriptionWord {
+	offsetMS := math.Round(offset * 1000)
+	word.Start = (math.Round(word.Start*1000) + offsetMS) / 1000
+	word.End = (math.Round(word.End*1000) + offsetMS) / 1000
+	return word
+}
+
+func timestampWordMidpoint(word openai.TranscriptionWord) float64 {
+	return (math.Round(word.Start*1000) + math.Round(word.End*1000)) / 2000
 }

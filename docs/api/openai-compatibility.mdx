@@ -469,7 +469,8 @@ native cleanup. A cancelled request returns no partial successful transcript.
 Words crossing a chunk cut are aligned with surrounding context and initially
 assigned by their interval midpoint. A bounded deferred overlap tail is reconciled
 with the next window, so a shifted prediction cannot silently omit a word from
-both chunks. Unresolved deferred correspondence fails with HTTP 422. All times include the window's global sample offset.
+both chunks. Unresolved boundary correspondence fails with HTTP 422; wholly
+future context is an uncommitted preview that the next chunk may revise. All times include the window's global sample offset.
 A shared word at intersecting audio times anchors the join; the transition uses
 complete alignment predictions from one window, including matching predecessors
 when necessary. Matching boundary words are emitted once; repeated words at
