@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -204,5 +206,106 @@ func TestTimestampStreamScanDurationLimit(t *testing.T) {
 	}
 	if _, err := timestampScan(ctx, path, o); audioTextErrorStatus(err, 500) != 400 {
 		t.Fatalf("duration cap: %v", err)
+	}
+}
+
+type timestampSlowWriter struct {
+	header                                                     http.Header
+	started, returned, releaseWrite, finishCallback, clearSeen chan struct{}
+	startOnce, returnedOnce, releaseOnce, clearOnce            sync.Once
+	mu                                                         sync.Mutex
+	deadlines                                                  []time.Time
+}
+
+func (w *timestampSlowWriter) Header() http.Header { return w.header }
+func (w *timestampSlowWriter) WriteHeader(int)     {}
+func (w *timestampSlowWriter) Flush()              {}
+func (w *timestampSlowWriter) Write([]byte) (int, error) {
+	w.startOnce.Do(func() { close(w.started) })
+	<-w.releaseWrite
+	w.returnedOnce.Do(func() { close(w.returned) })
+	return 0, io.ErrClosedPipe
+}
+
+func (w *timestampSlowWriter) SetWriteDeadline(d time.Time) error {
+	if !d.IsZero() && !d.After(time.Now()) {
+		w.releaseOnce.Do(func() { close(w.releaseWrite) })
+		<-w.finishCallback
+	}
+	w.mu.Lock()
+	w.deadlines = append(w.deadlines, d)
+	w.mu.Unlock()
+	if d.IsZero() {
+		w.clearOnce.Do(func() { close(w.clearSeen) })
+	}
+	return nil
+}
+
+func TestTimestampStreamDeadlineCallbackIsJoined(t *testing.T) {
+	s := &Server{}
+	q := s.timestampQueue()
+	q.limit = 1
+	active, releaseActive := make(chan struct{}), make(chan struct{})
+	defer close(releaseActive)
+	_, err := q.enqueue(t.Context(), func(context.Context) (openai.TranscriptionTimestampResponse, error) {
+		close(active)
+		<-releaseActive
+		return openai.TranscriptionTimestampResponse{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-active
+	w := &timestampSlowWriter{header: make(http.Header), started: make(chan struct{}), returned: make(chan struct{}), releaseWrite: make(chan struct{}), finishCallback: make(chan struct{}), clearSeen: make(chan struct{})}
+	var finish sync.Once
+	defer finish.Do(func() { close(w.finishCallback) })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/", nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); s.streamTimestampTranscription(c, audioTextForm{}, nil, nil) }()
+	select {
+	case <-w.started:
+	case <-time.After(time.Second):
+		t.Fatal("stream write not started")
+	}
+	cancel()
+	select {
+	case <-w.returned:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not release blocked write")
+	}
+	select {
+	case <-done:
+		t.Fatal("handler returned with deadline callback still active")
+	case <-w.clearSeen:
+		t.Fatal("deadline cleared before callback joined")
+	case <-time.After(20 * time.Millisecond):
+	}
+	finish.Do(func() { close(w.finishCallback) })
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler failed to finish after callback")
+	}
+	w.mu.Lock()
+	last := w.deadlines[len(w.deadlines)-1]
+	w.mu.Unlock()
+	if !last.IsZero() {
+		t.Fatal("final writer deadline was not cleared")
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.pending) != 0 {
+		t.Fatal("cancelled pending stream retained in queue")
+	}
+	if cap(q.pending) > 0 {
+		all := q.pending[:cap(q.pending)]
+		for _, j := range all {
+			if j != nil {
+				t.Fatal("pending backing array retains cancelled job")
+			}
+		}
 	}
 }
