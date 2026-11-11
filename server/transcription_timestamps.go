@@ -95,6 +95,10 @@ func (s *Server) timestampTranscription(c *gin.Context, form audioTextForm) {
 		openAIError(c, audioTextErrorStatus(err, 400), err.Error())
 		return
 	}
+	if form.stream {
+		s.streamTimestampTranscription(c, form, asr, aligner)
+		return
+	}
 	response, err := s.timestampQueue().run(c.Request.Context(), func(ctx context.Context) (openai.TranscriptionTimestampResponse, error) {
 		return s.transcribeWithTimestamps(ctx, form, asr, aligner)
 	})
@@ -170,7 +174,7 @@ func (s *Server) timestampStage(ctx context.Context, m *Model, build func(llm.Ll
 		cancelLease()
 		return mlxrunner.AudioTaskResult{}, err
 	}
-	defer func() { drainTimestampTask(backend, id); cancelLease() }()
+	defer func() { timestampProgress(ctx, "cleanup", -1); drainTimestampTask(backend, id); cancelLease() }()
 	input, err := build(runner)
 	if err != nil {
 		return mlxrunner.AudioTaskResult{}, err
@@ -239,6 +243,7 @@ func (s *Server) transcribeTimestampClip(ctx context.Context, form audioTextForm
 	if err != nil {
 		return response, err
 	}
+	timestampProgress(ctx, "transcribing", -1)
 	transcribed, err := s.timestampStage(ctx, asr, func(r llm.LlamaServer) (mlxrunner.AudioTaskRequest, error) {
 		messages := chatMessagesForRequest(asr, prompt.Messages)
 		text, media, err := chatPrompt(ctx, asr, r.Tokenize, optionsForPrompt(&opts, r), messages, nil, prompt.Think, false)
@@ -280,6 +285,7 @@ func (s *Server) transcribeTimestampClip(ctx context.Context, form audioTextForm
 	if err != nil {
 		return response, timestampFailure(422, err.Error())
 	}
+	timestampProgress(ctx, "aligning", -1)
 	aligned, err := s.timestampStage(ctx, aligner, func(llm.LlamaServer) (mlxrunner.AudioTaskRequest, error) {
 		return mlxrunner.AudioTaskRequest{Kind: "align", Audio: wav, Text: response.Text, Language: name}, nil
 	})

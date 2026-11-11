@@ -18,7 +18,7 @@ func TestTimestampFormValidation(t *testing.T) {
 		task   renderers.AudioTask
 	}{
 		{"format", map[string]string{"timestamp_granularities[]": "word"}, renderers.AudioTranscribe},
-		{"stream", map[string]string{"timestamp_granularities[]": "word", "response_format": "verbose_json", "stream": "true"}, renderers.AudioTranscribe},
+		{"stream segments", map[string]string{"timestamp_granularities[]": "segment", "response_format": "verbose_json", "stream": "true"}, renderers.AudioTranscribe},
 		{"unknown", map[string]string{"timestamp_granularities[]": "sentence", "response_format": "verbose_json"}, renderers.AudioTranscribe},
 		{"unused aligner", map[string]string{"alignment_model": "aligner"}, renderers.AudioTranscribe},
 		{"translation", map[string]string{"timestamp_granularities[]": "word", "response_format": "verbose_json"}, renderers.AudioTranslate},

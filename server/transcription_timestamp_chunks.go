@@ -90,6 +90,7 @@ func timestampRecording(ctx context.Context, source audio.SampleStream, original
 		}
 		return transcribe(ctx, wav, time.Duration(count)*time.Second/time.Duration(rate))
 	}
+	publication := timestampPublication{}
 	var deferred []openai.TranscriptionWord
 	var fallbackLanguage string
 	for core := 0; ; core += timestampCoreSeconds * rate {
@@ -101,6 +102,7 @@ func timestampRecording(ctx context.Context, source audio.SampleStream, original
 		copy(buffer, buffer[discard:count])
 		count -= discard
 		start = windowStart
+		timestampProgress(ctx, "decoding", -1)
 		if err := fill(core + (timestampCoreSeconds+timestampOverlapSeconds)*rate); err != nil {
 			return out, err
 		}
@@ -119,9 +121,17 @@ func timestampRecording(ctx context.Context, source audio.SampleStream, original
 		}
 		final := eof && total <= core+timestampCoreSeconds*rate
 		coreEnd := min(total, core+timestampCoreSeconds*rate)
+		oldText, oldWords, oldSegments := len(out.Text), len(out.Words), 0
+		if out.Segments != nil {
+			oldSegments = len(*out.Segments)
+		}
 		if err := appendTimestampWindow(&out, clip, float64(start)/float64(rate), float64(core)/float64(rate), float64(coreEnd)/float64(rate), final, deferred); err != nil {
 			return out, err
 		}
+		if err := publication.update(ctx, &out, oldText, oldWords, oldSegments, float64(coreEnd)/float64(rate)-timestampOverlapSeconds, final); err != nil {
+			return out, err
+		}
+		timestampProgress(ctx, "finalizing", float64(coreEnd)/float64(rate))
 		if fallbackLanguage == "" {
 			fallbackLanguage = clip.Language
 		}

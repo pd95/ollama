@@ -27,8 +27,8 @@ func (f *audioTextForm) parseTimestampOptions(r *http.Request, task renderers.Au
 		if task != renderers.AudioTranscribe {
 			return errors.New("timestamp granularities are only supported for transcriptions")
 		}
-		if f.responseFormat != "verbose_json" || f.stream {
-			return errors.New("timestamp granularities require response_format=verbose_json and stream=false")
+		if f.responseFormat != "verbose_json" {
+			return errors.New("timestamp granularities require response_format=verbose_json")
 		}
 	}
 	for _, value := range values {
@@ -40,6 +40,9 @@ func (f *audioTextForm) parseTimestampOptions(r *http.Request, task renderers.Au
 		default:
 			return fmt.Errorf("unsupported timestamp granularity %q, use word or segment", value)
 		}
+	}
+	if f.stream && f.segmentTimestamps && !f.wordTimestamps {
+		return errors.New("streaming segment timestamps require word timestamps")
 	}
 	if f.alignmentModel != "" && !f.wordTimestamps {
 		return errors.New("alignment_model requires word timestamps")

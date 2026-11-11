@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -110,6 +111,10 @@ func runOpenAIAudioTimestamps(t *testing.T) {
 			if hasWords != wantsWords || hasSegments != wantsSegments {
 				t.Fatalf("unexpected response members: %s", raw)
 			}
+			if wantsWords && wantsSegments {
+				fields.Set("stream", "true")
+				verifyTimestampStream(t, postAudioFields(ctx, t, endpoint, "transcriptions", fields, wav), result)
+			}
 			if tc.silence {
 				if result.Text != "" || result.Words == nil || len(result.Words) != 0 {
 					t.Fatalf("expected empty transcription and word array: %s", raw)
@@ -177,6 +182,8 @@ func runOpenAIAudioTimestamps(t *testing.T) {
 				if err := json.Unmarshal(raw, &result); err != nil {
 					t.Fatal(err)
 				}
+				streamRaw := postAudioFields(ctx, t, endpoint, "transcriptions", url.Values{"model": {testModel}, "alignment_model": {aligner}, "language": {"en"}, "temperature": {"0"}, "response_format": {"verbose_json"}, "timestamp_granularities[]": {"word", "segment"}, "stream": {"true"}}, input.data)
+				verifyTimestampStream(t, streamRaw, result)
 				if result.Duration < 95 || result.Duration > 96 {
 					t.Fatalf("lost recording duration: %g", result.Duration)
 				}
@@ -319,4 +326,62 @@ func TestAudioTimestampHelpers(t *testing.T) {
 			}
 		}
 	})
+}
+
+func verifyTimestampStream(t *testing.T, raw []byte, baseline openai.TranscriptionTimestampResponse) {
+	t.Helper()
+	var text strings.Builder
+	words := make([]openai.TranscriptionWord, 0)
+	segments := make([]openai.TranscriptionSegment, 0)
+	completed := false
+	progress := false
+	totalKnown := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var e struct {
+			Type     string                                `json:"type"`
+			Delta    string                                `json:"delta"`
+			Offset   int                                   `json:"word_offset"`
+			Words    []openai.TranscriptionWord            `json:"words"`
+			Segments []openai.TranscriptionSegment         `json:"segments"`
+			Total    *float64                              `json:"total_seconds"`
+			Result   openai.TranscriptionTimestampResponse `json:"result"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &e); err != nil {
+			t.Fatal(err)
+		}
+		if completed {
+			t.Fatal("event after completion")
+		}
+		switch e.Type {
+		case "transcript.progress":
+			progress = true
+			totalKnown = totalKnown || e.Total != nil
+		case "transcript.text.delta":
+			text.WriteString(e.Delta)
+		case "transcript.words.delta":
+			if e.Offset != len(words) {
+				t.Fatal("noncontiguous words")
+			}
+			words = append(words, e.Words...)
+			segments = append(segments, e.Segments...)
+		case "transcript.text.done":
+			completed = true
+			if text.String() != e.Result.Text || !reflect.DeepEqual(words, e.Result.Words) || e.Result.Segments == nil || !reflect.DeepEqual(segments, *e.Result.Segments) {
+				t.Fatalf("stream prefix differs from final result: %s", raw)
+			}
+			if !reflect.DeepEqual(e.Result, baseline) {
+				t.Fatalf("stream differs from JSON: %s", raw)
+			}
+		case "error":
+			t.Fatalf("stream failed: %s", raw)
+		default:
+			t.Fatalf("unknown event: %s", line)
+		}
+	}
+	if !completed || !progress || !totalKnown {
+		t.Fatalf("incomplete stream: %s", raw)
+	}
 }

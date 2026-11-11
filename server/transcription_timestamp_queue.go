@@ -29,24 +29,11 @@ type timestampQueue struct {
 }
 
 func (q *timestampQueue) run(ctx context.Context, work func(context.Context) (openai.TranscriptionTimestampResponse, error)) (openai.TranscriptionTimestampResponse, error) {
-	if err := ctx.Err(); err != nil {
+	j, err := q.enqueue(ctx, work)
+	if err != nil {
 		return openai.TranscriptionTimestampResponse{}, err
 	}
-	jobCtx, cancel := context.WithCancel(ctx)
-	j := &timestampJob{ctx: jobCtx, cancel: cancel, work: work, done: make(chan timestampReply, 1)}
-	defer cancel()
-	q.mu.Lock()
-	if q.closed || q.active != nil && len(q.pending) >= q.limit {
-		q.mu.Unlock()
-		return openai.TranscriptionTimestampResponse{}, ErrMaxQueue
-	}
-	if q.active == nil {
-		q.active = j
-		go q.work(j)
-	} else {
-		q.pending = append(q.pending, j)
-	}
-	q.mu.Unlock()
+	defer j.cancel()
 	select {
 	case reply := <-j.done:
 		return reply.response, reply.err
@@ -63,6 +50,28 @@ func (q *timestampQueue) run(ctx context.Context, work func(context.Context) (op
 		q.mu.Unlock()
 		return openai.TranscriptionTimestampResponse{}, ctx.Err()
 	}
+}
+
+func (q *timestampQueue) enqueue(ctx context.Context, work func(context.Context) (openai.TranscriptionTimestampResponse, error)) (*timestampJob, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	jobCtx, cancel := context.WithCancel(ctx)
+	j := &timestampJob{ctx: jobCtx, cancel: cancel, work: work, done: make(chan timestampReply, 1)}
+	q.mu.Lock()
+	if q.closed || q.active != nil && len(q.pending) >= q.limit {
+		q.mu.Unlock()
+		cancel()
+		return nil, ErrMaxQueue
+	}
+	if q.active == nil {
+		q.active = j
+		go q.work(j)
+	} else {
+		q.pending = append(q.pending, j)
+	}
+	q.mu.Unlock()
+	return j, nil
 }
 
 func (q *timestampQueue) work(j *timestampJob) {
