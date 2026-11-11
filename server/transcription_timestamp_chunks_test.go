@@ -152,3 +152,23 @@ func TestTimestampMP3LongDecoder(t *testing.T) {
 		}
 	}
 }
+
+func TestTimestampBoundaryUsesOneAlignment(t *testing.T) {
+	out := openai.TranscriptionTimestampResponse{Text: "Why sky", Words: []openai.TranscriptionWord{{Word: "Why", Start: 29, End: 29.5}, {Word: "sky", Start: 29.6, End: 30.08}}}
+	clip := openai.TranscriptionTimestampResponse{Text: "Why sky blue?", Words: []openai.TranscriptionWord{{Word: "Why", Start: .99, End: 1.52}, {Word: "sky", Start: 1.59, End: 2.05}, {Word: "blue", Start: 2.06, End: 2.5}}}
+	if err := appendTimestampWindow(&out, clip, 28, 30, 60, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Words) != 3 || out.Words[1].End != 30.05 || out.Words[2].Start != 30.06 || out.Text != "Why sky blue?" {
+		t.Fatalf("expected original next-window predictions, got %+v", out)
+	}
+}
+
+func TestTimestampLongSilenceMetadata(t *testing.T) {
+	result, err := timestampRecording(t.Context(), &timestampTestSamples{remaining: 61 * 16000}, nil, true, func(context.Context, []byte, time.Duration) (openai.TranscriptionTimestampResponse, error) {
+		return openai.TranscriptionTimestampResponse{Language: "english", Words: []openai.TranscriptionWord{}}, nil
+	})
+	if err != nil || result.Duration != 61 || result.Language != "english" || result.Words == nil || len(result.Words) != 0 || result.Segments == nil || len(*result.Segments) != 0 {
+		t.Fatalf("long silence metadata %+v %v", result, err)
+	}
+}

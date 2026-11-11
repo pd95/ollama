@@ -468,8 +468,10 @@ native cleanup. A cancelled request returns no partial successful transcript.
 
 Words crossing a chunk cut are aligned with surrounding context and assigned
 by their interval midpoint. All times include the window's global sample offset.
-Matching boundary words with intersecting intervals are emitted once; repeated
-words at disjoint times are retained. Conflicting overlapping words fail with
+A shared word at intersecting audio times anchors the join; the transition uses
+complete alignment predictions from one window, including matching predecessors
+when necessary. Matching boundary words are emitted once; repeated words at
+disjoint times are retained. Conflicting overlapping words fail with
 HTTP 422 rather than fabricating/clamping timestamps. These controls do not
 guarantee recognition or alignment accuracy at every boundary. Repeat `timestamp_granularities[]` with `segment` to
 include both word and globally offset segments for retained chunk text. The server does not download or

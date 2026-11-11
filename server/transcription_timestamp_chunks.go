@@ -129,6 +129,9 @@ func timestampRecording(ctx context.Context, source audio.SampleStream, original
 // by matching arbitrary transcript suffixes. Context on both sides lets words
 // crossing a cut be recognized and aligned whole. Times are never clamped.
 func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip openai.TranscriptionTimestampResponse, offset, coreStart, coreEnd float64, final bool) error {
+	if out.Language == "" {
+		out.Language = clip.Language
+	}
 	if clip.Text == "" {
 		return nil
 	}
@@ -140,6 +143,13 @@ func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip open
 	if err != nil || len(units) != len(clip.Words) {
 		return timestampFailure(502, "chunk alignment does not cover transcript")
 	}
+	// Join at a shared time-local word, using one window's actual alignment
+	// for the transition. This avoids mixing two independently jittered word
+	// intervals on opposite sides of an artificial core cut.
+	anchor, err := timestampWindowAnchor(out, clip, offset, coreStart)
+	if err != nil {
+		return err
+	}
 	first, last := -1, -1
 	firstOutput := len(out.Words)
 	for i, word := range clip.Words {
@@ -149,7 +159,7 @@ func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip open
 		if math.IsNaN(middle) || math.IsInf(middle, 0) || word.End < word.Start {
 			return timestampFailure(502, "invalid chunk word interval")
 		}
-		if middle < coreStart || middle >= coreEnd && !(final && middle == coreEnd) {
+		if (anchor >= 0 && i <= anchor || anchor < 0 && middle < coreStart) || middle >= coreEnd && !(final && middle == coreEnd) {
 			continue
 		}
 		if len(out.Words) > 0 {
@@ -184,11 +194,62 @@ func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip open
 		out.Text += " "
 	}
 	out.Text += text
-	if out.Language == "" {
-		out.Language = clip.Language
-	}
 	if out.Segments != nil {
 		*out.Segments = append(*out.Segments, openai.TranscriptionSegment{ID: len(*out.Segments), Start: out.Words[firstOutput].Start, End: out.Words[len(out.Words)-1].End, Text: text})
 	}
 	return nil
+}
+
+// timestampWindowAnchor only matches equal words at intersecting audio times.
+// It cannot collapse repeated words in separate intervals. Any replacement
+// times are complete native predictions from the new window, never clamps or
+// averages. Matching predecessors are included when needed to preserve ordering.
+func timestampWindowAnchor(out *openai.TranscriptionTimestampResponse, clip openai.TranscriptionTimestampResponse, offset, coreStart float64) (int, error) {
+	if len(out.Words) == 0 {
+		return -1, nil
+	}
+	last := out.Words[len(out.Words)-1]
+	anchor := -1
+	overlaps := func(a, b openai.TranscriptionWord) bool { return a.Start < b.End && b.Start < a.End }
+	global := func(w openai.TranscriptionWord) openai.TranscriptionWord {
+		w.Start += offset
+		w.End += offset
+		return w
+	}
+	for i, word := range clip.Words {
+		word = global(word)
+		if word.Start > coreStart+timestampOverlapSeconds {
+			break
+		}
+		if strings.EqualFold(word.Word, last.Word) && overlaps(word, last) {
+			if anchor >= 0 {
+				return -1, timestampFailure(422, "ambiguous repeated word at chunk boundary")
+			}
+			anchor = i
+		}
+	}
+	if anchor < 0 {
+		return -1, nil
+	}
+	oldIndex, newIndex := len(out.Words)-1, anchor
+	for oldIndex > 0 && global(clip.Words[newIndex]).Start < out.Words[oldIndex-1].End {
+		if newIndex == 0 {
+			return -1, timestampFailure(422, "inconsistent alignment at chunk boundary")
+		}
+		previous := global(clip.Words[newIndex-1])
+		if !strings.EqualFold(previous.Word, out.Words[oldIndex-1].Word) || !overlaps(previous, out.Words[oldIndex-1]) {
+			return -1, timestampFailure(422, "conflicting words at chunk boundary")
+		}
+		oldIndex--
+		newIndex--
+	}
+	for i := newIndex; i <= anchor; i++ {
+		out.Words[oldIndex+i-newIndex] = global(clip.Words[i])
+	}
+	if out.Segments != nil && len(*out.Segments) > 0 {
+		seg := &(*out.Segments)[len(*out.Segments)-1]
+		seg.Start = min(seg.Start, out.Words[oldIndex].Start)
+		seg.End = out.Words[len(out.Words)-1].End
+	}
+	return anchor, nil
 }

@@ -137,10 +137,25 @@ func runOpenAIAudioTimestamps(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		referenceRaw := postAudioFields(ctx, t, endpoint, "transcriptions", url.Values{"model": {testModel}, "alignment_model": {aligner}, "language": {"en"}, "response_format": {"verbose_json"}, "timestamp_granularities[]": {"word"}}, clip)
+		var reference openai.TranscriptionTimestampResponse
+		if err := json.Unmarshal(referenceRaw, &reference); err != nil {
+			t.Fatal(err)
+		}
+		firstStart := -1.0
+		for _, w := range reference.Words {
+			if strings.EqualFold(w.Word, "sky") && w.End > w.Start {
+				firstStart = 30 - (w.Start+w.End)/2
+				break
+			}
+		}
+		if firstStart < 25 || firstStart >= 30 {
+			t.Fatalf("cannot place complete sky across boundary: %s", referenceRaw)
+		}
 		pcm := make([]float32, 95*rate)
 		// The first sentence crosses the30-second ownership seam. Later sentences
 		// prove offsets beyond the old60-second limit without repeating context.
-		for _, start := range []float64{28.5, 63, 90} {
+		for _, start := range []float64{firstStart, 63, 90} {
 			copy(pcm[int(start*float64(rate)):], samples)
 		}
 		wav := audio.EncodeWAV(pcm, rate)
@@ -168,6 +183,16 @@ func runOpenAIAudioTimestamps(t *testing.T) {
 				if err := validAudioWordIntervals(result.Words, result.Duration); err != nil {
 					t.Fatal(err)
 				}
+				crossing := false
+				for _, w := range result.Words {
+					if strings.EqualFold(w.Word, "sky") && w.Start < 30 && w.End > 30 {
+						crossing = true
+					}
+				}
+				if !crossing {
+					t.Fatalf("boundary word sky was not preserved whole across30seconds: %s", raw)
+				}
+				t.Logf("timestamp-regression %s %s", input.name, raw)
 				for _, word := range []string{"why", "sky", "blue"} {
 					count := 0
 					for _, w := range result.Words {
@@ -179,7 +204,7 @@ func runOpenAIAudioTimestamps(t *testing.T) {
 						t.Fatalf("boundary omission/duplication: word %s count%d, response %s", word, count, raw)
 					}
 				}
-				for _, start := range []float64{28.5, 63, 90} {
+				for _, start := range []float64{firstStart, 63, 90} {
 					found := false
 					for _, w := range result.Words {
 						if w.Start >= start-1 && w.Start < start+5 && strings.EqualFold(w.Word, "blue") {
