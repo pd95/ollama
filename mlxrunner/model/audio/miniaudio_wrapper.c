@@ -7,7 +7,6 @@
 #define MA_NO_NODE_GRAPH
 #define MA_NO_GENERATION
 #define MA_NO_CUSTOM
-#define MA_NO_STDIO
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
 #include "miniaudio_wrapper.h"
@@ -41,6 +40,27 @@ ollama_miniaudio_mp3_decoder* ollama_miniaudio_mp3_init(
     }
     if (result->decoder.pBackend == NULL ||
         ma_data_source_get_data_format(result->decoder.pBackend, &input_format,
+            source_channels, source_rate, NULL, 0) != MA_SUCCESS) {
+        ma_decoder_uninit(&result->decoder);
+        free(result);
+        return NULL;
+    }
+    return result;
+}
+
+ollama_miniaudio_mp3_decoder* ollama_miniaudio_mp3_init_file(
+    const char* path, uint32_t* source_channels, uint32_t* source_rate) {
+    ollama_miniaudio_mp3_decoder* result = calloc(1, sizeof(*result));
+    ma_decoder_config config = ma_decoder_config_init(ma_format_f32, 1, 0);
+    ma_format format;
+    if (result == NULL) return NULL;
+    config.encodingFormat = ma_encoding_format_mp3;
+    if (ma_decoder_init_file(path, &config, &result->decoder) != MA_SUCCESS) {
+        free(result);
+        return NULL;
+    }
+    if (result->decoder.pBackend == NULL ||
+        ma_data_source_get_data_format(result->decoder.pBackend, &format,
             source_channels, source_rate, NULL, 0) != MA_SUCCESS) {
         ma_decoder_uninit(&result->decoder);
         free(result);

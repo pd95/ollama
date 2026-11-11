@@ -963,3 +963,21 @@ type TranscriptionSegment struct {
 	End   float64 `json:"end"`
 	Text  string  `json:"text"`
 }
+
+// TranscriptionWord is one provider-normalized word with recording-relative seconds.
+type TranscriptionWord struct {
+	Word  string  `json:"word"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+}
+
+// TranscriptionTimestampResponse keeps the legacy verbose response unchanged.
+// Words is always an array; Segments is present only when explicitly requested.
+type TranscriptionTimestampResponse struct {
+	Task     string                  `json:"task"`
+	Language string                  `json:"language,omitempty"`
+	Duration float64                 `json:"duration"`
+	Text     string                  `json:"text"`
+	Words    []TranscriptionWord     `json:"words"`
+	Segments *[]TranscriptionSegment `json:"segments,omitempty"`
+}

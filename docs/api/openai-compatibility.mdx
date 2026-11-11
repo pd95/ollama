@@ -396,12 +396,125 @@ Transcribes speech with models that accept audio input.
   - [ ] `srt`, `vtt`
 - [x] `temperature` (default `0`)
 - [x] `stream` (server-sent `transcript.text.delta` and `transcript.text.done` events)
-- [ ] `timestamp_granularities`
+- [x] `timestamp_granularities[]` (`segment`, or experimental `word` timestamps with native Qwen3-ASR and ForcedAligner; requires `verbose_json`; word mode also supports complete-file streaming)
 
 #### Notes
 
 - Audio longer than the model takes at once (30 seconds for current models) is split at pauses and transcribed piece by piece. Streaming sends each piece as it finishes.
 - Each model gets the transcription instructions its publisher documents.
+
+For experimental word timestamps, configure `OLLAMA_ALIGNMENT_MODEL` on the server
+or pass the Ollama extension `alignment_model` in the request. Word mode accepts
+complete English/German WAV or MP3 recordings up to two hours and 512 MiB per request.
+
+#### Native Qwen3-ASR and word timestamps
+
+This fork imports the original `Qwen/Qwen3-ASR-0.6B`, `Qwen/Qwen3-ASR-1.7B` and
+`Qwen/Qwen3-ForcedAligner-0.6B` checkpoints in an MLX-enabled build on Apple
+Silicon. Original BF16 weights remain unchanged on disk; native execution
+promotes them to F32. The ASR models transcribe audio; ForcedAligner supplies
+timestamps for text and is not a replacement transcription model.
+
+Create persistent Modelfiles pointing at each downloaded original snapshot,
+using the same local-directory import pattern as
+[speech models](/capabilities/speech#original-mlx-checkpoints):
+
+```shell
+ollama create --experimental qwen3-asr:0.6b -f ./Modelfile.qwen3-asr-0.6b
+ollama create --experimental qwen3-asr:1.7b -f ./Modelfile.qwen3-asr-1.7b
+ollama create --experimental qwen3-forced-aligner:0.6b -f ./Modelfile.qwen3-forced-aligner-0.6b
+```
+
+Each Modelfile contains `FROM <original-snapshot-directory>` for its respective
+repository. No Python conversion or temporary prepared directory is required.
+These are original floating-point imports, not newly qualified quantizations.
+
+Native ASR is qualified for English/German complete WAVs, with automatic
+language detection when `language` is omitted. It supports up to 60 seconds
+per generation; longer ordinary uploads use the existing clip segmentation,
+whose cross-boundary recognition quality is not qualified. It does not support
+the translation endpoint. `prompt` supplies the ASR system context; `stream=true`
+sends completed clip text after upload and inference, not live incoming audio.
+
+Word timestamps use the standard
+[OpenAI timestamp parameter and word shape](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create).
+An installed native ForcedAligner is additionally required. Set
+`OLLAMA_ALIGNMENT_MODEL=qwen3-forced-aligner:0.6b` when starting the server, or
+use `alignment_model` as an optional Ollama request extension:
+
+```shell
+curl http://localhost:11434/v1/audio/transcriptions \
+  -F model=qwen3-asr:1.7b \
+  -F file=@recording.wav \
+  -F language=de \
+  -F response_format=verbose_json \
+  -F 'timestamp_granularities[]=word' \
+  -F alignment_model=qwen3-forced-aligner:0.6b
+```
+
+Word mode accepts a complete WAV or MP3 upload, up to two hours of decoded audio
+and 512 MiB per request, with `response_format=verbose_json`. Output defaults to non-streaming JSON. WAV recordings up to 60 seconds retain the existing single-clip
+behavior. Longer recordings use 30-second ownership intervals with two seconds
+of overlapping audio context on each side. MP3 decoding is native; FFmpeg and
+Python are not server dependencies. Unsupported/corrupt audio fails the request.
+
+Decoded audio is read incrementally from the temporary upload file. The rolling
+buffer retains at most 60 seconds plus one source sample; only a bounded window
+is resampled and passed to the ASR/aligner at a time. Text/word output grows with
+recording length, within the two-hour cap. Upload files and decoders are closed
+on success, cancellation or error; scheduler leases remain held until positive
+native cleanup. A cancelled request returns no partial successful transcript.
+
+Words crossing a chunk cut are aligned with surrounding context and initially
+assigned by their interval midpoint. A bounded deferred overlap tail is reconciled
+with the next window, so a shifted prediction cannot silently omit a word from
+both chunks. Unresolved boundary correspondence fails with HTTP 422; wholly
+future context is an uncommitted preview that the next chunk may revise. All times include the window's global sample offset.
+A shared word at intersecting audio times anchors the join; the transition uses
+complete alignment predictions from one window, including matching predecessors
+when necessary. Matching boundary words are emitted once; repeated words at
+disjoint times are retained. Conflicting overlapping words fail with
+HTTP 422 rather than fabricating/clamping timestamps. These controls do not
+guarantee recognition or alignment accuracy at every boundary. Repeat `timestamp_granularities[]` with `segment` to
+include both word and globally offset segments for retained chunk text. The server does not download or
+discover an aligner automatically; `alignment_model` without word mode is
+rejected.
+
+The `words` entries contain `word`, `start` and `end`; times are seconds from
+the recording's start. Words use the provider's normalized text, which can omit
+punctuation and combining marks. Short-clip ASR `text` is retained exactly. Long-recording text is assembled from
+owned word spans in the punctuated chunk transcripts. Invalid or
+out-of-recording alignment fails the request; the server does not substitute
+an untimed success. Provider agreement does not establish human-annotated
+recognition or alignment accuracy.
+
+For complete-file word streaming, add `-F stream=true` and use `curl -N`.
+Upload finishes before SSE begins. A bounded preparation pass decodes and discards
+samples to determine the exact duration, then reopens the upload for inference.
+`transcript.progress` reports stage, `scanned_seconds`, and `processed_seconds`;
+`total_seconds` and `percent` appear after preparation. Updates repeat every five
+seconds during long waits. Percentage measures completed audio, not remaining time.
+
+Finalized `transcript.text.delta` events preserve punctuation and spacing.
+`transcript.words.delta` carries `word_offset`, `words` and optional `segments`
+with stable IDs. Append words at the supplied offset and concatenate text deltas
+verbatim. Blocks near a boundary wait until future windows cannot revise them.
+Successful `transcript.text.done` includes `text` and `result`, the full verbose
+JSON object. Progress, word events and the final `result` member are Ollama fork
+extensions; extension-aware SSE clients are needed for aligned batches.
+
+Pre-admission failures retain normal HTTP errors. Once SSE starts, failure emits
+`type: "error"`, OpenAI-shaped `error` details, `status`, and `complete:false`;
+no successful done follows. Disconnect or EOF without done means incomplete,
+even if prefix batches arrived. Disconnects and write timeouts cancel work while
+retaining capacity until native cleanup. Segment-only streaming remains rejected.
+This processes uploaded recordings, not live microphone input.
+
+`/api/experimental/audio/sessions` is a separate custom, default-disabled
+protocol, enabled only by `OLLAMA_EXPERIMENT=asr-streaming`. It is not an OpenAI
+Realtime endpoint. The closed live-caption commitment experiment does not
+establish reliable continuous word commitment; ordinary transcription and
+complete-file timestamps remain separate.
 
 ### `/v1/audio/translations`
 

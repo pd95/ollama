@@ -371,6 +371,9 @@ func (q sourceQuantization) resolved() (quantType string, groupSize int, err err
 }
 
 type sourceModelConfig struct {
+	ThinkerConfig struct {
+		ModelType string `json:"model_type"`
+	} `json:"thinker_config"`
 	ModelType             string   `json:"model_type"`
 	Architectures         []string `json:"architectures"`
 	MaxPositionEmbeddings int32    `json:"max_position_embeddings"`

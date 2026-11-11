@@ -314,6 +314,9 @@ type EnvVar struct {
 	Description string
 }
 
+// AlignmentModel is the optional default imported model for word timestamps.
+func AlignmentModel() string { return strings.TrimSpace(Var("OLLAMA_ALIGNMENT_MODEL")) }
+
 func AsMap() map[string]EnvVar {
 	ret := map[string]EnvVar{
 		"OLLAMA_DEBUG":                {"OLLAMA_DEBUG", LogLevel(), "Show additional debug information (e.g. OLLAMA_DEBUG=1)"},
@@ -350,6 +353,7 @@ func AsMap() map[string]EnvVar {
 		"NO_PROXY":    {"NO_PROXY", String("NO_PROXY")(), "No proxy"},
 	}
 	ret["OLLAMA_MLX_MEDIA_MEMORY_LIMIT"] = EnvVar{"OLLAMA_MLX_MEDIA_MEMORY_LIMIT", MLXMediaMemoryLimit(), "Lower the automatic MLX media peak-memory budget (bytes)"}
+	ret["OLLAMA_ALIGNMENT_MODEL"] = EnvVar{"OLLAMA_ALIGNMENT_MODEL", AlignmentModel(), "Default local ForcedAligner model for transcription word timestamps"}
 
 	if runtime.GOOS != "windows" {
 		// Windows environment variables are case-insensitive so there's no need to duplicate them

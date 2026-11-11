@@ -27,6 +27,13 @@ func prefillChunkSize() int {
 // context length. It is safe to call from any goroutine. On success it
 // populates request.Tokens and adjusts request.Options.NumPredict.
 func (r *Runner) Prepare(request *Request) (err error) {
+	ctx := request.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if r.Model == nil {
 		return errors.New("model not loaded")
 	}
@@ -58,7 +65,7 @@ func (r *Runner) Prepare(request *Request) (err error) {
 			}
 			return fmt.Errorf("this model does not support %s input", kind)
 		}
-		prepared, bound, err := r.expandMedia(mm, request.Prompt, request.Media)
+		prepared, bound, err := r.expandMedia(ctx, mm, request.Prompt, request.Media)
 		if err != nil {
 			return err
 		}
@@ -102,6 +109,11 @@ func skipCleanupOnPanic(cleanup func()) {
 func (r *Runner) TextGenerationPipeline(ctx context.Context, request Request) (err error) {
 	mlx.ResetPeakMemory()
 	mlx.Scoped(func() { err = r.generate(ctx, request) })
+	if r.finishRequestCache() {
+		// Released buffers may still belong to queued device work. Complete
+		// its callbacks before the independent request boundary is reusable.
+		mlx.DefaultStream().Synchronize()
+	}
 	mlx.ClearCache()
 
 	if slog.Default().Enabled(context.TODO(), logutil.LevelTrace) {

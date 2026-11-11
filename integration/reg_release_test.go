@@ -110,6 +110,7 @@ func init() {
 
 		integrationModelsTestCase("audio-response", releaseAudioModels, runAudioResponse),
 		integrationModelsTestCase("openai-audio-transcription", releaseAudioModels, runOpenAIAudioTranscription),
+		integrationModelsTestCase("openai-audio-translation", releaseAudioModels, runOpenAIAudioTranslation),
 		integrationModelsTestCase("openai-chat-audio", releaseAudioModels, runOpenAIChatWithAudio),
 
 		integrationTestCase("context-long-input", smol, runLongInputContext),

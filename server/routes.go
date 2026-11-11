@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -108,6 +109,9 @@ var useClient2 = experimentEnabled("client2")
 var mode string = gin.DebugMode
 
 type Server struct {
+	timestampOnce sync.Once
+	timestamps    *timestampQueue
+	asrSessions   *asrSessionManager
 	addr          net.Addr
 	sched         *Scheduler
 	defaultNumCtx int
@@ -1903,8 +1907,8 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		Runner:            m.Runner,
 	}
 
-	// For safetensors completion, decision and speech models, populate details from config.json.
-	isSafetensorsLLM := m.IsMLX() && (slices.Contains(m.Config.Capabilities, "completion") || slices.Contains(m.Config.Capabilities, "decision") || slices.Contains(m.Config.Capabilities, "speech"))
+	// Native alignment also has tensor layers and no GGUF file to inspect.
+	isSafetensorsLLM := m.IsMLX() && (slices.Contains(m.Config.Capabilities, "completion") || slices.Contains(m.Config.Capabilities, "decision") || slices.Contains(m.Config.Capabilities, "speech") || slices.Contains(m.Config.Capabilities, "alignment"))
 	if isSafetensorsLLM {
 		if info, err := getSafetensorsLLMInfoForRunner(name, req.Runner); err == nil {
 			if arch, ok := info["general.architecture"].(string); ok && arch != "" {
@@ -2430,6 +2434,8 @@ func (s *Server) GenerateRoutes() (http.Handler, error) {
 	r.POST("/api/experimental/web_fetch", s.WebFetchExperimentalHandler)
 	r.GET("/api/experimental/model-recommendations", s.ModelRecommendationsExperimentalHandler)
 
+	s.registerASRSessionRoutes(r)
+
 	// Inference
 	r.GET("/api/ps", s.PsHandler)
 	r.POST("/api/generate", s.withInferenceRequestLogging("/api/generate", s.GenerateHandler)...)
@@ -2559,6 +2565,8 @@ func Serve(ln net.Listener) error {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-signals
+		s.timestampQueue().shutdown()
+		s.closeASRSessions()
 		srvr.Close()
 		schedDone()
 		sched.unloadAllRunners()

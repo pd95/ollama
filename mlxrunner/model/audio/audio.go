@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -34,16 +35,24 @@ var ErrUnrecognized = errors.New("unrecognized audio format")
 
 // DecodeLimit is Decode with a caller-chosen duration cap in seconds.
 func DecodeLimit(data []byte, maxSeconds int) ([]float32, int, error) {
+	return DecodeLimitContext(context.Background(), data, maxSeconds)
+}
+
+// DecodeLimitContext additionally checks cancellation while decoding samples.
+func DecodeLimitContext(ctx context.Context, data []byte, maxSeconds int) ([]float32, int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	if maxSeconds <= 0 {
 		return nil, 0, errors.New("audio duration limit must be positive")
 	}
 	if isMP3(data) {
-		return decodeMP3Duration(data, maxAudioBytes, maxSeconds)
+		return decodeMP3ContextDuration(ctx, data, maxAudioBytes, 0, maxSeconds)
 	}
 	if len(data) < 12 || string(data[0:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
 		return nil, 0, ErrUnrecognized
 	}
-	return decodeWAV(data, maxSeconds)
+	return decodeWAVContext(ctx, data, maxSeconds)
 }
 
 func isMP3(data []byte) bool {
@@ -53,13 +62,27 @@ func isMP3(data []byte) bool {
 
 // EncodeWAV encodes mono samples as 16-bit PCM WAV, clipping to [-1, 1].
 func EncodeWAV(samples []float32, rate int) []byte {
+	out, _ := EncodeWAVContext(context.Background(), samples, rate)
+	return out
+}
+
+// EncodeWAVContext permits cancellation while encoding a prepared clip.
+func EncodeWAVContext(ctx context.Context, samples []float32, rate int) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	out := append(make([]byte, 0, wavHeaderSize+2*len(samples)), WAVHeader(rate, uint32(2*len(samples)))...)
 	out = out[:cap(out)]
 	for i, s := range samples {
+		if i%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		v := int16(math.Round(float64(max(-1, min(1, s))) * math.MaxInt16))
 		binary.LittleEndian.PutUint16(out[wavHeaderSize+2*i:], uint16(v))
 	}
-	return out
+	return out, nil
 }
 
 const wavHeaderSize = 44
@@ -87,7 +110,10 @@ func WAVHeader(rate int, dataBytes uint32) []byte {
 	return h
 }
 
-func decodeWAV(data []byte, maxSeconds int) ([]float32, int, error) {
+func decodeWAVContext(ctx context.Context, data []byte, maxSeconds int) ([]float32, int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	var format uint16
 	var channels, rate, bits int
 	var pcm []byte
@@ -95,6 +121,9 @@ func decodeWAV(data []byte, maxSeconds int) ([]float32, int, error) {
 
 	offset := 12
 	for offset+8 <= len(data) {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		id := string(data[offset : offset+4])
 		size := int(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
 		body := data[offset+8 : min(offset+8+size, len(data))]
@@ -166,8 +195,16 @@ func decodeWAV(data []byte, maxSeconds int) ([]float32, int, error) {
 	if n > maxSeconds*rate {
 		return nil, 0, fmt.Errorf("audio longer than %d seconds", maxSeconds)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	mono := make([]float32, n)
 	for i := range n {
+		if i%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, 0, err
+			}
+		}
 		var sum float64
 		for c := range channels {
 			sum += sample(pcm[(i*channels+c)*stride:])
@@ -203,8 +240,17 @@ var resampleKernel = sync.OnceValue(func() []float64 {
 // Weights are normalized per output sample, which keeps unity gain where
 // the clip edges truncate the kernel.
 func Resample(samples []float32, from, to int) []float32 {
+	out, _ := ResampleContext(context.Background(), samples, from, to)
+	return out
+}
+
+// ResampleContext preserves Resample's kernel and checks cancellation during work.
+func ResampleContext(ctx context.Context, samples []float32, from, to int) ([]float32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if from == to || len(samples) < 2 {
-		return samples
+		return samples, nil
 	}
 
 	ratio := float64(to) / float64(from)
@@ -215,6 +261,11 @@ func Resample(samples []float32, from, to int) []float32 {
 	n := int((int64(len(samples))*int64(to) + int64(from) - 1) / int64(from))
 	out := make([]float32, n)
 	for i := range out {
+		if i%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		center := float64(i) / ratio
 		lo := max(int(math.Ceil(center-halfWidth)), 0)
 		hi := min(int(math.Floor(center+halfWidth)), len(samples)-1)
@@ -234,7 +285,7 @@ func Resample(samples []float32, from, to int) []float32 {
 			out[i] = float32(acc / norm)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // Cuts go at the lowest-energy window of splitWindowMillis found within
@@ -249,40 +300,69 @@ const (
 // share so a boundary lands on a pause where the clip allows. Chunks are
 // subslices of samples.
 func Split(samples []float32, rate, maxSeconds int) [][]float32 {
+	chunks, _ := SplitContext(context.Background(), samples, rate, maxSeconds)
+	return chunks
+}
+
+// SplitContext checks cancellation while locating the same quiet cut points.
+func SplitContext(ctx context.Context, samples []float32, rate, maxSeconds int) ([][]float32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	maxChunk := rate * maxSeconds
 	span := rate * splitSearchSeconds
 	window := max(rate*splitWindowMillis/1000, 1)
 	var chunks [][]float32
 	for k := (len(samples) + maxChunk - 1) / maxChunk; k > 1; k-- {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		target := len(samples) / k
 		// The rest of the clip must still fit in k-1 chunks.
 		lo := max(target-span/2, len(samples)-(k-1)*maxChunk)
 		hi := min(target+span/2, maxChunk)
-		cut := lo + quietestPoint(samples[lo:hi], window)
+		point, err := quietestPointContext(ctx, samples[lo:hi], window)
+		if err != nil {
+			return nil, err
+		}
+		cut := lo + point
 		chunks = append(chunks, samples[:cut])
 		samples = samples[cut:]
 	}
-	return append(chunks, samples)
+	return append(chunks, samples), nil
 }
 
 // quietestPoint returns the center of the lowest-energy window in x,
 // the latest one on ties.
-func quietestPoint(x []float32, window int) int {
+func quietestPointContext(ctx context.Context, x []float32, window int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if len(x) <= window {
-		return len(x) / 2
+		return len(x) / 2, nil
 	}
 	var energy float64
-	for _, v := range x[:window] {
+	for i, v := range x[:window] {
+		if i%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+		}
 		energy += float64(v) * float64(v)
 	}
 	best, bestEnergy := 0, energy
 	for i := window; i < len(x); i++ {
+		if i%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+		}
 		energy += float64(x[i])*float64(x[i]) - float64(x[i-window])*float64(x[i-window])
 		if energy <= bestEnergy {
 			best, bestEnergy = i-window+1, energy
 		}
 	}
-	return best + window/2
+	return best + window/2, nil
 }
 
 func sinc(x float64) float64 {

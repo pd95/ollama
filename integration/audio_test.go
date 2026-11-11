@@ -12,6 +12,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -171,8 +172,7 @@ func testAudioResponseForModel(t *testing.T, ctx context.Context, client *api.Cl
 	}, initialTimeout, streamTimeout)
 }
 
-// runOpenAIAudioTranscription tests the /v1/audio/transcriptions and
-// /v1/audio/translations endpoints.
+// runOpenAIAudioTranscription tests the /v1/audio/transcriptions endpoint.
 func runOpenAIAudioTranscription(t *testing.T, models []string) {
 	for _, model := range testModels(models) {
 		t.Run(model, func(t *testing.T) {
@@ -226,12 +226,21 @@ func runOpenAIAudioTranscription(t *testing.T, models []string) {
 					t.Errorf("transcribed %d questions, want 4: %+v", questions, result.Segments)
 				}
 			})
+		})
+	}
+}
 
-			t.Run("translation", func(t *testing.T) {
-				text := postAudioText(ctx, t, endpoint, "translations",
-					map[string]string{"model": model, "language": "en", "to_language": "es"}, clip)
-				requireWords(t, text, "cielo", "azul")
-			})
+func runOpenAIAudioTranslation(t *testing.T, models []string) {
+	for _, model := range testModels(models) {
+		t.Run(model, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+			defer cancel()
+			client, endpoint, cleanup := InitServerConnection(ctx, t)
+			defer cleanup()
+			setupAudioModel(ctx, t, client, model)
+			text := postAudioText(ctx, t, endpoint, "translations",
+				map[string]string{"model": model, "language": "en", "to_language": "es"}, decodeTestAudio(t))
+			requireWords(t, text, "cielo", "azul")
 		})
 	}
 }
@@ -255,17 +264,42 @@ type audioTextResult struct {
 // postAudio posts clip to an OpenAI audio endpoint and decodes the response.
 func postAudio(ctx context.Context, t *testing.T, endpoint, path string, fields map[string]string, clip []byte) audioTextResult {
 	t.Helper()
+	values := url.Values{}
+	for key, value := range fields {
+		values.Set(key, value)
+	}
+	respBody := postAudioFields(ctx, t, endpoint, path, values, clip)
+
+	var result audioTextResult
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		t.Fatalf("decode %s: %v", respBody, err)
+	}
+	return result
+}
+
+// postAudioFields preserves repeated form fields and raw response member presence.
+func postAudioFields(ctx context.Context, t *testing.T, endpoint, path string, fields url.Values, clip []byte) []byte {
+	t.Helper()
+
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	for k, v := range fields {
-		writer.WriteField(k, v)
+	for k, values := range fields {
+		for _, v := range values {
+			if err := writer.WriteField(k, v); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	part, err := writer.CreateFormFile("file", "prompt.wav")
 	if err != nil {
 		t.Fatal(err)
 	}
-	part.Write(clip)
-	writer.Close()
+	if _, err := part.Write(clip); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/v1/audio/%s", endpoint, path), &body)
 	if err != nil {
@@ -284,11 +318,7 @@ func postAudio(ctx context.Context, t *testing.T, endpoint, path string, fields 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, respBody)
 	}
-	var result audioTextResult
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		t.Fatalf("decode %s: %v", respBody, err)
-	}
-	return result
+	return respBody
 }
 
 func requireWords(t *testing.T, text string, words ...string) {

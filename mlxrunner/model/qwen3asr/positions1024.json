@@ -1,0 +1,17 @@
+{
+  "model": "Qwen/Qwen3-ASR-1.7B",
+  "provider_commit": "7c6daf77a2421100f5fb066495372c00129d39ff",
+  "provider_module_sha256": "2fb5d98da1933748f5117ee05ce4e7150c9ead8154fb8e25f7af3968b853adc7",
+  "shape": [
+    13,
+    1024
+  ],
+  "dtype": "float32",
+  "byte_order": "little",
+  "sha256": "a0836c1315afdc06dbe9e397340b012641f6a269171206123bb851d13480856d",
+  "torch_version": "2.15.0",
+  "generation": "pinned original provider CPU positional embedding; first13 rows",
+  "also_independently_verified_for": [
+    "Qwen/Qwen3-ForcedAligner-0.6B"
+  ]
+}

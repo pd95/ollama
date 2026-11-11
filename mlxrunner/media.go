@@ -1,6 +1,7 @@
 package mlxrunner
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -174,13 +175,20 @@ func (m *requestMedia) close() {
 // expandMedia tokenizes the [img-N]-tagged prompt into segments, expands
 // them in a single PrepareMedia call, and validates the authored items
 // before keying cache identity on them.
-func (r *Runner) expandMedia(mm model.MediaModel, prompt string, media []llm.MediaData) (*model.PreparedRequest, []mediaItem, error) {
+type contextMediaPreparer interface {
+	PrepareMediaContext(context.Context, []model.Segment) (*model.PreparedRequest, error)
+}
+
+func (r *Runner) expandMedia(ctx context.Context, mm model.MediaModel, prompt string, media []llm.MediaData) (*model.PreparedRequest, []mediaItem, error) {
 	matches := imgTagPattern.FindAllStringSubmatch(prompt, -1)
 	parts := imgTagPattern.Split(prompt, -1)
 
 	referenced := make([]bool, len(media))
 	var segments []model.Segment
 	for i, part := range parts {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		segments = append(segments, model.Segment{Tokens: r.Tokenizer.Encode(part, i == 0 && r.Tokenizer.AddBOS())})
 		if i >= len(matches) {
 			continue
@@ -207,7 +215,13 @@ func (r *Runner) expandMedia(mm model.MediaModel, prompt string, media []llm.Med
 		}
 	}
 
-	prepared, err := mm.PrepareMedia(segments)
+	var prepared *model.PreparedRequest
+	var err error
+	if aware, ok := mm.(contextMediaPreparer); ok {
+		prepared, err = aware.PrepareMediaContext(ctx, segments)
+	} else {
+		prepared, err = mm.PrepareMedia(segments)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
