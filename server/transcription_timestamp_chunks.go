@@ -181,7 +181,27 @@ func appendTimestampWindow(out *openai.TranscriptionTimestampResponse, clip open
 		if math.IsNaN(middle) || math.IsInf(middle, 0) || word.End < word.Start {
 			return timestampFailure(502, "invalid chunk word interval")
 		}
-		if (anchor >= 0 && i <= anchor || anchor < 0 && firstDeferred >= 0 && i < firstDeferred || anchor < 0 && firstDeferred < 0 && middle < coreStart) || middle >= coreEnd && !(final && middle == coreEnd) {
+		owned := middle >= coreStart && (middle < coreEnd || final && middle == coreEnd)
+		if anchor >= 0 && i <= anchor {
+			if owned {
+				committed := false
+				for j := len(out.Words) - 1; j >= 0; j-- {
+					previous := out.Words[j]
+					if previous.End < word.Start {
+						break
+					}
+					if strings.EqualFold(previous.Word, word.Word) && timestampWordCorresponds(previous, word) {
+						committed = true
+						break
+					}
+				}
+				if !committed {
+					return timestampFailure(422, "new owned word conflicts with committed boundary")
+				}
+			}
+			continue
+		}
+		if middle >= coreEnd && !(final && middle == coreEnd) || anchor < 0 && !owned && (firstDeferred < 0 || i < firstDeferred) {
 			continue
 		}
 		if len(out.Words) > 0 {
@@ -232,7 +252,6 @@ func timestampWindowAnchor(out *openai.TranscriptionTimestampResponse, clip open
 	}
 	last := out.Words[len(out.Words)-1]
 	anchor := -1
-	overlaps := func(a, b openai.TranscriptionWord) bool { return a.Start < b.End && b.Start < a.End }
 	global := func(w openai.TranscriptionWord) openai.TranscriptionWord {
 		w.Start += offset
 		w.End += offset
@@ -243,7 +262,7 @@ func timestampWindowAnchor(out *openai.TranscriptionTimestampResponse, clip open
 		if word.Start > coreStart+timestampOverlapSeconds {
 			break
 		}
-		if strings.EqualFold(word.Word, last.Word) && overlaps(word, last) {
+		if strings.EqualFold(word.Word, last.Word) && timestampWordCorresponds(word, last) {
 			if anchor >= 0 {
 				return -1, timestampFailure(422, "ambiguous repeated word at chunk boundary")
 			}
@@ -259,7 +278,7 @@ func timestampWindowAnchor(out *openai.TranscriptionTimestampResponse, clip open
 			return -1, timestampFailure(422, "inconsistent alignment at chunk boundary")
 		}
 		previous := global(clip.Words[newIndex-1])
-		if !strings.EqualFold(previous.Word, out.Words[oldIndex-1].Word) || !overlaps(previous, out.Words[oldIndex-1]) {
+		if !strings.EqualFold(previous.Word, out.Words[oldIndex-1].Word) || !timestampWordCorresponds(previous, out.Words[oldIndex-1]) {
 			return -1, timestampFailure(422, "conflicting words at chunk boundary")
 		}
 		oldIndex--
@@ -300,7 +319,7 @@ func timestampDeferredMatch(deferred, current []openai.TranscriptionWord, offset
 		for i, word := range current {
 			word.Start += offset
 			word.End += offset
-			if strings.EqualFold(old.Word, word.Word) && old.Start < word.End && word.Start < old.End {
+			if strings.EqualFold(old.Word, word.Word) && timestampWordCorresponds(old, word) {
 				if match >= 0 {
 					return -1, timestampFailure(422, "ambiguous deferred word at chunk boundary")
 				}
@@ -316,4 +335,17 @@ func timestampDeferredMatch(deferred, current []openai.TranscriptionWord, offset
 		previous = match
 	}
 	return first, nil
+}
+
+// Native repair permits zero-duration words. Equal points and a unique point
+// inside another prediction can correspond; two positive intervals that only
+// touch remain separate events. Callers reject multiple candidate matches.
+func timestampWordCorresponds(a, b openai.TranscriptionWord) bool {
+	if a.Start == a.End {
+		return b.Start <= a.Start && a.Start <= b.End
+	}
+	if b.Start == b.End {
+		return a.Start <= b.Start && b.Start <= a.End
+	}
+	return a.Start < b.End && b.Start < a.End
 }

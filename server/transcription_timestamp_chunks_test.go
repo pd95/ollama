@@ -249,3 +249,48 @@ func TestTimestampInvalidStreamDataStatus(t *testing.T) {
 		t.Fatalf("cancellation reclassified: %v", err)
 	}
 }
+
+func TestTimestampDeferredPointAndOwnedPrefix(t *testing.T) {
+	for _, point := range []bool{false, true} {
+		end := 31.2
+		currentEnd := 3.2
+		if point {
+			end = 31
+			currentEnd = 3
+		}
+		out := openai.TranscriptionTimestampResponse{Text: "One", Words: []openai.TranscriptionWord{{Word: "One", Start: 27, End: 27.5}}}
+		deferred := []openai.TranscriptionWord{{Word: "boundary", Start: 31, End: end}}
+		clip := openai.TranscriptionTimestampResponse{Text: "This boundary Next", Words: []openai.TranscriptionWord{{Word: "This", Start: 2.2, End: 2.4}, {Word: "boundary", Start: 3, End: currentEnd}, {Word: "Next", Start: 4, End: 5}}}
+		if err := appendTimestampWindow(&out, clip, 28, 30, 60, false, deferred); err != nil {
+			t.Fatal(err)
+		}
+		if out.Text != "One This boundary Next" || len(out.Words) != 4 {
+			t.Fatalf("current owned prefix lost: %+v", out)
+		}
+	}
+}
+
+func TestTimestampPointCorrespondence(t *testing.T) {
+	for _, tc := range []struct {
+		a, b openai.TranscriptionWord
+		want bool
+	}{
+		{openai.TranscriptionWord{Start: 1, End: 1}, openai.TranscriptionWord{Start: 1, End: 1}, true},
+		{openai.TranscriptionWord{Start: 1, End: 1}, openai.TranscriptionWord{Start: 1.1, End: 1.1}, false},
+		{openai.TranscriptionWord{Start: 1, End: 1}, openai.TranscriptionWord{Start: .9, End: 1.1}, true},
+		{openai.TranscriptionWord{Start: .9, End: 1.1}, openai.TranscriptionWord{Start: 1, End: 1}, true},
+		{openai.TranscriptionWord{Start: 1, End: 2}, openai.TranscriptionWord{Start: 2, End: 3}, false},
+	} {
+		if got := timestampWordCorresponds(tc.a, tc.b); got != tc.want {
+			t.Fatalf("correspondence %+v %+v =%v", tc.a, tc.b, got)
+		}
+	}
+}
+
+func TestTimestampOwnedPrefixBeforeCommittedAnchorFails(t *testing.T) {
+	out := openai.TranscriptionTimestampResponse{Text: "sky", Words: []openai.TranscriptionWord{{Word: "sky", Start: 29.6, End: 30.1}}}
+	clip := openai.TranscriptionTimestampResponse{Text: "This sky Next", Words: []openai.TranscriptionWord{{Word: "This", Start: 2, End: 2.04}, {Word: "sky", Start: 2.05, End: 2.65}, {Word: "Next", Start: 3, End: 4}}}
+	if err := appendTimestampWindow(&out, clip, 28, 30, 60, false, nil); audioTextErrorStatus(err, 500) != 422 {
+		t.Fatalf("new owned prefix silently lost: %+v %v", out, err)
+	}
+}
